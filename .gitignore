@@ -1,0 +1,35 @@
+# --- secrets & local config (NEVER commit) ---------------------------------
+config.toml
+*.token.json
+schwab_token.json
+token.json
+.env
+.secrets
+
+# --- runtime state & outputs ------------------------------------------------
+.swing/
+reports/
+*.parquet
+*.log
+
+# --- python -----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# NOTE: uv.lock IS committed on purpose (reproducible installs).
+
+# --- editors / OS -----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
