@@ -58,7 +58,7 @@ and refuses. That refusal is the feature.
 
 ```
 data/universe/*.csv ─┐
-                     ├─► universe ─► DataProvider (yfinance | schwab)
+                     ├─► universe ─► DataProvider (yfinance | schwab | stooq)
 config.toml ─────────┘                    │
                                           ▼
                                     parquet cache
@@ -86,6 +86,12 @@ The important arrow is the horizontal one. The backtester and the live scanner
 import **the same** `strategy/rules.py` and `strategy/sizing.py`. There is no
 second copy of the logic to drift, which is the usual way a backtested edge
 quietly stops existing in production.
+
+Data comes from yfinance by default, Schwab once your app is approved, or
+**stooq** as a free fallback when Yahoo breaks — stooq bars are split-adjusted
+but *not* dividend-adjusted, so long-horizon numbers drift, and because the
+cache does not record who wrote it you must delete `data/cache/` when switching
+providers.
 
 ---
 
@@ -128,6 +134,12 @@ flagged as unjustified — in [docs/indicator-research.md](docs/indicator-resear
 - ±25% parameter sensitivity tables, read for **flatness** rather than for the
   best cell
 - component ablations, so each rule has to earn its place
+- a buy-and-hold **benchmark** (the regime symbol, SPY by default) plotted on
+  the equity curve and reported as excess CAGR — beating a flat line is the
+  minimum bar
+- **block-bootstrap confidence intervals** on the out-of-sample curve (p5/p50/p95
+  CAGR and max drawdown, plus P(CAGR ≤ 0)) — a floor on the uncertainty, not an
+  estimate of it
 - byte-identical reruns; every report carries the config hash, a fingerprint of
   the exact bars consumed, and the git commit
 
@@ -137,9 +149,13 @@ flagged as unjustified — in [docs/indicator-research.md](docs/indicator-resear
   *current* index members, so companies that went to zero are simply absent.
   `swing backtest --etf-only` is the survivorship-free lower bound; read the
   pair as a range and trust the floor.
-- apply the **earnings blackout**, because free historical earnings calendars
-  do not reach back to 2010. The live scanner does apply it, so live takes
-  fewer trades than the backtest implies. Every report says so.
+- apply the **earnings blackout** out of the box, because free historical
+  earnings calendars do not reach back to 2010. The live scanner does apply it,
+  so live takes fewer trades than the backtest implies, and every report says
+  so. This one is now closable: point `[data] earnings_calendar` at a
+  historical calendar CSV and the backtest applies the same blackout live uses
+  (symbols missing from your file stay unprotected — partial calendar, partial
+  fix). Without a calendar the caveat above stands unchanged.
 - undo the fact that a human chose these indicators, this universe and this
   period after reading about what worked historically. Walk-forward bounds how
   much you can fool yourself; it does not eliminate it.
@@ -153,6 +169,7 @@ flagged as unjustified — in [docs/indicator-research.md](docs/indicator-resear
 | 17:30 ET | `swing scan` | refresh cache → rank → size → sheet → phone/email/desktop |
 | 09:00 ET | `swing confirm` | re-quote; picks that gapped >1 ATR are cancelled, small moves re-sized so the dollar risk stays put |
 | you | place the orders | v1: from the drafted JSON or by hand in thinkorswim |
+| you | `swing journal add ...` | record the fill, or tomorrow's scan thinks you are flat |
 | weekly | `swing auth` | Schwab refresh tokens last 7 days. Not negotiable. |
 
 ```bash
@@ -214,6 +231,7 @@ in thinkorswim before doing anything else.**
 
 ```
 config.example.toml         every knob, annotated; copy to config.toml (gitignored, 600)
+CLAUDE.md                   orientation for agent sessions: commands, invariants, conventions
 src/swing/
   cli.py commands.py        entry points
   config.py                 layered config + strategy-only hash
@@ -231,7 +249,7 @@ docs/
   indicator-research.md     every default traced to evidence or an ablation
   schwab-setup.md           developer account → first live quote
   runbook.md                daily/weekly operation and failure recovery
-tests/                      305 tests, no network
+tests/                      439 tests, no network
 ```
 
 ---
@@ -248,6 +266,7 @@ swing execute [--live] [--yes]
 swing auth [--check] [--force]
 swing notify-test
 swing schedule install|uninstall|status|print
+swing journal add|exit|stop|show      record manual fills; inspect the event log
 swing positions
 swing kill [--release]
 ```

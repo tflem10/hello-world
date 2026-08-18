@@ -34,13 +34,55 @@ min_dollar_volume = 5_000_000.0    # 20-day average dollar volume floor
 max_symbols = 0                    # 0 = no cap; useful to speed up experiments
 
 [data]
-provider = "yfinance"              # "yfinance" | "schwab"
+# "yfinance" | "schwab" | "stooq".
+#   yfinance — the default. Split- and dividend-adjusted; free; the least
+#              reliable link in the chain (undocumented endpoints).
+#   schwab   — your broker's own data, once the app is approved.
+#   stooq    — free daily CSV fallback for when Yahoo breaks. Read this before
+#              switching: Stooq bars are split-adjusted but *NOT*
+#              dividend-adjusted, so long-horizon results drift away from
+#              yfinance by roughly the compounded dividend yield (largest for
+#              high-yield names and multi-year runs, small over a few-week
+#              hold). It publishes no earnings dates and no fundamentals, so
+#              those soft filters fail *open* — every stock passes them. Cold
+#              backfill is slow: one request per symbol with a
+#              `request_pause_sec` politeness pause between them (~1s/symbol,
+#              so ~15 min for 1,000 names), and Stooq enforces a daily hits
+#              limit that comes back as a 200 with "exceeded the daily hits
+#              limit" in the body — the run warns once and the remaining
+#              symbols simply have no fresh bars.
+# CAVEAT, and it bites silently: the bar cache does NOT record which provider
+# wrote each parquet file. Switching providers with an existing cache splices
+# two different adjustment bases into one series for the same symbol, which
+# looks like a price jump the strategy will happily trade. Delete data/cache/
+# and re-backfill whenever you change this key.
+provider = "yfinance"
 cache_dir = "data/cache"
 history_start = "2005-01-01"       # cache backfill start (backtest starts later)
 max_stale_days = 5                 # warn if cached bars are older than this
 request_batch_size = 50            # symbols per yfinance download call
-request_pause_sec = 1.0            # politeness pause between batches
+request_pause_sec = 1.0            # politeness pause between batches (per symbol on stooq)
+request_timeout_sec = 15.0         # per-request HTTP timeout (used by the stooq provider)
 absent_retry_days = 7              # symbols that return no data are skipped this long
+
+# Optional path to a user-supplied historical earnings calendar CSV. Empty (the
+# default) = no calendar, and the backtest runs *without* the earnings blackout
+# the live scanner applies, warning loudly on every run.
+#
+# Supply one and the backtest applies the same blackout as live, the warning
+# disappears, and every report records the file plus its symbol/date counts in
+# the manifest. Format: a header row containing `symbol` and `date` (any order,
+# case-insensitive), ISO YYYY-MM-DD dates, one row per announcement; `#`
+# comments and blank lines are skipped. Full spec and failure modes are in the
+# docstring of src/swing/data/earnings_calendar.py.
+#
+# Two honest warnings:
+#   * a path that does not exist ABORTS the backtest — this is deliberate, a
+#     typo must not quietly downgrade you to "no blackout";
+#   * symbols absent from the file get NO protection. A partial calendar is
+#     partial protection, and the run-level warning still disappears because
+#     *a* calendar was supplied. Coverage is your responsibility.
+earnings_calendar = ""
 
 [strategy]
 name = "trend_momentum_core"
@@ -200,3 +242,29 @@ log_dir = "~/.swing/logs"
 [reports]
 dir = "reports"
 open_in_browser = false
+
+# Circular block-bootstrap confidence intervals on the walk-forward out-of-sample
+# equity curve: p5/p50/p95 for CAGR and max drawdown, plus P(CAGR <= 0). Blocks
+# of consecutive daily returns are resampled with replacement, so
+# autocorrelation and volatility clustering survive the resampling.
+#
+# Reporting only — these numbers never change a trade, which is why they live
+# under [reports] and not [backtest]. `seed` is fixed so two runs of the same
+# report are byte-identical.
+#
+# Read them honestly: resampling ONE historical path can only reshuffle the
+# regimes that path happened to contain, and the parameters were already chosen
+# before the resampling started. The interval is a FLOOR on the uncertainty,
+# not an estimate of it — the true one is wider. A wide interval is conclusive
+# (indistinguishable from noise); a narrow one is merely inconclusive. Curves
+# with fewer than 60 daily returns get no interval at all.
+#
+# The block is shipped commented out because every value below is exactly what
+# the code uses when it is absent (see report.BOOTSTRAP_DEFAULTS). Uncomment
+# the whole block to change one.
+#
+#   [reports.bootstrap]
+#   enabled = true
+#   n_resamples = 1000
+#   block_days = 20
+#   seed = 7

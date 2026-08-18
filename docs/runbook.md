@@ -91,13 +91,27 @@ For each confirmed pick, in Schwab or thinkorswim:
 Then record it so the scanner knows you are in:
 
 ```bash
-python -c "from swing.config import load_config; \
-from swing.execution.journal import record_entry; \
-record_entry(load_config(), 'AAPL', 12, 190.55, 182.10, 5.70)"
+swing journal add AAPL 12 190.55 182.10 --trail 5.70
 ```
+
+`add SYMBOL SHARES PRICE STOP`, plus optional `--trail OFFSET`, `--order-id ID`
+and `--note TEXT`. If you already hold the symbol, an `add` whose stop is
+*below* the stop on record is refused — re-entering at a worse stop is almost
+always a typo. Pass `--force` when you actually mean it.
 
 If you skip this, tomorrow's scan thinks you are flat and will happily suggest
 a fifth position while you hold four.
+
+When the trail ratchets and you move the resting stop at the broker, tell the
+journal too:
+
+```bash
+swing journal stop AAPL 186.40
+```
+
+Stops only go up: lowering one needs `--force`, because the trailing discipline
+is the thing that bounds your loss. `swing journal show [--limit N]` prints the
+tail of the event log when you want to see what was recorded.
 
 ### Managing open positions
 
@@ -136,6 +150,21 @@ swing backtest --walk-forward     # re-validate; the gate is bound to the config
 Any edit to `[account]`, `[universe]`, `[strategy]` or `[backtest]` changes the
 config hash, which re-locks the gate until you re-run the walk-forward. This is
 deliberate: it makes "just nudge the stop and see" cost something.
+
+### Closing the earnings gap in the backtest
+
+By default the backtest runs *without* the earnings blackout the live scanner
+applies, and says so on every report. If you get hold of a historical earnings
+calendar — a paid export, a broker download, a hand-built file — point
+`[data] earnings_calendar` at it (`symbol,date` header, ISO dates, `#` comments
+allowed; the format is spelled out in `src/swing/data/earnings_calendar.py`)
+and the backtest applies the same blackout, the warning disappears, and the
+report manifest records the file and how many symbols and dates it held. Two
+things to know: a path that does not exist aborts the run rather than quietly
+falling back, and **symbols missing from the file get no protection at all**
+while the run-level warning still goes away — a calendar covering 50 of 500
+names is a partial fix that looks like a complete one. The key lives under
+`[data]`, so adding it does not change the config hash or re-lock the gate.
 
 ---
 
@@ -205,6 +234,15 @@ scan warns "data refresh failed" and the sheet is based on yesterday's prices.
 - Try `uv pip install --python .venv/bin/python -U yfinance` — breakage is
   usually fixed upstream within days.
 - If you have Schwab approved, set `[data] provider = "schwab"`.
+- Otherwise set `[data] provider = "stooq"` — a free daily CSV source that
+  needs no key. **Delete `data/cache/` and re-backfill when you switch**: the
+  cache does not record which provider wrote a file, so mixing sources splices
+  two adjustment bases into one series and manufactures a price jump out of
+  nothing. Stooq bars are split-adjusted but **not dividend-adjusted**, so
+  numbers from a long backtest drift from yfinance's; it also publishes no
+  earnings dates or fundamentals, so those soft filters fail open. Fine for
+  keeping the nightly scan alive, not a substitute for re-validating on
+  yfinance or Schwab data.
 
 ### The Schwab token expired
 
@@ -251,10 +289,12 @@ cash and the duplicate check are all wrong too.
 Fix it by appending corrective events:
 
 ```bash
-python -c "from swing.config import load_config; \
-from swing.execution.journal import record_exit; \
-record_exit(load_config(), 'AAPL', 12, 195.00, reason='closed by hand')"
+swing journal exit AAPL 12 195.00 --reason "closed by hand"
+swing journal show --limit 20      # check what you just wrote
 ```
+
+`exit SYMBOL SHARES PRICE` handles partial exits too — pass the shares you
+actually sold.
 
 The journal is append-only on purpose. Correct it by adding events, not by
 editing history.
@@ -294,6 +334,7 @@ instructions is the variant the backtest actually validated.
 | `config.toml` | every setting. Secrets. chmod 600, gitignored. |
 | `data/cache/bars/*.parquet` | price history. Safe to delete; re-backfill. |
 | `data/cache/absent.json` | symbols that returned nothing, skipped for a week |
+| your `[data] earnings_calendar` CSV | optional; the backtest reads it and records it in the report manifest |
 | `reports/YYYY-MM-DD-walkforward/` | the report the gate reads |
 | `reports/scan-YYYY-MM-DD/` | pick sheet, renderings, drafted order JSON |
 | `~/.swing/journal.jsonl` | append-only record of everything. **Back this up.** |

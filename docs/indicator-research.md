@@ -393,8 +393,8 @@ engine models exactly this: the fill is the open, not the stop, and such trades
 routinely lose more than 1R. A 10-day blackout removes the single largest
 source of that risk.
 
-**This is the one place where backtest and live deliberately differ**, and it
-is called out in every report:
+**By default this is the one place where backtest and live deliberately
+differ**, and it is called out in every report:
 
 > Free data has no historical earnings calendar reaching back to 2010.
 > The backtest therefore runs **without** the earnings blackout, while the live
@@ -402,8 +402,20 @@ is called out in every report:
 > backtest implies. The engine emits this as a warning on every run rather than
 > silently ignoring it.
 
-If you obtain a historical earnings calendar, pass it to `run_backtest(...,
-earnings=...)` and the blackout is applied and the warning disappears.
+That divergence is now closable rather than permanent. Point `[data]
+earnings_calendar` at a historical calendar CSV (`symbol,date` header, ISO
+dates; format and failure modes in `src/swing/data/earnings_calendar.py`) and
+the backtest applies the same blackout the live scanner does — the warning
+above disappears and the report manifest records the file, its symbol count and
+its date count. The programmatic route still exists: `run_backtest(...,
+earnings={"AAPL": [date(2024, 2, 1), ...]})`.
+
+Keep the caveat that survives it: **coverage is on you.** Symbols absent from
+your file get no blackout at all, exactly as before, and the loader cannot tell
+"never reported" from "missing from my file". A calendar covering 50 of 500
+names buys protection for 50 while removing the run-level warning for all 500 —
+a partial fix that presents as a complete one. Prefer a calendar spanning the
+whole universe and the whole backtest window.
 
 ---
 
