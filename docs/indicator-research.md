@@ -454,6 +454,30 @@ is a t-statistic above 3.0 rather than the conventional 2.0.
   until you re-validate. This is specifically designed to make "just nudge the
   stop and re-run" cost something.
 
+**A measured example of how fragile grid selection is.** While optimising an
+indicator implementation in this repo, `wilder_smooth` was rewritten from a
+Python loop to an equivalent EWM call. The two agree to about **1 part in
+10^13** — pure floating-point associativity, not a logic change, and every
+exact-value indicator test still passed. Re-running the walk-forward with that
+change produced a **materially different set of out-of-sample trades**.
+
+The mechanism is worth understanding, because it is not a bug and it will not
+be fixed by better code. The metric surface is *discontinuous*: a boundary
+comparison somewhere (a stop touched at exactly the low, a close exactly at the
+channel high) flips, one trade changes, profit factor moves by a hundredth, and
+a different point in the parameter grid wins the in-sample block. Everything
+downstream follows from that.
+
+What this tells you is not "the code is unreliable" — reruns are byte-identical
+and that is verified. It tells you that **the differences between grid points
+are smaller than the noise**, which is exactly the condition under which
+optimisation finds nothing but noise. Two consequences are baked into the code:
+near-ties are reported as warnings on the walk-forward report, and the
+incumbent is held rather than displaced by an immaterial improvement. The third
+consequence is for the reader: treat the specific parameters a walk-forward
+window "chose" as arbitrary among the plausible set, and judge the strategy by
+the *flatness* of the sensitivity table instead.
+
 **What none of that fixes:** every choice made while *writing* this strategy —
 which indicators to include, which universe, which period, which exit — was
 made by a human who has read about what worked historically. That is

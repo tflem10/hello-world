@@ -22,6 +22,13 @@ Two honest caveats:
   in the shipped config has 27 points, not 27,000.
 * Each out-of-sample block is one year. A handful of years is a small sample,
   and the confidence interval on any of these statistics is wide.
+* The objective surface is **discontinuous**. A change of one part in 10^13 in
+  an indicator — well inside floating-point noise — has been observed to change
+  which grid point wins a window, and therefore the whole out-of-sample trade
+  set. Runs are byte-reproducible, but the *parameter choice* is not robust,
+  which is itself the finding: if the grid points cannot be told apart by more
+  than noise, the optimiser has not found an optimum. Near-ties are reported as
+  warnings; see docs/indicator-research.md §14.
 """
 
 from __future__ import annotations
@@ -112,6 +119,19 @@ def grid_points(grid: dict) -> list[dict]:
     keys = sorted(grid)
     combos = itertools.product(*(grid[k] for k in keys))
     return [dict(zip(keys, values, strict=True)) for values in combos]
+
+
+# Two parameter sets whose objective differs by less than this are treated as
+# indistinguishable, and the first in sorted order wins.
+#
+# This is not cosmetic. Grid scores routinely land within a rounding error of
+# each other, and without a tie band the "winner" flips on floating-point
+# associativity — a 1e-13 change in an indicator implementation was observed to
+# reshuffle an entire out-of-sample trade set. A result that fragile is not a
+# result. Holding the incumbent makes selection reproducible AND makes the
+# near-ties visible, which is the honest signal: if six parameter sets are
+# indistinguishable in-sample, the optimiser has not found anything.
+TIE_BAND = 1e-6
 
 
 def objective_value(metrics: Metrics, objective: str) -> float:
@@ -219,6 +239,7 @@ def run_walk_forward(
         log.info("window %d/%d  %s", n, len(windows), window)
 
         best_params, best_metrics, best_score = {}, None, float("-inf")
+        near_ties = 0
         for params in combos:
             trial_cfg = apply_overrides(cfg, params)
             result = run_backtest(
@@ -231,8 +252,20 @@ def run_walk_forward(
             if m.n_trades < min_is_trades:
                 continue
             score = objective_value(m, objective)
-            if score > best_score:
+            band = TIE_BAND * max(1.0, abs(best_score)) if best_score > float("-inf") else 0.0
+            if score > best_score + band:
                 best_params, best_metrics, best_score = params, m, score
+                near_ties = 0
+            elif abs(score - best_score) <= band:
+                near_ties += 1
+
+        if near_ties:
+            warnings.append(
+                f"window {n}: {near_ties} parameter set(s) scored within {TIE_BAND:g} "
+                f"of the winner on {objective}. The optimiser could not distinguish "
+                "them, so the first in sorted order was kept. Treat the 'chosen' "
+                "parameters for this window as arbitrary among the tied set."
+            )
 
         if best_metrics is None:
             warnings.append(

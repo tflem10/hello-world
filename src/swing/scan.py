@@ -320,7 +320,7 @@ def _score_universe(
                 "atr": float(row["atr"]),
                 "rank_score": score,
                 "dollar_volume": float(row["dollar_volume"]),
-                "adx": _adx_value(cfg, history),
+                "adx": float(row["adx"]) if pd.notna(row["adx"]) else float("nan"),
                 "earnings_date": earnings_date.isoformat() if earnings_date else None,
                 "earnings_note": note,
                 "features": features,
@@ -338,17 +338,6 @@ def _score_universe(
 
     candidates.sort(key=lambda c: c["rank_score"], reverse=True)
     return candidates
-
-
-def _adx_value(cfg, history: pd.DataFrame) -> float:
-    from . import indicators as ind
-
-    series = ind.adx(
-        history["high"], history["low"], history["close"],
-        int(cfg.strategy.trend_template.adx_len),
-    )
-    value = series.iloc[-1] if len(series) else float("nan")
-    return float(value) if pd.notna(value) else float("nan")
 
 
 def _earnings_status(cfg, earnings_date, today: date) -> tuple[bool, str]:

@@ -41,7 +41,7 @@ from .. import indicators as ind
 # Columns produced by compute_features(). The engine depends on these names.
 FEATURE_COLUMNS = [
     "open", "high", "low", "close", "volume",
-    "atr", "atr_pct", "dollar_volume",
+    "atr", "atr_pct", "adx", "dollar_volume",
     "rank_score", "liquid", "trend_ok", "entry_signal", "eligible",
 ]
 
@@ -85,7 +85,10 @@ def compute_features(bars: pd.DataFrame, cfg, meta: SymbolMeta | None = None) ->
         & (out["dollar_volume"] >= float(cfg.universe.min_dollar_volume))
     ).fillna(False)
 
-    # -- trend template ----------------------------------------------------
+    # -- trend / ADX -------------------------------------------------------
+    # ADX is computed once here and kept in the frame: the scanner reports it
+    # on every pick, and recomputing it per candidate was measurable.
+    out["adx"] = ind.adx(high, low, close, int(s.trend_template.adx_len))
     out["trend_ok"] = _trend_template(bars, s, out)
 
     # -- entry -------------------------------------------------------------
@@ -114,7 +117,10 @@ def compute_features(bars: pd.DataFrame, cfg, meta: SymbolMeta | None = None) ->
 
 
 def _trend_template(bars: pd.DataFrame, s, out: pd.DataFrame) -> pd.Series:
-    """Minervini-style stage-2 template. All-or-nothing; no partial credit."""
+    """Minervini-style stage-2 template. All-or-nothing; no partial credit.
+
+    Reads ``out["adx"]``, which :func:`compute_features` has already populated.
+    """
     tt = s.trend_template
     close = bars["close"]
     if not bool(tt.get("enabled", True)):
@@ -130,7 +136,7 @@ def _trend_template(bars: pd.DataFrame, s, out: pd.DataFrame) -> pd.Series:
     hi_52w = ind.rolling_high(close, lookback_52w)
     lo_52w = ind.rolling_low(close, lookback_52w)
 
-    adx_series = ind.adx(bars["high"], bars["low"], close, int(tt.adx_len))
+    adx_series = out["adx"]
 
     conditions = (
         (close > fast)
