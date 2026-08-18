@@ -103,7 +103,7 @@ def cmd_journal(args: argparse.Namespace, cfg: Config) -> int:
     if action == "add":
         return journal_add(
             cfg, args.symbol, args.shares, args.price, args.stop,
-            trail=args.trail, order_id=args.order_id, note=args.note,
+            trail=args.trail, order_id=args.order_id, note=args.note, force=args.force,
         )
     if action == "exit":
         return journal_exit(cfg, args.symbol, args.shares, args.price, reason=args.reason)

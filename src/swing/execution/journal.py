@@ -305,6 +305,20 @@ def _require_open(cfg: Config, symbol: str) -> OpenPosition:
     return position
 
 
+def _refuse_lower_stop(symbol: str, old_stop: float, new_stop: float) -> None:
+    """The one refusal both stop-changing paths share.
+
+    ``journal stop`` and a second ``journal add`` into an open symbol make the
+    *same* state change — the replay in :func:`open_positions` takes the newest
+    recorded stop either way — so they have to be guarded the same way. Anything
+    less makes ``add`` a backdoor around trailing discipline.
+    """
+    raise JournalInputError(
+        f"refusing to lower the {symbol} stop from {old_stop:.2f} to {new_stop:.2f}: "
+        "stops only ratchet up. Pass --force if you are fixing a typo."
+    )
+
+
 def journal_add(
     cfg: Config,
     symbol: Any,
@@ -314,8 +328,14 @@ def journal_add(
     trail: Any = 0.0,
     order_id: str | None = None,
     note: str = "",
+    force: bool = False,
 ) -> int:
-    """Record a manual entry and print the resulting position."""
+    """Record a manual entry and print the resulting position.
+
+    Adding into a symbol you already hold averages the cost basis and adopts the
+    new stop, so it can lower a stop just as ``journal stop`` can; it is refused
+    the same way unless ``force`` is set.
+    """
     try:
         sym = _parse_symbol(symbol)
         shares_n = _parse_int(shares, "shares")
@@ -327,6 +347,9 @@ def journal_add(
                 f"stop {stop_f:.2f} must be below the entry price {price_f:.2f} — "
                 "a long stop above the entry is nonsense"
             )
+        existing = open_positions(cfg).get(sym)
+        if existing is not None and stop_f < existing.stop and not force:
+            _refuse_lower_stop(sym, existing.stop, stop_f)
     except JournalInputError as exc:
         return _fail(exc)
 
@@ -381,10 +404,7 @@ def journal_stop(cfg: Config, symbol: Any, new_stop: Any, force: bool = False) -
         stop_f = _parse_amount(new_stop, "stop")
         position = _require_open(cfg, sym)
         if stop_f < position.stop and not force:
-            raise JournalInputError(
-                f"refusing to lower the {sym} stop from {position.stop:.2f} to {stop_f:.2f}: "
-                "stops only ratchet up. Pass --force if you are fixing a typo."
-            )
+            _refuse_lower_stop(sym, position.stop, stop_f)
     except JournalInputError as exc:
         return _fail(exc)
 

@@ -115,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     jp.add_argument("--trail", metavar="OFFSET", default=0.0, help="trailing-stop offset")
     jp.add_argument("--order-id", metavar="ID", default=None, help="broker order id")
     jp.add_argument("--note", metavar="TEXT", default="", help="free-text note")
+    jp.add_argument(
+        "--force", action="store_true",
+        help="allow an add that lowers the stop of a position you already hold",
+    )
 
     jp = jsub.add_parser("exit", help="record a full or partial exit (sell)")
     jp.add_argument("symbol", metavar="SYMBOL")

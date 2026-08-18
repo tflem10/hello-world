@@ -160,6 +160,67 @@ def test_a_stop_above_the_entry_is_refused_by_name(journal_config, capsys):
 
 
 # ---------------------------------------------------------------------------
+# add into an already-open symbol: same stop guard as `journal stop`
+#
+# Averaging in adopts the new stop (see open_positions), so a second `add` is
+# another way to change the stop of a live position. If it were unguarded it
+# would be a silent backdoor around the trailing discipline that `journal stop`
+# enforces — same state change, so it gets the same refusal.
+# ---------------------------------------------------------------------------
+def test_adding_into_an_open_symbol_cannot_quietly_lower_the_stop(journal_config, capsys):
+    journal_add(journal_config, "AAA", "10", "100", "90")
+    before = journal_file(journal_config).read_bytes()
+    capsys.readouterr()
+
+    assert journal_add(journal_config, "AAA", "5", "100", "80") == 2
+    err = only_line(capsys.readouterr().err)
+    assert "--force" in err
+    assert "90.00" in err and "80.00" in err
+    assert journal_file(journal_config).read_bytes() == before  # byte-identical
+    assert open_positions(journal_config)["AAA"].stop == pytest.approx(90.0)
+
+
+def test_force_lets_an_add_lower_the_stop(journal_config, capsys):
+    journal_add(journal_config, "AAA", "10", "100", "90")
+    capsys.readouterr()
+
+    assert journal_add(journal_config, "AAA", "5", "100", "80", force=True) == 0
+    position = open_positions(journal_config)["AAA"]
+    assert position.stop == pytest.approx(80.0)
+    assert position.shares == 15
+
+
+def test_adding_into_an_open_symbol_may_ratchet_the_stop_up(journal_config, capsys):
+    journal_add(journal_config, "AAA", "10", "100", "90")
+    capsys.readouterr()
+
+    assert journal_add(journal_config, "AAA", "5", "110", "95") == 0
+    position = open_positions(journal_config)["AAA"]
+    assert position.stop == pytest.approx(95.0)
+    assert position.shares == 15
+    assert position.entry_price == pytest.approx((10 * 100 + 5 * 110) / 15)
+
+
+def test_adding_into_an_open_symbol_with_an_equal_stop_is_allowed(journal_config, capsys):
+    journal_add(journal_config, "AAA", "10", "100", "90")
+    capsys.readouterr()
+
+    assert journal_add(journal_config, "AAA", "5", "100", "90") == 0
+    assert open_positions(journal_config)["AAA"].stop == pytest.approx(90.0)
+
+
+def test_the_cli_exposes_force_on_add(cli_config_path, capsys):
+    base = ["-c", str(cli_config_path), "journal", "add"]
+    assert main(base + ["AAA", "10", "100", "90"]) == 0
+    capsys.readouterr()
+
+    assert main(base + ["AAA", "5", "100", "80"]) == 2
+    assert "--force" in capsys.readouterr().err
+
+    assert main(base + ["AAA", "5", "100", "80", "--force"]) == 0
+
+
+# ---------------------------------------------------------------------------
 # exit: validation
 # ---------------------------------------------------------------------------
 def test_exit_requires_an_open_position(journal_config, capsys):
