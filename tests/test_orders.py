@@ -220,3 +220,61 @@ def test_bracket_order_helper_is_consistent():
     order = bracket_order("XYZ", 4, 12.34, stop_child("XYZ", 4, 11.0))
     validate_order(order)
     assert order["price"] == "12.34"
+
+
+# ---------------------------------------------------------------------------
+# contract test against schwab-py itself
+# ---------------------------------------------------------------------------
+def test_our_entry_json_matches_what_schwab_py_would_build():
+    """Pin our hand-written JSON to schwab-py's own order builder.
+
+    The Schwab order schema has changed before. This test is what turns "we
+    verified the field names once during the build" into something that fails
+    loudly the day the vendor renames a field, rather than at 09:31 with money
+    on the line. Skipped when the optional extra is not installed.
+    """
+    pytest.importorskip("schwab", reason="schwab-py is an optional extra")
+    from schwab.orders.common import Duration, Session
+    from schwab.orders.equities import equity_buy_limit
+
+    theirs = (
+        equity_buy_limit("AAPL", 10, "190.50")
+        .set_duration(Duration.DAY)
+        .set_session(Session.NORMAL)
+        .build()
+    )
+    ours = bracket_order("AAPL", 10, 190.50, stop_child("AAPL", 10, 182.0))
+
+    # Same entry shape; ours additionally carries the protective child, which
+    # is what turns SINGLE into TRIGGER.
+    for key in ("duration", "session", "orderType", "price", "orderLegCollection"):
+        assert ours[key] == theirs[key], key
+    assert theirs["orderStrategyType"] == "SINGLE"
+    assert ours["orderStrategyType"] == "TRIGGER"
+
+
+def test_every_enum_value_we_emit_is_one_schwab_py_recognises():
+    pytest.importorskip("schwab", reason="schwab-py is an optional extra")
+    from schwab.orders.common import (
+        Duration,
+        OrderStrategyType,
+        OrderType,
+        Session,
+        StopPriceLinkBasis,
+        StopPriceLinkType,
+    )
+
+    def _values(enum):
+        return {e.value for e in enum}
+
+    for order in draft_orders("AAPL", 10, 190.0, 182.0, 5.7).values():
+        assert order["orderType"] in _values(OrderType)
+        assert order["session"] in _values(Session)
+        assert order["duration"] in _values(Duration)
+        assert order["orderStrategyType"] in _values(OrderStrategyType)
+        child = order["childOrderStrategies"][0]
+        assert child["orderType"] in _values(OrderType)
+        assert child["duration"] in _values(Duration)
+        if child["orderType"] == "TRAILING_STOP":
+            assert child["stopPriceLinkBasis"] in _values(StopPriceLinkBasis)
+            assert child["stopPriceLinkType"] in _values(StopPriceLinkType)
