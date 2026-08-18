@@ -37,10 +37,20 @@ An INCOMPLETE calendar buys only partial protection. Symbols absent from the
 file get no blackout at all — exactly the situation today — and the loader has
 no way to tell "this symbol never reported" from "this symbol is missing from
 my file". A calendar covering 50 of 500 names leaves the other 450 as exposed
-to earnings gaps in the backtest as they are now, while the run-level warning
-disappears because *a* calendar was supplied. Coverage is on you; prefer a
-calendar spanning the whole universe and the whole backtest window, and treat
-partial files as a partial fix rather than a solved problem.
+to earnings gaps in the backtest as they are now. Coverage is on you: prefer a
+calendar spanning the whole universe and the whole backtest window, and treat a
+partial file as a partial fix rather than a solved problem.
+
+What has changed is that the shortfall is no longer *silent*. The engine's
+"no historical earnings calendar" warning is all-or-nothing — it stops firing
+as soon as any calendar is supplied — so
+``swing.backtest.runner.load_earnings`` measures this file against the bars
+actually loaded and, when coverage is partial, raises its own report-visible
+warning naming the exact counts ("covers N of M universe symbols; the other K
+get NO earnings blackout ..."), alongside ``earnings_calendar_covered`` and
+``earnings_calendar_universe`` in the run manifest. So a thin calendar still
+under-protects the backtest, but it can no longer masquerade as a complete one:
+the report says how thin it is, and the numbers are on record.
 """
 
 from __future__ import annotations
