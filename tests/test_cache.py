@@ -1,0 +1,186 @@
+"""Cache round-trips, merge semantics, and the zero-network re-run property."""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from swing.data.cache import BarCache, data_fingerprint, merge_bars
+from swing.data.pipeline import backfill, load_bars, update
+from swing.data.provider import normalize_bars
+
+from .conftest import FakeProvider, make_bars, trending_bars
+
+
+def test_round_trip_preserves_values(tmp_path):
+    cache = BarCache(tmp_path)
+    bars = trending_bars(n=50)
+    cache.write("AAA", bars)
+    back = cache.read("AAA")
+    pd.testing.assert_frame_equal(back, bars, check_freq=False)
+
+
+def test_read_missing_symbol_is_empty_not_an_error(tmp_path):
+    cache = BarCache(tmp_path)
+    assert len(cache.read("NOPE")) == 0
+    assert cache.last_date("NOPE") is None
+
+
+def test_corrupt_parquet_is_treated_as_a_miss(tmp_path):
+    cache = BarCache(tmp_path)
+    cache.write("AAA", trending_bars(n=30))
+    cache.path_for("AAA").write_bytes(b"not a parquet file")
+    assert len(cache.read("AAA")) == 0
+
+
+def test_merge_prefers_fresh_rows_on_overlap():
+    old = make_bars([10.0, 11.0, 12.0], start="2020-01-01")
+    new = make_bars([99.0, 98.0], start="2020-01-02")
+    merged = merge_bars(old, new)
+    assert len(merged) == 3
+    # 2020-01-02 and -03 came from `new`
+    assert merged["close"].tolist() == [10.0, 99.0, 98.0]
+
+
+def test_merge_with_empty_sides():
+    bars = trending_bars(n=10)
+    assert len(merge_bars(bars, bars.iloc[0:0])) == 10
+    assert len(merge_bars(bars.iloc[0:0], bars)) == 10
+
+
+def test_normalize_handles_alternate_spellings():
+    raw = pd.DataFrame(
+        {
+            "Open": [1.0, 2.0],
+            "High": [2.0, 3.0],
+            "Low": [0.5, 1.5],
+            "Adj Close": [1.5, 2.5],
+            "Volume": [100, 200],
+        },
+        index=pd.to_datetime(["2020-01-02", "2020-01-03"]),
+    )
+    out = normalize_bars(raw)
+    assert list(out.columns) == ["open", "high", "low", "close", "volume"]
+    assert out["close"].tolist() == [1.5, 2.5]
+    assert out.index.name == "date"
+
+
+def test_normalize_drops_nonpositive_and_duplicate_rows():
+    idx = pd.to_datetime(["2020-01-02", "2020-01-02", "2020-01-03"])
+    raw = pd.DataFrame(
+        {"open": [1, 1, 1], "high": [1, 1, 1], "low": [1, 1, 1],
+         "close": [1.0, 5.0, 0.0], "volume": [1, 1, 1]},
+        index=idx,
+    )
+    out = normalize_bars(raw)
+    assert len(out) == 1
+    assert out["close"].iloc[0] == 5.0     # last duplicate wins, zero-price row dropped
+
+
+def test_normalize_strips_timezone():
+    idx = pd.to_datetime(["2020-01-02T00:00:00-05:00"])
+    raw = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]},
+        index=idx,
+    )
+    assert normalize_bars(raw).index.tz is None
+
+
+def test_backfill_then_update_makes_zero_calls_when_current(base_config):
+    bars = {"AAA": trending_bars(n=300, start="2020-01-01"),
+            "BBB": trending_bars(n=300, start="2020-01-01", seed=1),
+            "SPY": trending_bars(n=300, start="2020-01-01", seed=2)}
+    last = bars["AAA"].index[-1].date()
+    provider = FakeProvider(bars=bars)
+
+    backfill(base_config, provider=provider)
+    assert len(provider.bar_calls) == 1
+
+    # Everything is current as of the last cached bar -> no further requests.
+    update(base_config, provider=provider, as_of=last)
+    assert len(provider.bar_calls) == 1
+
+
+def test_backfill_skips_symbols_already_cached(base_config):
+    provider = FakeProvider(
+        bars={s: trending_bars(n=100) for s in ("AAA", "BBB", "SPY")}
+    )
+    backfill(base_config, provider=provider)
+    backfill(base_config, provider=provider)
+    assert len(provider.bar_calls) == 1     # second call had nothing to fetch
+
+
+def test_symbols_that_return_nothing_are_not_re_requested(base_config):
+    """A delisted ticker must not be re-downloaded every night."""
+    provider = FakeProvider(bars={"AAA": trending_bars(n=100)})   # BBB, SPY absent
+    backfill(base_config, provider=provider)
+    assert set(provider.bar_calls[0][0]) == {"AAA", "BBB", "SPY"}
+
+    backfill(base_config, provider=provider)
+    assert len(provider.bar_calls) == 1
+
+    # ...but the skip expires, so a provider outage is not permanent.
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    assert cache.absent_symbols(retry_after_days=0) == set()
+
+
+def test_update_fetches_and_extends(base_config):
+    full = trending_bars(n=300, start="2020-01-01")
+    provider = FakeProvider(
+        bars={s: full.iloc[:250] for s in ("AAA", "BBB", "SPY")}
+    )
+    backfill(base_config, provider=provider)
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    assert len(cache.read("AAA")) == 250
+
+    provider._bars = {s: full for s in ("AAA", "BBB", "SPY")}
+    update(base_config, provider=provider, as_of=full.index[-1].date())
+    assert len(cache.read("AAA")) == 300
+
+
+def test_update_backfills_symbols_that_have_no_cache(base_config):
+    provider = FakeProvider(
+        bars={s: trending_bars(n=100) for s in ("AAA", "BBB", "SPY")}
+    )
+    update(base_config, provider=provider, as_of=date(2021, 1, 1))
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    assert cache.has("AAA") and cache.has("BBB")
+
+
+def test_load_bars_slices_window(base_config):
+    provider = FakeProvider(bars={"AAA": trending_bars(n=300, start="2020-01-01")})
+    backfill(base_config, symbols=["AAA"], provider=provider)
+    out = load_bars(base_config, ["AAA"], start=date(2020, 6, 1), end=date(2020, 6, 30))
+    assert 15 <= len(out["AAA"]) <= 23
+    assert out["AAA"].index[0] >= pd.Timestamp("2020-06-01")
+
+
+def test_fingerprint_changes_with_data_not_with_dict_order():
+    a = trending_bars(n=50)
+    b = trending_bars(n=50, seed=7, noise=0.01)
+    assert data_fingerprint({"X": a, "Y": b}) == data_fingerprint({"Y": b, "X": a})
+    assert data_fingerprint({"X": a}) != data_fingerprint({"X": b})
+
+
+@pytest.mark.parametrize("n", [0, 1, 5])
+def test_coverage_handles_small_and_empty_caches(tmp_path, n):
+    cache = BarCache(tmp_path)
+    if n:
+        cache.write("AAA", trending_bars(n=n))
+    cov = cache.coverage()
+    assert len(cov) == (1 if n else 0)
+
+
+def test_update_does_not_re_request_known_absent_symbols(base_config):
+    """The nightly update must not hammer the provider for dead tickers."""
+    provider = FakeProvider(bars={"AAA": trending_bars(n=100, start="2020-01-01")})
+    last = provider._bars["AAA"].index[-1].date()
+
+    update(base_config, provider=provider, as_of=last)
+    calls_after_first = len(provider.bar_calls)
+
+    update(base_config, provider=provider, as_of=last)
+    assert len(provider.bar_calls) == calls_after_first

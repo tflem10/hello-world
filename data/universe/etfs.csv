@@ -1,0 +1,89 @@
+# Curated ETF universe: broad market, sector (SPDR Select + a few thematics),
+# style/factor, and a handful of bond/commodity funds used for rotation.
+# kind=etf bypasses the fundamental filter (an ETF has no EPS).
+# Columns: symbol,kind,name
+symbol,kind,name
+SPY,etf,SPDR S&P 500
+IVV,etf,iShares Core S&P 500
+VOO,etf,Vanguard S&P 500
+QQQ,etf,Invesco Nasdaq 100
+DIA,etf,SPDR Dow Jones Industrial
+IWM,etf,iShares Russell 2000
+IWB,etf,iShares Russell 1000
+MDY,etf,SPDR S&P Midcap 400
+IJH,etf,iShares Core S&P Mid-Cap
+IJR,etf,iShares Core S&P Small-Cap
+VTI,etf,Vanguard Total Stock Market
+RSP,etf,Invesco S&P 500 Equal Weight
+XLK,etf,Technology Select Sector
+XLF,etf,Financial Select Sector
+XLE,etf,Energy Select Sector
+XLV,etf,Health Care Select Sector
+XLI,etf,Industrial Select Sector
+XLY,etf,Consumer Discretionary Select Sector
+XLP,etf,Consumer Staples Select Sector
+XLU,etf,Utilities Select Sector
+XLB,etf,Materials Select Sector
+XLRE,etf,Real Estate Select Sector
+XLC,etf,Communication Services Select Sector
+XBI,etf,SPDR S&P Biotech
+XOP,etf,SPDR S&P Oil & Gas E&P
+XME,etf,SPDR S&P Metals & Mining
+XHB,etf,SPDR S&P Homebuilders
+XRT,etf,SPDR S&P Retail
+KRE,etf,SPDR S&P Regional Banking
+ITB,etf,iShares US Home Construction
+SMH,etf,VanEck Semiconductor
+SOXX,etf,iShares Semiconductor
+IGV,etf,iShares Expanded Tech-Software
+HACK,etf,Amplify Cybersecurity
+SKYY,etf,First Trust Cloud Computing
+IBB,etf,iShares Biotechnology
+IHI,etf,iShares US Medical Devices
+JETS,etf,US Global Jets
+TAN,etf,Invesco Solar
+ICLN,etf,iShares Global Clean Energy
+LIT,etf,Global X Lithium & Battery
+URA,etf,Global X Uranium
+MOO,etf,VanEck Agribusiness
+PAVE,etf,Global X US Infrastructure
+GDX,etf,VanEck Gold Miners
+GDXJ,etf,VanEck Junior Gold Miners
+SLV,etf,iShares Silver Trust
+GLD,etf,SPDR Gold Shares
+IAU,etf,iShares Gold Trust
+USO,etf,United States Oil Fund
+UNG,etf,United States Natural Gas
+DBC,etf,Invesco DB Commodity Index
+MTUM,etf,iShares MSCI USA Momentum
+VLUE,etf,iShares MSCI USA Value
+QUAL,etf,iShares MSCI USA Quality
+USMV,etf,iShares MSCI USA Min Vol
+SPLV,etf,Invesco S&P 500 Low Volatility
+SPHQ,etf,Invesco S&P 500 Quality
+VUG,etf,Vanguard Growth
+VTV,etf,Vanguard Value
+IWF,etf,iShares Russell 1000 Growth
+IWD,etf,iShares Russell 1000 Value
+VBK,etf,Vanguard Small-Cap Growth
+EFA,etf,iShares MSCI EAFE
+IEFA,etf,iShares Core MSCI EAFE
+EEM,etf,iShares MSCI Emerging Markets
+VWO,etf,Vanguard FTSE Emerging Markets
+EWJ,etf,iShares MSCI Japan
+EWG,etf,iShares MSCI Germany
+EWZ,etf,iShares MSCI Brazil
+INDA,etf,iShares MSCI India
+FXI,etf,iShares China Large-Cap
+TLT,etf,iShares 20+ Year Treasury
+IEF,etf,iShares 7-10 Year Treasury
+SHY,etf,iShares 1-3 Year Treasury
+LQD,etf,iShares Investment Grade Corporate
+HYG,etf,iShares High Yield Corporate
+TIP,etf,iShares TIPS Bond
+AGG,etf,iShares Core US Aggregate Bond
+BND,etf,Vanguard Total Bond Market
+VNQ,etf,Vanguard Real Estate
+SCHD,etf,Schwab US Dividend Equity
+DGRO,etf,iShares Core Dividend Growth
+VYM,etf,Vanguard High Dividend Yield

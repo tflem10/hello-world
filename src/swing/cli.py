@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- universe -----------------------------------------------------------
     sp = sub.add_parser("universe", help="inspect or refresh the tradable universe")
     sp.add_argument("--refresh", action="store_true", help="re-apply liquidity filters")
+    sp.add_argument("--fetch", action="store_true", help="re-download index constituents (network)")
     sp.add_argument("--show", type=int, default=20, help="how many symbols to print")
 
     # -- data ---------------------------------------------------------------

@@ -11,7 +11,15 @@ log = get_logger("swing.commands")
 
 
 def cmd_universe(args: argparse.Namespace, cfg: Config) -> int:
-    from .data.universe import build_universe, describe_universe
+    from .data.universe import build_universe, describe_universe, fetch_constituents
+
+    if args.fetch:
+        written = fetch_constituents("all")
+        if not written:
+            log.error("no constituent files were refreshed; seed files left untouched")
+            return 1
+        for key, count in sorted(written.items()):
+            print(f"refreshed {key}: {count} symbols")
 
     uni = build_universe(cfg, apply_liquidity_filter=args.refresh)
     print(describe_universe(uni, limit=args.show))

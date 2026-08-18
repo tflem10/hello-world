@@ -40,6 +40,7 @@ history_start = "2005-01-01"       # cache backfill start (backtest starts later
 max_stale_days = 5                 # warn if cached bars are older than this
 request_batch_size = 50            # symbols per yfinance download call
 request_pause_sec = 1.0            # politeness pause between batches
+absent_retry_days = 7              # symbols that return no data are skipped this long
 
 [strategy]
 name = "trend_momentum_core"
