@@ -91,13 +91,23 @@ def load_universe_bars(cfg: Config, etf_only: bool = False):
     return bars, meta, benchmark
 
 
-def load_earnings(cfg: Config) -> tuple[dict | None, dict]:
+def load_earnings(
+    cfg: Config, bars: dict[str, pd.DataFrame] | None = None
+) -> tuple[dict | None, dict, list[str]]:
     """Load the optional historical earnings calendar named by ``[data]``.
 
-    Returns ``(calendar, manifest_extra)``. With no ``data.earnings_calendar``
-    key — the shipped default — this returns ``(None, {})`` and every backtest
-    behaves exactly as it did before, warning included: the engine says loudly
-    that the blackout was not applied.
+    Returns ``(calendar, manifest_extra, warnings)``. With no
+    ``data.earnings_calendar`` key — the shipped default — this returns
+    ``(None, {}, [])`` and every backtest behaves exactly as it did before,
+    warning included: the engine says loudly that the blackout was not applied.
+
+    ``bars`` is the universe the calendar will be applied to, and it is passed
+    so coverage can be checked. It matters more than it looks: the engine's
+    "no historical earnings calendar" warning is all-or-nothing (it fires only
+    when the calendar is empty), so a calendar covering three symbols out of a
+    thousand silences the warning for the *whole* run and the report then reads
+    as though the blackout was applied universe-wide. Partial coverage is
+    partial protection and gets its own warning here.
 
     The key lives under ``[data]`` rather than ``[backtest]`` on purpose.
     ``Config.hash`` covers ``[account][universe][strategy][backtest]``, and a
@@ -105,7 +115,7 @@ def load_earnings(cfg: Config) -> tuple[dict | None, dict]:
     """
     raw = str(cfg.data.get("earnings_calendar", "") or "").strip()
     if not raw:
-        return None, {}
+        return None, {}, []
 
     path = cfg.expand_path(raw)
     # Imported lazily so the whole backtest package does not depend on a module
@@ -123,14 +133,33 @@ def load_earnings(cfg: Config) -> tuple[dict | None, dict]:
 
     n_symbols = len(calendar)
     n_dates = sum(len(v) for v in calendar.values())
+    universe = set(bars or {})
+    covered = len(universe & set(calendar))
     log.info(
-        "earnings calendar: %d symbols, %d dated events (%s)", n_symbols, n_dates, path
+        "earnings calendar: %d symbols, %d dated events, covering %d of %d "
+        "universe symbols (%s)",
+        n_symbols, n_dates, covered, len(universe), path,
     )
+
+    warnings: list[str] = []
+    if universe and covered < len(universe):
+        missing = len(universe) - covered
+        warnings.append(
+            f"earnings calendar covers {covered} of {len(universe)} universe "
+            f"symbols; the other {missing} get NO earnings blackout in this "
+            "backtest — partial protection that the missing-calendar warning no "
+            "longer flags, because a calendar *was* supplied. Entries in the "
+            "uncovered names are taken through earnings here and would be "
+            "blocked live, so expect live to take fewer trades than this implies."
+        )
+
     return calendar, {
         "earnings_calendar": str(path),
         "earnings_calendar_symbols": n_symbols,
         "earnings_calendar_dates": n_dates,
-    }
+        "earnings_calendar_covered": covered,
+        "earnings_calendar_universe": len(universe),
+    }, warnings
 
 
 def _benchmark_series(
@@ -192,7 +221,7 @@ def _tag(args: argparse.Namespace, base: str, etf_only: bool) -> str:
 
 def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
-    earnings, earnings_manifest = load_earnings(cfg)
+    earnings, earnings_manifest, earnings_warnings = load_earnings(cfg, bars)
     result = run_walk_forward(
         cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
         start=start, end=end,
@@ -202,7 +231,7 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
     apply_benchmark(result.metrics, bench_equity)
     boot_tables, boot_manifest, boot_warnings = bootstrap_extras(cfg, result.equity)
 
-    warnings = list(result.warnings) + bench_warnings + boot_warnings
+    warnings = list(result.warnings) + earnings_warnings + bench_warnings + boot_warnings
     if etf_only:
         warnings.append(
             "ETF-only universe: no survivorship bias, and no single-stock upside "
@@ -249,7 +278,7 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
 
 def _run_full(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
-    earnings, earnings_manifest = load_earnings(cfg)
+    earnings, earnings_manifest, earnings_warnings = load_earnings(cfg, bars)
     result = run_backtest(
         cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
         start=start, end=end, label="full",
@@ -270,7 +299,7 @@ def _run_full(cfg, args, start, end, etf_only: bool) -> None:
                         "universe_size": result.universe_size},
     )
     report.metrics = metrics
-    report.warnings = list(result.warnings) + bench_warnings + [
+    report.warnings = list(result.warnings) + earnings_warnings + bench_warnings + [
         "This is an in-sample, full-period run over parameters that were chosen "
         "with knowledge of this whole period. It is reported for context only and "
         "does NOT satisfy the trading gate — only the walk-forward report does."
@@ -289,7 +318,7 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
     be removed from the defaults, not defended.
     """
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
-    earnings, earnings_manifest = load_earnings(cfg)
+    earnings, earnings_manifest, earnings_warnings = load_earnings(cfg, bars)
     feature_cache: dict = {}
     rows = []
     baseline_metrics = None
@@ -339,7 +368,7 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
         manifest_extra={**earnings_manifest, "etf_only": etf_only,
                         "ablations": table.reset_index().to_dict("records")},
     )
-    report.warnings = list(baseline_result.warnings) + [
+    report.warnings = list(baseline_result.warnings) + earnings_warnings + [
         "Ablations are run over the full period in-sample. They answer 'what did "
         "this component contribute here?', not 'will it contribute next year'. "
         "A component whose removal barely moves the numbers is a candidate for "
@@ -353,7 +382,7 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
 
 def _run_sensitivity(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
-    earnings, earnings_manifest = load_earnings(cfg)
+    earnings, earnings_manifest, earnings_warnings = load_earnings(cfg, bars)
     table = parameter_sensitivity(
         cfg, bars, SENSITIVITY_PARAMS, meta=meta, benchmark=benchmark,
         earnings=earnings, start=start, end=end,
@@ -370,7 +399,7 @@ def _run_sensitivity(cfg, args, start, end, etf_only: bool) -> None:
         extra_tables={"sensitivity": table.set_index("parameter")},
         manifest_extra=dict(earnings_manifest),
     )
-    report.warnings = list(baseline.warnings) + [
+    report.warnings = list(baseline.warnings) + earnings_warnings + [
         "Read this table for FLATNESS, not for the best cell. If a parameter's "
         "profit factor collapses when it moves 25%, the strategy is balanced on a "
         "knife edge and the backtest is measuring the edge of the knife."

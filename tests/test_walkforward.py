@@ -381,10 +381,33 @@ def _bootstrap_config(**bootstrap):
     return Config(data)
 
 
-def test_bootstrap_settings_fall_back_to_code_defaults():
-    """`[reports.bootstrap]` does not exist in the shipped config yet, and the
-    code must not need it to."""
-    cfg = _wf_config()
+@pytest.mark.parametrize(
+    "shipped",
+    [
+        pytest.param({}, id="stanza_absent"),
+        pytest.param(
+            {"bootstrap": {"enabled": False, "n_resamples": 3, "block_days": 2,
+                           "seed": 99}},
+            id="stanza_documented_live",
+        ),
+    ],
+)
+def test_bootstrap_settings_fall_back_to_code_defaults(shipped):
+    """The fallback is a property of the code, not of today's example config.
+
+    ``[reports.bootstrap]`` may be shipped commented out or live at any time;
+    either way, a config that does not carry the section must get exactly the
+    code defaults. The parametrisation simulates both shipped states and then
+    removes the section, so nothing in ``config.example.toml`` can make this
+    test pass or fail.
+    """
+    from swing.config import Config, load_config
+
+    data = load_config().as_dict()
+    data["reports"].update(shipped)
+    data["reports"].pop("bootstrap", None)
+    cfg = Config(data)
+
     assert "bootstrap" not in cfg.reports
     assert bootstrap_settings(cfg) == {
         "enabled": True, "n_resamples": 1000, "block_days": 20, "seed": 7,
@@ -516,7 +539,7 @@ def _install_calendar_module(monkeypatch, calendar):
 
 
 def test_no_earnings_calendar_key_changes_nothing():
-    assert load_earnings(_wf_config()) == (None, {})
+    assert load_earnings(_wf_config(), {"S00": None}) == (None, {}, [])
 
 
 def test_an_empty_earnings_calendar_path_changes_nothing():
@@ -524,7 +547,7 @@ def test_an_empty_earnings_calendar_path_changes_nothing():
 
     data = _wf_config().as_dict()
     data["data"]["earnings_calendar"] = "   "
-    assert load_earnings(Config(data)) == (None, {})
+    assert load_earnings(Config(data), {"S00": None}) == (None, {}, [])
 
 
 def test_a_missing_earnings_calendar_file_exits_naming_the_path(tmp_path, monkeypatch):
@@ -536,7 +559,7 @@ def test_a_missing_earnings_calendar_file_exits_naming_the_path(tmp_path, monkey
     data["data"]["earnings_calendar"] = str(missing)
 
     with pytest.raises(SystemExit) as excinfo:
-        load_earnings(Config(data))
+        load_earnings(Config(data), {})
     assert str(missing) in str(excinfo.value)
 
 
@@ -550,12 +573,17 @@ def test_a_supplied_calendar_is_loaded_and_counted(tmp_path, monkeypatch):
 
     data = _wf_config().as_dict()
     data["data"]["earnings_calendar"] = str(path)
-    loaded, manifest = load_earnings(Config(data))
+    loaded, manifest, warnings = load_earnings(
+        Config(data), {"S00": None, "S01": None}
+    )
 
     assert loaded == calendar
     assert manifest["earnings_calendar"] == str(path)
     assert manifest["earnings_calendar_symbols"] == 2
     assert manifest["earnings_calendar_dates"] == 3
+    assert manifest["earnings_calendar_covered"] == 2
+    assert manifest["earnings_calendar_universe"] == 2
+    assert warnings == []            # full coverage: nothing to flag
 
 
 def test_earnings_calendar_config_does_not_change_the_config_hash(tmp_path):
@@ -567,6 +595,110 @@ def test_earnings_calendar_config_does_not_change_the_config_hash(tmp_path):
     before = Config(data).hash
     data["data"]["earnings_calendar"] = str(tmp_path / "earnings.csv")
     assert Config(data).hash == before
+
+
+def _calendar_config(tmp_path, monkeypatch, calendar):
+    """A config pointing at an existing calendar file the loader stub returns."""
+    from swing.config import Config
+
+    _install_calendar_module(monkeypatch, calendar)
+    path = tmp_path / "earnings.csv"
+    path.write_text("symbol,date\n")
+    data = _wf_config().as_dict()
+    data["data"]["earnings_calendar"] = str(path)
+    return Config(data)
+
+
+def test_partial_calendar_coverage_is_warned_about_with_counts(tmp_path, monkeypatch):
+    """A calendar covering 3 of 1000 symbols silences the engine's
+    all-or-nothing "no calendar" warning for the whole run, leaving 997 names
+    unprotected and a report that reads as if the blackout applied everywhere.
+    That gap has to be visible on the report, with the counts."""
+    universe = {f"S{i:03d}": None for i in range(1000)}
+    calendar = {sym: [date(2016, 5, 4)] for sym in ("S000", "S001", "S002")}
+    cfg = _calendar_config(tmp_path, monkeypatch, calendar)
+
+    loaded, manifest, warnings = load_earnings(cfg, universe)
+
+    assert loaded == calendar
+    assert manifest["earnings_calendar_covered"] == 3
+    assert manifest["earnings_calendar_universe"] == 1000
+    assert len(warnings) == 1
+    assert "covers 3 of 1000" in warnings[0]
+    assert "997" in warnings[0]
+    assert "NO earnings blackout" in warnings[0]
+
+
+def test_a_calendar_symbol_outside_the_universe_does_not_count_as_coverage(
+    tmp_path, monkeypatch
+):
+    """Coverage is the intersection: a 5,000-row S&P export applied to a
+    two-symbol ETF universe still protects only the symbols actually traded."""
+    calendar = {f"X{i:03d}": [date(2016, 5, 4)] for i in range(50)}
+    calendar["S00"] = [date(2016, 5, 4)]
+    cfg = _calendar_config(tmp_path, monkeypatch, calendar)
+
+    _, manifest, warnings = load_earnings(cfg, {"S00": None, "S01": None})
+    assert manifest["earnings_calendar_symbols"] == 51
+    assert manifest["earnings_calendar_covered"] == 1
+    assert manifest["earnings_calendar_universe"] == 2
+    assert "covers 1 of 2" in warnings[0]
+
+
+def test_full_coverage_produces_no_coverage_warning(tmp_path, monkeypatch):
+    universe = {"S00": None, "S01": None}
+    calendar = {sym: [date(2016, 5, 4)] for sym in universe}
+    cfg = _calendar_config(tmp_path, monkeypatch, calendar)
+
+    _, manifest, warnings = load_earnings(cfg, universe)
+    assert warnings == []
+    assert manifest["earnings_calendar_covered"] == manifest[
+        "earnings_calendar_universe"
+    ] == 2
+
+
+def test_the_partial_coverage_warning_reaches_the_written_report(
+    tmp_path, monkeypatch
+):
+    """The warning is worthless if it stops at the runner."""
+    import argparse
+
+    from swing.backtest import runner as runner_module
+    from swing.config import Config
+
+    bars = _wf_universe(n_symbols=4, n_bars=1300)
+    benchmark = next(iter(bars.values())).copy()
+    covered = sorted(bars)[:1]
+    cfg = _calendar_config(
+        tmp_path, monkeypatch, {sym: [date(2016, 5, 4)] for sym in covered}
+    )
+    data = cfg.as_dict()
+    data["reports"]["dir"] = str(tmp_path / "reports")
+    data["reports"]["bootstrap"] = {"enabled": False}
+    cfg = Config(data)
+
+    monkeypatch.setattr(
+        runner_module, "load_universe_bars",
+        lambda cfg, etf_only=False: (bars, None, benchmark),
+    )
+    args = argparse.Namespace(
+        tag=None, start=None, end=None, full=False, ablations=False,
+        sensitivity=False, walk_forward=True, etf_only=False,
+    )
+    runner_module._run_walk_forward(cfg, args, date(2014, 1, 1), None, etf_only=False)
+
+    out = sorted((tmp_path / "reports").glob("*walkforward*"))[-1]
+    manifest = json.loads((out / "manifest.json").read_text())
+
+    assert manifest["earnings_calendar_covered"] == 1
+    assert manifest["earnings_calendar_universe"] == len(bars)
+    assert any("covers 1 of 4" in w for w in manifest["warnings"])
+    assert "covers 1 of 4" in (out / "report.md").read_text()
+    # The engine's own warning is gone (a calendar *was* supplied) — which is
+    # exactly why the coverage warning has to exist.
+    assert not any(
+        "no historical earnings calendar" in w for w in manifest["warnings"]
+    )
 
 
 def test_supplying_earnings_silences_the_missing_calendar_warning():
