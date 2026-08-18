@@ -47,8 +47,22 @@ class Section:
     def __getitem__(self, name: str) -> Any:
         return getattr(self, name)
 
+    def __iter__(self):
+        # Without this, iteration falls back to __getitem__(0), which raises a
+        # confusing TypeError deep inside whatever tried to iterate a Section.
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
     def __contains__(self, name: str) -> bool:
         return name in self._data
+
+    def items(self):
+        return {k: getattr(self, k) for k in self._data}.items()
+
+    def values(self):
+        return [getattr(self, k) for k in self._data]
 
     def get(self, name: str, default: Any = None) -> Any:
         if name not in self._data:

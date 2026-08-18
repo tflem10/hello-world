@@ -147,3 +147,56 @@ def today() -> date:
 
 def days_after(start: str, n: int) -> date:
     return (date.fromisoformat(start) + timedelta(days=n))
+
+
+def engine_config(
+    initial_equity: float = 10_000.0,
+    **overrides,
+) -> Config:
+    """A config with the *filters* switched off so a test can isolate one rule.
+
+    Trend template, regime and volume confirmation each independently suppress
+    entries; leaving them on makes it impossible to tell which rule a failing
+    assertion is actually testing. Tests that care about a filter turn that one
+    back on explicitly.
+    """
+    data = load_config().as_dict()
+    data["backtest"].update(
+        initial_equity=initial_equity,
+        slippage_bps=5.0,
+        spread_atr_frac=0.02,
+        commission_per_trade=0.0,
+    )
+    data["account"].update(
+        equity=initial_equity, risk_pct=0.02, max_position_pct=1.0,
+        max_concurrent_positions=4,
+    )
+    data["strategy"]["regime"]["enabled"] = False
+    data["strategy"]["trend_template"]["enabled"] = False
+    data["strategy"]["entry"]["volume_mult"] = 0.0
+    data["strategy"]["fundamentals"]["enabled"] = False
+
+    for path, value in overrides.items():
+        node = data
+        parts = path.split("__")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+    return Config(data)
+
+
+def breakout_series(
+    flat_bars: int = 200,
+    flat_price: float = 100.0,
+    breakout_price: float = 110.0,
+    after: list[float] | None = None,
+    start: str = "2020-01-01",
+    volume: float = 1_000_000.0,
+) -> pd.DataFrame:
+    """Flat, then one clean breakout bar, then whatever ``after`` says.
+
+    Flat bars produce no signal (the prior high is never exceeded), so the
+    entry date is unambiguous: the bar after the breakout.
+    """
+    closes = [flat_price] * flat_bars + [breakout_price] + list(after or [])
+    return make_bars(closes, start=start, volume=volume)

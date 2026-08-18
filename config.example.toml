@@ -67,7 +67,11 @@ name = "trend_momentum_core"
   [strategy.entry]
   mode = "donchian_breakout"       # "donchian_breakout" | "rsi2_pullback"
   donchian_len = 20
-  breakout_tolerance = 0.02        # allow entries within 2% of the channel high
+  # A signal needs the prior donchian_len-day high to be EXCEEDED today, with
+  # the close no more than breakout_tolerance below that level. Requiring only
+  # "close is near the high" fires on flat series; requiring only "new high"
+  # buys failed breakouts that close at the day's low.
+  breakout_tolerance = 0.02        # close may finish up to 2% below the level
   volume_len = 50
   volume_mult = 1.30               # today's volume >= 1.3x 50-day average
     [strategy.entry.rsi2]
@@ -119,6 +123,16 @@ fill = "next_open"                 # signals at close -> fill next open
   in_sample_years = 3
   out_of_sample_years = 1
   step_years = 1
+  optimize = true                  # tune the grid below on each in-sample block
+  objective = "profit_factor"      # profit_factor | sharpe | calmar | expectancy_r
+  min_is_trades = 15               # ignore in-sample params with too few trades
+    [backtest.walk_forward.grid]
+    # Deliberately small. A wide grid over 15 windows does not find a better
+    # strategy, it finds a better fit to noise — and walk-forward only limits
+    # that damage, it does not eliminate it.
+    "strategy.entry.donchian_len" = [15, 20, 30]
+    "strategy.exit.initial_stop_atr" = [1.5, 2.0, 2.5]
+    "strategy.exit.chandelier_atr" = [2.5, 3.0, 4.0]
   [backtest.gate]
   # `swing scan` refuses to emit picks unless the newest report clears these
   # on the concatenated out-of-sample equity curve. Override with --force.
