@@ -69,19 +69,21 @@ absent_retry_days = 7              # symbols that return no data are skipped thi
 # default) = no calendar, and the backtest runs *without* the earnings blackout
 # the live scanner applies, warning loudly on every run.
 #
-# Supply one and the backtest applies the same blackout as live, the warning
-# disappears, and every report records the file plus its symbol/date counts in
-# the manifest. Format: a header row containing `symbol` and `date` (any order,
-# case-insensitive), ISO YYYY-MM-DD dates, one row per announcement; `#`
-# comments and blank lines are skipped. Full spec and failure modes are in the
-# docstring of src/swing/data/earnings_calendar.py.
+# Supply one and the backtest applies the same blackout as live, the
+# missing-calendar warning disappears, and every report records the file, its
+# symbol/date counts and how much of the traded universe it covers. Format: a
+# header row containing `symbol` and `date` (any order, case-insensitive), ISO
+# YYYY-MM-DD dates, one row per announcement; `#` comments and blank lines are
+# skipped. Full spec and failure modes are in the docstring of
+# src/swing/data/earnings_calendar.py.
 #
 # Two honest warnings:
 #   * a path that does not exist ABORTS the backtest — this is deliberate, a
 #     typo must not quietly downgrade you to "no blackout";
 #   * symbols absent from the file get NO protection. A partial calendar is
-#     partial protection, and the run-level warning still disappears because
-#     *a* calendar was supplied. Coverage is your responsibility.
+#     partial protection; the run says so explicitly ("covers N of M universe
+#     symbols; the other K get NO earnings blackout"), so read that line rather
+#     than treating any calendar as a solved problem. Coverage is on you.
 earnings_calendar = ""
 
 [strategy]
@@ -243,28 +245,25 @@ log_dir = "~/.swing/logs"
 dir = "reports"
 open_in_browser = false
 
-# Circular block-bootstrap confidence intervals on the walk-forward out-of-sample
-# equity curve: p5/p50/p95 for CAGR and max drawdown, plus P(CAGR <= 0). Blocks
-# of consecutive daily returns are resampled with replacement, so
-# autocorrelation and volatility clustering survive the resampling.
-#
-# Reporting only — these numbers never change a trade, which is why they live
-# under [reports] and not [backtest]. `seed` is fixed so two runs of the same
-# report are byte-identical.
-#
-# Read them honestly: resampling ONE historical path can only reshuffle the
-# regimes that path happened to contain, and the parameters were already chosen
-# before the resampling started. The interval is a FLOOR on the uncertainty,
-# not an estimate of it — the true one is wider. A wide interval is conclusive
-# (indistinguishable from noise); a narrow one is merely inconclusive. Curves
-# with fewer than 60 daily returns get no interval at all.
-#
-# The block is shipped commented out because every value below is exactly what
-# the code uses when it is absent (see report.BOOTSTRAP_DEFAULTS). Uncomment
-# the whole block to change one.
-#
-#   [reports.bootstrap]
-#   enabled = true
-#   n_resamples = 1000
-#   block_days = 20
-#   seed = 7
+  [reports.bootstrap]
+  # Circular block-bootstrap confidence intervals on the walk-forward
+  # out-of-sample equity curve: p5/p50/p95 for CAGR and max drawdown, plus
+  # P(CAGR <= 0). Blocks of consecutive daily returns are resampled with
+  # replacement, so autocorrelation and volatility clustering survive it.
+  #
+  # Reporting only — these numbers never change a trade, which is why they live
+  # under [reports] and not [backtest]: a knob in a hash-covered section would
+  # re-lock every user's gate.
+  #
+  # Read them honestly: resampling ONE historical path can only reshuffle the
+  # regimes that path happened to contain, and the parameters were already
+  # chosen before the resampling started. The interval is a FLOOR on the
+  # uncertainty, not an estimate of it — the true one is wider. A wide interval
+  # is conclusive (indistinguishable from noise); a narrow one is merely
+  # inconclusive.
+  enabled = true                   # false = the report is exactly what it was pre-bootstrap
+  n_resamples = 1000               # resampled equity paths
+  block_days = 20                  # length of each resampled block, in trading days
+  seed = 7                         # fixed so two runs of one report are byte-identical
+  # Curves with fewer than 60 daily returns get no interval at all; the report
+  # says so instead of quoting one computed from a handful of days.

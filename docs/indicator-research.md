@@ -406,16 +406,17 @@ That divergence is now closable rather than permanent. Point `[data]
 earnings_calendar` at a historical calendar CSV (`symbol,date` header, ISO
 dates; format and failure modes in `src/swing/data/earnings_calendar.py`) and
 the backtest applies the same blackout the live scanner does — the warning
-above disappears and the report manifest records the file, its symbol count and
-its date count. The programmatic route still exists: `run_backtest(...,
-earnings={"AAPL": [date(2024, 2, 1), ...]})`.
+above disappears and the report manifest records the file, its symbol and date
+counts, and its coverage of the traded universe. The programmatic route still
+exists: `run_backtest(..., earnings={"AAPL": [date(2024, 2, 1), ...]})`.
 
 Keep the caveat that survives it: **coverage is on you.** Symbols absent from
-your file get no blackout at all, exactly as before, and the loader cannot tell
-"never reported" from "missing from my file". A calendar covering 50 of 500
-names buys protection for 50 while removing the run-level warning for all 500 —
-a partial fix that presents as a complete one. Prefer a calendar spanning the
-whole universe and the whole backtest window.
+your file get no blackout at all, and the loader cannot tell "never reported"
+from "missing from my file". A calendar covering 50 of 500 names buys
+protection for 50 and none for the other 450, so the run replaces the
+all-or-nothing warning above with a specific one naming those counts. Read it:
+a supplied calendar is not the same as a covered universe. Prefer a calendar
+spanning the whole universe and the whole backtest window.
 
 ---
 

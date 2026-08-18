@@ -159,12 +159,15 @@ calendar — a paid export, a broker download, a hand-built file — point
 `[data] earnings_calendar` at it (`symbol,date` header, ISO dates, `#` comments
 allowed; the format is spelled out in `src/swing/data/earnings_calendar.py`)
 and the backtest applies the same blackout, the warning disappears, and the
-report manifest records the file and how many symbols and dates it held. Two
-things to know: a path that does not exist aborts the run rather than quietly
-falling back, and **symbols missing from the file get no protection at all**
-while the run-level warning still goes away — a calendar covering 50 of 500
-names is a partial fix that looks like a complete one. The key lives under
-`[data]`, so adding it does not change the config hash or re-lock the gate.
+report manifest records the file, its symbol and date counts, and how much of
+the traded universe it covers. Two things to know: a path that does not exist
+aborts the run rather than quietly falling back, and **symbols missing from the
+file get no protection at all**. The run is explicit about the second — a
+partial calendar produces a warning naming the numbers ("covers 50 of 500
+universe symbols; the other 450 get NO earnings blackout") — so read that line
+instead of assuming a supplied calendar means a covered universe. The key lives
+under `[data]`, so adding it does not change the config hash or re-lock the
+gate.
 
 ---
 
