@@ -1,0 +1,88 @@
+"""Sub-command implementations (thin wiring; real logic lives in modules)."""
+
+from __future__ import annotations
+
+import argparse
+
+from .config import Config
+from .logging_setup import get_logger
+
+log = get_logger("swing.commands")
+
+
+def cmd_universe(args: argparse.Namespace, cfg: Config) -> int:
+    from .data.universe import build_universe, describe_universe
+
+    uni = build_universe(cfg, apply_liquidity_filter=args.refresh)
+    print(describe_universe(uni, limit=args.show))
+    return 0
+
+
+def cmd_data(args: argparse.Namespace, cfg: Config) -> int:
+    from .data.pipeline import backfill, cache_status, update
+
+    if args.status or not (args.backfill or args.update):
+        print(cache_status(cfg))
+        return 0
+    if args.backfill:
+        backfill(cfg, symbols=args.symbols)
+    if args.update:
+        update(cfg, symbols=args.symbols)
+    return 0
+
+
+def cmd_backtest(args: argparse.Namespace, cfg: Config) -> int:
+    from .backtest.runner import run_backtest_command
+
+    return run_backtest_command(args, cfg)
+
+
+def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
+    from .scan import run_scan
+
+    return run_scan(cfg, dry_run=args.dry_run, force=args.force, as_of=args.date,
+                    refresh=not args.no_refresh)
+
+
+def cmd_confirm(args: argparse.Namespace, cfg: Config) -> int:
+    from .confirm import run_confirm
+
+    return run_confirm(cfg, dry_run=args.dry_run, sheet_path=args.sheet)
+
+
+def cmd_execute(args: argparse.Namespace, cfg: Config) -> int:
+    from .execution.executor import run_execute
+
+    return run_execute(cfg, live=args.live, sheet_path=args.sheet, assume_yes=args.yes)
+
+
+def cmd_auth(args: argparse.Namespace, cfg: Config) -> int:
+    from .auth import run_auth
+
+    return run_auth(cfg, check=args.check, force=args.force)
+
+
+def cmd_notify_test(args: argparse.Namespace, cfg: Config) -> int:
+    from .alerts.dispatch import notify_test
+
+    return notify_test(cfg)
+
+
+def cmd_schedule(args: argparse.Namespace, cfg: Config) -> int:
+    from .schedule import run_schedule
+
+    return run_schedule(cfg, action=args.action)
+
+
+def cmd_kill(args: argparse.Namespace, cfg: Config) -> int:
+    from .execution.guardrails import release_kill_switch, set_kill_switch
+
+    if args.release:
+        return release_kill_switch(cfg)
+    return set_kill_switch(cfg)
+
+
+def cmd_positions(args: argparse.Namespace, cfg: Config) -> int:
+    from .execution.journal import print_positions
+
+    return print_positions(cfg)

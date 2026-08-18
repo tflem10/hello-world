@@ -1,0 +1,28 @@
+# --- secrets & local state ---
+config.toml
+.swing/
+*.token.json
+schwab_token.json
+
+# --- data & outputs (large / regenerable) ---
+data/cache/
+reports/*/
+reports/*.html
+!reports/.gitkeep
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+.coverage
+htmlcov/
+
+# --- os ---
+.DS_Store
