@@ -25,6 +25,8 @@ typical flow:
   swing scan                      nightly picks -> phone/email/desktop
   swing confirm                   pre-open re-quote of last night's picks
   swing execute --live            v2: place the drafted orders (guarded)
+  swing journal add AAPL 10 190.50 182.00   record a hand-placed trade
+  swing positions                 what the journal says you hold
 """
 
 
@@ -101,6 +103,33 @@ def build_parser() -> argparse.ArgumentParser:
     # -- positions ----------------------------------------------------------
     sub.add_parser("positions", help="show open positions from the journal (and broker)")
 
+    # -- journal ------------------------------------------------------------
+    sp = sub.add_parser("journal", help="record and inspect trades in the trade journal")
+    jsub = sp.add_subparsers(dest="journal_command", metavar="<action>", required=True)
+
+    jp = jsub.add_parser("add", help="record a manual entry (buy)")
+    jp.add_argument("symbol", metavar="SYMBOL")
+    jp.add_argument("shares", metavar="SHARES")
+    jp.add_argument("price", metavar="PRICE")
+    jp.add_argument("stop", metavar="STOP")
+    jp.add_argument("--trail", metavar="OFFSET", default=0.0, help="trailing-stop offset")
+    jp.add_argument("--order-id", metavar="ID", default=None, help="broker order id")
+    jp.add_argument("--note", metavar="TEXT", default="", help="free-text note")
+
+    jp = jsub.add_parser("exit", help="record a full or partial exit (sell)")
+    jp.add_argument("symbol", metavar="SYMBOL")
+    jp.add_argument("shares", metavar="SHARES")
+    jp.add_argument("price", metavar="PRICE")
+    jp.add_argument("--reason", metavar="TEXT", default="", help="why you sold")
+
+    jp = jsub.add_parser("stop", help="move a stop (up, unless --force)")
+    jp.add_argument("symbol", metavar="SYMBOL")
+    jp.add_argument("new_stop", metavar="NEW_STOP")
+    jp.add_argument("--force", action="store_true", help="allow lowering the stop (typo fix)")
+
+    jp = jsub.add_parser("show", help="human-readable tail of the event log")
+    jp.add_argument("--limit", metavar="N", default=20, help="how many events to print")
+
     return p
 
 
@@ -174,6 +203,10 @@ def _dispatch(command: str, args: argparse.Namespace, cfg) -> int:
         from .commands import cmd_positions
 
         return cmd_positions(args, cfg)
+    if command == "journal":
+        from .commands import cmd_journal
+
+        return cmd_journal(args, cfg)
     log.error("unknown command: %s", command)
     return 2
 

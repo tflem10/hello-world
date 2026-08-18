@@ -94,3 +94,22 @@ def cmd_positions(args: argparse.Namespace, cfg: Config) -> int:
     from .execution.journal import print_positions
 
     return print_positions(cfg)
+
+
+def cmd_journal(args: argparse.Namespace, cfg: Config) -> int:
+    from .execution.journal import journal_add, journal_exit, journal_show, journal_stop
+
+    action = getattr(args, "journal_command", None)
+    if action == "add":
+        return journal_add(
+            cfg, args.symbol, args.shares, args.price, args.stop,
+            trail=args.trail, order_id=args.order_id, note=args.note,
+        )
+    if action == "exit":
+        return journal_exit(cfg, args.symbol, args.shares, args.price, reason=args.reason)
+    if action == "stop":
+        return journal_stop(cfg, args.symbol, args.new_stop, force=args.force)
+    if action == "show":
+        return journal_show(cfg, limit=args.limit)
+    log.error("unknown journal action: %s", action)
+    return 2

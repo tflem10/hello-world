@@ -14,7 +14,9 @@ sheet will say so.
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -194,6 +196,23 @@ def placed_today(cfg: Config, when: date | None = None) -> list[dict]:
     ]
 
 
+POSITION_HEADER = f"  {'symbol':<8}{'shares':>8}{'entry':>10}{'stop':>10}{'risk':>10}  since"
+
+
+def position_risk(pos: OpenPosition) -> float:
+    """Dollars lost if the stop fills. Never negative: a stop above the entry
+    is a locked-in gain, not negative risk."""
+    return max(pos.entry_price - pos.stop, 0.0) * pos.shares
+
+
+def position_line(pos: OpenPosition) -> str:
+    """One position as a row under :data:`POSITION_HEADER`."""
+    return (
+        f"  {pos.symbol:<8}{pos.shares:>8}{pos.entry_price:>10.2f}"
+        f"{pos.stop:>10.2f}{position_risk(pos):>10.2f}  {pos.entry_date}"
+    )
+
+
 def print_positions(cfg: Config) -> int:
     positions = open_positions(cfg)
     path = journal_path(cfg)
@@ -201,25 +220,249 @@ def print_positions(cfg: Config) -> int:
         print(f"no open positions recorded in {path}")
         print(
             "\nIf you placed orders by hand, record them so the scanner knows:\n"
-            "  python -c \"from swing.config import load_config; "
-            "from swing.execution.journal import record_entry; "
-            "record_entry(load_config(), 'AAPL', 10, 190.50, 182.00)\""
+            "  swing journal add AAPL 10 190.50 182.00"
         )
         return 0
 
     print(f"open positions (from {path}):")
-    print(f"  {'symbol':<8}{'shares':>8}{'entry':>10}{'stop':>10}{'risk':>10}  since")
+    print(POSITION_HEADER)
     total_risk = 0.0
     for pos in sorted(positions.values(), key=lambda p: p.symbol):
-        risk = max(pos.entry_price - pos.stop, 0.0) * pos.shares
-        total_risk += risk
-        print(
-            f"  {pos.symbol:<8}{pos.shares:>8}{pos.entry_price:>10.2f}"
-            f"{pos.stop:>10.2f}{risk:>10.2f}  {pos.entry_date}"
-        )
+        total_risk += position_risk(pos)
+        print(position_line(pos))
     equity = float(cfg.account.equity)
     print(
         f"\n  {len(positions)} position(s), ${total_risk:,.2f} at risk "
         f"({total_risk / equity:.1%} of ${equity:,.2f} equity) if every stop fills"
     )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ``swing journal add|exit|stop|show``
+#
+# Recording a hand-placed trade used to mean an inline ``python -c`` one-liner,
+# which is exactly the kind of friction that ends with an unrecorded position
+# and a scanner that thinks you are flat. These four functions are the whole
+# CLI surface; ``commands.cmd_journal`` only unpacks argparse into them.
+#
+# Every one of them validates *before* it writes. The journal is append-only,
+# so a bad line cannot be taken back — it can only be argued with by a later
+# event. Refusing up front is the only real correction mechanism there is.
+# ---------------------------------------------------------------------------
+
+
+class JournalInputError(ValueError):
+    """An argument the journal refuses to record. Carries the user-facing text."""
+
+
+def _fail(exc: Exception) -> int:
+    """One line on stderr, exit code 2, nothing written to the journal."""
+    print(f"error: {exc}", file=sys.stderr)
+    return 2
+
+
+def _parse_symbol(raw: Any) -> str:
+    symbol = str(raw or "").strip().upper()
+    if not symbol:
+        raise JournalInputError("symbol is required")
+    return symbol
+
+
+def _parse_int(raw: Any, label: str) -> int:
+    """A whole number >= 1. Fractional shares are not a thing this system
+    sizes, and ``int("10.5")`` raising is the point, not a nuisance."""
+    text = str(raw).strip()
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise JournalInputError(f"{label} must be a whole number, got {text!r}") from None
+    if value < 1:
+        raise JournalInputError(f"{label} must be at least 1, got {value}")
+    return value
+
+
+def _parse_amount(raw: Any, label: str, allow_zero: bool = False) -> float:
+    text = str(raw).strip()
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise JournalInputError(f"{label} must be a number, got {text!r}") from None
+    if not math.isfinite(value):
+        raise JournalInputError(f"{label} must be a finite number, got {text!r}")
+    if value < 0 or (value == 0 and not allow_zero):
+        floor = "0 or more" if allow_zero else "greater than 0"
+        raise JournalInputError(f"{label} must be {floor}, got {value:g}")
+    return value
+
+
+def _require_open(cfg: Config, symbol: str) -> OpenPosition:
+    position = open_positions(cfg).get(symbol)
+    if position is None:
+        raise JournalInputError(
+            f"{symbol} is not an open position — `swing positions` lists what the journal holds"
+        )
+    return position
+
+
+def journal_add(
+    cfg: Config,
+    symbol: Any,
+    shares: Any,
+    price: Any,
+    stop: Any,
+    trail: Any = 0.0,
+    order_id: str | None = None,
+    note: str = "",
+) -> int:
+    """Record a manual entry and print the resulting position."""
+    try:
+        sym = _parse_symbol(symbol)
+        shares_n = _parse_int(shares, "shares")
+        price_f = _parse_amount(price, "price")
+        stop_f = _parse_amount(stop, "stop")
+        trail_f = _parse_amount(0.0 if trail is None else trail, "trail", allow_zero=True)
+        if stop_f >= price_f:
+            raise JournalInputError(
+                f"stop {stop_f:.2f} must be below the entry price {price_f:.2f} — "
+                "a long stop above the entry is nonsense"
+            )
+    except JournalInputError as exc:
+        return _fail(exc)
+
+    record_entry(
+        cfg, sym, shares_n, price_f, stop_f,
+        trail_offset=trail_f, order_id=order_id, note=note or "",
+    )
+    position = open_positions(cfg).get(sym)
+    if position is None:  # pragma: no cover - only reachable if the write failed
+        print(f"error: recorded {sym} but it is not in {journal_path(cfg)}", file=sys.stderr)
+        return 1
+    print(f"recorded entry in {journal_path(cfg)}:")
+    print(POSITION_HEADER)
+    print(position_line(position))
+    return 0
+
+
+def journal_exit(cfg: Config, symbol: Any, shares: Any, price: Any, reason: str = "") -> int:
+    """Record a full or partial exit and print what is left."""
+    try:
+        sym = _parse_symbol(symbol)
+        shares_n = _parse_int(shares, "shares")
+        price_f = _parse_amount(price, "price")
+        position = _require_open(cfg, sym)
+        if shares_n > position.shares:
+            raise JournalInputError(
+                f"cannot exit {shares_n} shares of {sym}: only {position.shares} held"
+            )
+    except JournalInputError as exc:
+        return _fail(exc)
+
+    entry_price = position.entry_price
+    record_exit(cfg, sym, shares_n, price_f, reason=reason or "")
+    pnl = (price_f - entry_price) * shares_n
+    remaining = open_positions(cfg).get(sym)
+    tail = (
+        "position closed"
+        if remaining is None
+        else f"{remaining.shares} shares remaining"
+    )
+    print(
+        f"{sym}: sold {shares_n} @ {price_f:.2f} vs entry {entry_price:.2f} "
+        f"({pnl:+,.2f}) — {tail}"
+    )
+    return 0
+
+
+def journal_stop(cfg: Config, symbol: Any, new_stop: Any, force: bool = False) -> int:
+    """Ratchet a stop up (or, with ``force``, correct one that was typed wrong)."""
+    try:
+        sym = _parse_symbol(symbol)
+        stop_f = _parse_amount(new_stop, "stop")
+        position = _require_open(cfg, sym)
+        if stop_f < position.stop and not force:
+            raise JournalInputError(
+                f"refusing to lower the {sym} stop from {position.stop:.2f} to {stop_f:.2f}: "
+                "stops only ratchet up. Pass --force if you are fixing a typo."
+            )
+    except JournalInputError as exc:
+        return _fail(exc)
+
+    old_stop = position.stop
+    record(cfg, EVENT_STOP_MOVED, symbol=sym, stop=stop_f, prev_stop=old_stop, forced=bool(force))
+    print(f"{sym} stop {old_stop:.2f} -> {stop_f:.2f}")
+    return 0
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def describe_event(event: dict) -> str:
+    """One journal event as one line: when, what, which symbol, the numbers."""
+    ts = str(event.get("ts", ""))[:19]
+    kind = str(event.get("type", "?"))
+    symbol = str(event.get("symbol", "") or "-").upper()
+    return f"  {ts:<19}  {kind:<11}{symbol:<8}{_event_detail(event, kind)}".rstrip()
+
+
+def _event_detail(event: dict, kind: str) -> str:
+    shares = _as_int(event.get("shares"))
+    price = _as_float(event.get("price"))
+    stop = _as_float(event.get("stop"))
+    prev_stop = _as_float(event.get("prev_stop"))
+    bits: list[str] = []
+
+    if kind == EVENT_STOP_MOVED:
+        if stop is not None and prev_stop is not None:
+            bits.append(f"stop {prev_stop:.2f} -> {stop:.2f}")
+        elif stop is not None:
+            bits.append(f"stop {stop:.2f}")
+    else:
+        if shares is not None and price is not None:
+            bits.append(f"{shares} @ {price:.2f}")
+        elif shares is not None:
+            bits.append(f"{shares} sh")
+        elif price is not None:
+            bits.append(f"@ {price:.2f}")
+        if stop is not None:
+            bits.append(f"stop {stop:.2f}")
+
+    for key in ("reason", "note", "order_id"):
+        value = event.get(key)
+        if value:
+            bits.append(f"{key}={value}")
+    return "  ".join(bits)
+
+
+def journal_show(cfg: Config, limit: Any = 20) -> int:
+    """Print the tail of the event log. Corrupt lines are already dropped by
+    :func:`read_events`, so a half-written line never hides the rest."""
+    try:
+        limit_n = _parse_int(limit, "--limit")
+    except JournalInputError as exc:
+        return _fail(exc)
+
+    path = journal_path(cfg)
+    events = read_events(cfg)
+    if not events:
+        print(f"the journal at {path} is empty")
+        print("record your first trade with: swing journal add AAPL 10 190.50 182.00")
+        return 0
+
+    tail = events[-limit_n:]
+    print(f"last {len(tail)} of {len(events)} event(s) in {path}:")
+    for event in tail:
+        print(describe_event(event))
     return 0
