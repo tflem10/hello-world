@@ -63,7 +63,8 @@ class Guard:
     detail: str = ""
 
     def line(self) -> str:
-        return f"  [{'ok  ' if self.passed else 'BLOCK'}] {self.name:<20} {self.detail}"
+        mark = "ok" if self.passed else "BLOCK"
+        return f"  [{mark:<5}] {self.name:<20} {self.detail}"
 
 
 @dataclass

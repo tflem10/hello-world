@@ -40,8 +40,10 @@ class GateStatus:
         if self.report_path:
             lines.append(f"  report: {self.report_path}")
         for name, actual, threshold, ok in self.checked:
-            mark = "ok " if ok else "FAIL"
-            lines.append(f"  [{mark}] {name:<16} {actual:>10.3f}  (limit {threshold:g})")
+            mark = "ok" if ok else "FAIL"
+            lines.append(
+                f"  [{mark:<4}] {name:<16} {actual:>10.3f}  (limit {threshold:g})"
+            )
         for reason in self.reasons:
             lines.append(f"  - {reason}")
         return "\n".join(lines)
