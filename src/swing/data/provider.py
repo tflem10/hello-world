@@ -149,6 +149,10 @@ def get_provider(cfg) -> DataProvider:
         from .schwab_provider import SchwabProvider
 
         return SchwabProvider(cfg)
+    if name == "stooq":
+        from .stooq_provider import StooqProvider
+
+        return StooqProvider(cfg)
     raise ValueError(
-        f"unknown data.provider {name!r} (expected 'yfinance' or 'schwab')"
+        f"unknown data.provider {name!r} (expected 'yfinance', 'schwab' or 'stooq')"
     )
