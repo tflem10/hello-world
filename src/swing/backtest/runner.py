@@ -19,8 +19,8 @@ from ..data.universe import UNIVERSE_DIR, Symbol, build_universe, read_symbol_fi
 from ..logging_setup import get_logger
 from ..strategy.rules import SymbolMeta, fundamentals_ok
 from .engine import run_backtest
-from .metrics import compute_metrics
-from .report import build_report, report_dir
+from .metrics import apply_benchmark, benchmark_equity, compute_metrics
+from .report import bootstrap_extras, build_report, report_dir
 from .walkforward import apply_overrides, parameter_sensitivity, run_walk_forward
 
 log = get_logger("swing.backtest.runner")
@@ -91,6 +91,72 @@ def load_universe_bars(cfg: Config, etf_only: bool = False):
     return bars, meta, benchmark
 
 
+def load_earnings(cfg: Config) -> tuple[dict | None, dict]:
+    """Load the optional historical earnings calendar named by ``[data]``.
+
+    Returns ``(calendar, manifest_extra)``. With no ``data.earnings_calendar``
+    key — the shipped default — this returns ``(None, {})`` and every backtest
+    behaves exactly as it did before, warning included: the engine says loudly
+    that the blackout was not applied.
+
+    The key lives under ``[data]`` rather than ``[backtest]`` on purpose.
+    ``Config.hash`` covers ``[account][universe][strategy][backtest]``, and a
+    new key there would re-lock every user's gate.
+    """
+    raw = str(cfg.data.get("earnings_calendar", "") or "").strip()
+    if not raw:
+        return None, {}
+
+    path = cfg.expand_path(raw)
+    # Imported lazily so the whole backtest package does not depend on a module
+    # that only matters when the user actually supplies a calendar.
+    from ..data.earnings_calendar import load_earnings_calendar
+
+    try:
+        calendar = load_earnings_calendar(path)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"earnings calendar not found: {path}\n"
+            "Set [data] earnings_calendar to an existing file, or remove the key "
+            "to run without an earnings blackout (the report will say so)."
+        ) from exc
+
+    n_symbols = len(calendar)
+    n_dates = sum(len(v) for v in calendar.values())
+    log.info(
+        "earnings calendar: %d symbols, %d dated events (%s)", n_symbols, n_dates, path
+    )
+    return calendar, {
+        "earnings_calendar": str(path),
+        "earnings_calendar_symbols": n_symbols,
+        "earnings_calendar_dates": n_dates,
+    }
+
+
+def _benchmark_series(
+    cfg: Config, benchmark, equity: pd.Series
+) -> tuple[pd.Series | None, list[str]]:
+    """Buy-and-hold benchmark equity over exactly the reported window.
+
+    The comparison has to cover the same dates as the curve it is compared
+    against — for the walk-forward that is the concatenated out-of-sample
+    window, not the full history.
+    """
+    symbol = str(cfg.strategy.regime.get("symbol", "SPY")).upper()
+    if benchmark is None or not len(benchmark) or equity is None or not len(equity):
+        return None, [
+            f"benchmark {symbol} has no bars in the reported window, so no "
+            "buy-and-hold comparison is shown."
+        ]
+    series = benchmark_equity(benchmark, equity.index, float(equity.iloc[0]))
+    if not len(series):
+        return None, [
+            f"benchmark {symbol} has no bars in the reported window, so no "
+            "buy-and-hold comparison is shown."
+        ]
+    return series, []
+
+
 def run_backtest_command(args: argparse.Namespace, cfg: Config) -> int:
     start = date.fromisoformat(args.start) if args.start else date.fromisoformat(
         str(cfg.backtest.start)
@@ -126,11 +192,17 @@ def _tag(args: argparse.Namespace, base: str, etf_only: bool) -> str:
 
 def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
+    earnings, earnings_manifest = load_earnings(cfg)
     result = run_walk_forward(
-        cfg, bars, meta=meta, benchmark=benchmark, start=start, end=end
+        cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
+        start=start, end=end,
     )
 
-    warnings = list(result.warnings)
+    bench_equity, bench_warnings = _benchmark_series(cfg, benchmark, result.equity)
+    apply_benchmark(result.metrics, bench_equity)
+    boot_tables, boot_manifest, boot_warnings = bootstrap_extras(cfg, result.equity)
+
+    warnings = list(result.warnings) + bench_warnings + boot_warnings
     if etf_only:
         warnings.append(
             "ETF-only universe: no survivorship bias, and no single-stock upside "
@@ -150,8 +222,11 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
         ),
         result=result,
         kind="walk_forward",
-        extra_tables={"walk_forward_windows": result.window_table()},
+        benchmark=bench_equity,
+        extra_tables={"walk_forward_windows": result.window_table(), **boot_tables},
         manifest_extra={
+            **earnings_manifest,
+            **boot_manifest,
             "windows": len(result.windows),
             "in_sample_years": int(cfg.backtest.walk_forward.in_sample_years),
             "out_of_sample_years": int(cfg.backtest.walk_forward.out_of_sample_years),
@@ -174,22 +249,28 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
 
 def _run_full(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
+    earnings, earnings_manifest = load_earnings(cfg)
     result = run_backtest(
-        cfg, bars, meta=meta, benchmark=benchmark, start=start, end=end, label="full"
+        cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
+        start=start, end=end, label="full",
     )
     metrics = compute_metrics(
         result.equity, result.trades, result.exposure, result.open_positions
     )
+    bench_equity, bench_warnings = _benchmark_series(cfg, benchmark, result.equity)
+    apply_benchmark(metrics, bench_equity)
     report = build_report(
         cfg,
         title="Full-period backtest — " + ("ETF universe" if etf_only else "full universe"),
         result=result,
         kind="full_period",
-        manifest_extra={"etf_only": etf_only, "data_hash": result.data_hash,
+        benchmark=bench_equity,
+        manifest_extra={**earnings_manifest, "etf_only": etf_only,
+                        "data_hash": result.data_hash,
                         "universe_size": result.universe_size},
     )
     report.metrics = metrics
-    report.warnings = list(result.warnings) + [
+    report.warnings = list(result.warnings) + bench_warnings + [
         "This is an in-sample, full-period run over parameters that were chosen "
         "with knowledge of this whole period. It is reported for context only and "
         "does NOT satisfy the trading gate — only the walk-forward report does."
@@ -208,6 +289,7 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
     be removed from the defaults, not defended.
     """
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
+    earnings, earnings_manifest = load_earnings(cfg)
     feature_cache: dict = {}
     rows = []
     baseline_metrics = None
@@ -216,8 +298,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
         trial = apply_overrides(cfg, overrides) if overrides else cfg
         log.info("ablation: %s", name)
         result = run_backtest(
-            trial, bars, meta=meta, benchmark=benchmark, start=start, end=end,
-            label=name, feature_cache=feature_cache,
+            trial, bars, meta=meta, benchmark=benchmark, earnings=earnings,
+            start=start, end=end, label=name, feature_cache=feature_cache,
         )
         m = compute_metrics(result.equity, result.trades, result.exposure,
                             result.open_positions)
@@ -245,8 +327,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
 
     # The report body needs *a* result; use the baseline run for the curves.
     baseline_result = run_backtest(
-        cfg, bars, meta=meta, benchmark=benchmark, start=start, end=end,
-        label="baseline", feature_cache=feature_cache,
+        cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
+        start=start, end=end, label="baseline", feature_cache=feature_cache,
     )
     report = build_report(
         cfg,
@@ -254,7 +336,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
         result=baseline_result,
         kind="ablation",
         extra_tables={"ablations": table},
-        manifest_extra={"etf_only": etf_only, "ablations": table.reset_index().to_dict("records")},
+        manifest_extra={**earnings_manifest, "etf_only": etf_only,
+                        "ablations": table.reset_index().to_dict("records")},
     )
     report.warnings = list(baseline_result.warnings) + [
         "Ablations are run over the full period in-sample. They answer 'what did "
@@ -270,12 +353,14 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
 
 def _run_sensitivity(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
+    earnings, earnings_manifest = load_earnings(cfg)
     table = parameter_sensitivity(
         cfg, bars, SENSITIVITY_PARAMS, meta=meta, benchmark=benchmark,
-        start=start, end=end,
+        earnings=earnings, start=start, end=end,
     )
     baseline = run_backtest(
-        cfg, bars, meta=meta, benchmark=benchmark, start=start, end=end, label="baseline"
+        cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
+        start=start, end=end, label="baseline",
     )
     report = build_report(
         cfg,
@@ -283,6 +368,7 @@ def _run_sensitivity(cfg, args, start, end, etf_only: bool) -> None:
         result=baseline,
         kind="sensitivity",
         extra_tables={"sensitivity": table.set_index("parameter")},
+        manifest_extra=dict(earnings_manifest),
     )
     report.warnings = list(baseline.warnings) + [
         "Read this table for FLATNESS, not for the best cell. If a parameter's "

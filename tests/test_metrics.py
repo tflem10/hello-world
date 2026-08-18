@@ -8,6 +8,9 @@ import pytest
 
 from swing.backtest.metrics import (
     TRADING_DAYS,
+    annualised_return,
+    apply_benchmark,
+    benchmark_equity,
     compute_metrics,
     drawdown_series,
     drawdown_stats,
@@ -16,6 +19,8 @@ from swing.backtest.metrics import (
     trade_stats,
     yearly_table,
 )
+
+from .conftest import engine_config, make_bars
 
 
 def _equity(values, start="2020-01-01"):
@@ -195,3 +200,167 @@ def test_summary_lines_are_all_strings():
     lines = m.summary_lines()
     assert all(isinstance(line, str) for line in lines)
     assert any("CAGR" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# benchmark comparison
+# ---------------------------------------------------------------------------
+def _bench_bars(closes, start="2020-01-01"):
+    return make_bars(closes, start=start)
+
+
+def test_benchmark_equity_starts_at_the_strategy_capital():
+    """Both curves must start from the same dollar on the same day, or the
+    comparison is between two different accounts."""
+    eq = _equity(np.linspace(10_000, 12_000, 50))
+    bench = benchmark_equity(_bench_bars(np.linspace(100, 150, 50)), eq.index, 10_000.0)
+    assert len(bench) == len(eq)
+    assert float(bench.iloc[0]) == pytest.approx(10_000.0)
+    assert list(bench.index) == list(eq.index)
+
+
+def test_a_benchmark_that_doubles_reports_a_100_percent_return():
+    """Hand-computable: close 100 -> 200 over exactly one trading year."""
+    eq = _equity(np.linspace(10_000, 10_000, TRADING_DAYS))
+    bench_bars = _bench_bars(np.linspace(100, 200, TRADING_DAYS))
+    bench = benchmark_equity(bench_bars, eq.index, 10_000.0)
+
+    m = apply_benchmark(compute_metrics(eq, pd.DataFrame()), bench)
+    assert m.benchmark_return == pytest.approx(1.0)
+    assert m.benchmark_cagr == pytest.approx(1.0, rel=0.02)
+    assert float(bench.iloc[-1]) == pytest.approx(20_000.0)
+
+
+def test_excess_cagr_is_strategy_minus_benchmark():
+    eq = _equity(np.linspace(10_000, 15_000, TRADING_DAYS))
+    bench = benchmark_equity(
+        _bench_bars(np.linspace(100, 200, TRADING_DAYS)), eq.index, 10_000.0
+    )
+    m = apply_benchmark(compute_metrics(eq, pd.DataFrame()), bench)
+    assert m.excess_cagr == pytest.approx(m.cagr - m.benchmark_cagr)
+    assert m.excess_cagr < 0            # 50% behind a doubling benchmark
+
+
+def test_benchmark_drawdown_is_measured_on_the_benchmark_not_the_strategy():
+    eq = _equity(np.linspace(10_000, 11_000, 5))
+    bench = benchmark_equity(_bench_bars([100, 200, 150, 180, 250]), eq.index, 10_000.0)
+    m = apply_benchmark(compute_metrics(eq, pd.DataFrame()), bench)
+    assert m.benchmark_max_drawdown == pytest.approx(0.25)
+    assert m.max_drawdown == 0.0
+
+
+def test_a_benchmark_with_gaps_is_forward_filled_onto_the_strategy_index():
+    """The benchmark not trading on a day the strategy did must not punch a
+    hole in the comparison; the last known close carries forward."""
+    eq = _equity([10_000.0] * 10)
+    sparse = _bench_bars(np.linspace(100, 190, 10)).iloc[[0, 3, 9]]
+    bench = benchmark_equity(sparse, eq.index, 10_000.0)
+    assert len(bench) == len(eq)
+    assert not bench.isna().any()
+    # Days 1 and 2 hold day 0's value.
+    assert float(bench.iloc[1]) == pytest.approx(float(bench.iloc[0]))
+    assert float(bench.iloc[4]) == pytest.approx(float(bench.iloc[3]))
+
+
+def test_a_benchmark_starting_late_only_covers_the_days_it_has():
+    eq = _equity([10_000.0] * 20)
+    late = _bench_bars(np.linspace(100, 120, 20)).iloc[10:]
+    bench = benchmark_equity(late, eq.index, 10_000.0)
+    assert len(bench) == 10
+    assert float(bench.iloc[0]) == pytest.approx(10_000.0)
+
+
+def test_a_benchmark_with_no_bars_in_window_yields_an_empty_series():
+    eq = _equity([10_000.0] * 20, start="2020-01-01")
+    elsewhere = _bench_bars(np.linspace(100, 120, 20), start="2024-01-01")
+    assert len(benchmark_equity(elsewhere, eq.index, 10_000.0)) == 0
+    assert len(benchmark_equity(None, eq.index, 10_000.0)) == 0
+    assert len(benchmark_equity(pd.DataFrame(), eq.index, 10_000.0)) == 0
+
+
+def test_benchmark_fields_are_none_without_a_benchmark():
+    m = compute_metrics(_equity(np.linspace(100, 120, 50)), pd.DataFrame())
+    assert m.benchmark_return is None
+    assert m.benchmark_cagr is None
+    assert m.benchmark_max_drawdown is None
+    assert m.excess_cagr is None
+    assert apply_benchmark(m, None).excess_cagr is None
+    assert apply_benchmark(m, pd.Series(dtype="float64")).excess_cagr is None
+
+
+def test_summary_lines_omit_the_benchmark_until_it_is_populated():
+    eq = _equity(np.linspace(100, 150, 300))
+    m = compute_metrics(eq, _trades([10, -5]))
+    assert not any("benchmark" in line for line in m.summary_lines())
+
+    apply_benchmark(m, benchmark_equity(_bench_bars(np.linspace(50, 60, 300)), eq.index, 100.0))
+    lines = m.summary_lines()
+    assert any("benchmark B&H" in line for line in lines)
+    assert any("excess CAGR" in line for line in lines)
+
+
+def test_annualised_return_matches_compute_metrics():
+    eq = _equity(np.linspace(100, 200, TRADING_DAYS))
+    m = compute_metrics(eq, pd.DataFrame())
+    assert annualised_return(100.0, 200.0, TRADING_DAYS) == pytest.approx(m.cagr)
+
+
+# ---------------------------------------------------------------------------
+# the report survives both cases
+# ---------------------------------------------------------------------------
+def _report_config(tmp_path):
+    from swing.config import Config
+
+    data = engine_config().as_dict()
+    data["reports"]["dir"] = str(tmp_path / "reports")
+    return Config(data)
+
+
+def _fake_result(equity, trades):
+    return type("R", (), {
+        "equity": equity, "trades": trades, "exposure": None,
+        "open_positions": None, "warnings": [],
+    })()
+
+
+def test_metrics_json_round_trips_the_absent_benchmark_as_null(tmp_path):
+    """``None`` benchmark fields must serialise as JSON null, not crash and not
+    silently become 0.0 — a zero would read as 'buy-and-hold went nowhere'."""
+    import json
+
+    from swing.backtest.report import build_report, report_dir
+
+    cfg = _report_config(tmp_path)
+    eq = _equity(np.linspace(10_000, 12_000, 120))
+    report = build_report(cfg, "plain run", _fake_result(eq, _trades([10, -5])))
+    out = report.write(report_dir(cfg, "nobench"))
+
+    payload = json.loads((out / "metrics.json").read_text())
+    for key in ("benchmark_return", "benchmark_cagr", "benchmark_max_drawdown",
+                "excess_cagr"):
+        assert key in payload
+        assert payload[key] is None
+    assert "benchmark B&H" not in (out / "report.md").read_text()
+    assert "vs benchmark" not in (out / "report.html").read_text()
+    assert (out / "report.html").exists()
+
+
+def test_the_report_overlays_a_benchmark_when_one_is_supplied(tmp_path):
+    import json
+
+    from swing.backtest.report import build_report, report_dir
+
+    cfg = _report_config(tmp_path)
+    eq = _equity(np.linspace(10_000, 12_000, 120))
+    bench = benchmark_equity(_bench_bars(np.linspace(100, 105, 120)), eq.index, 10_000.0)
+    result = _fake_result(eq, _trades([10, -5]))
+    report = build_report(cfg, "with benchmark", result, benchmark=bench)
+    apply_benchmark(report.metrics, bench)
+    out = report.write(report_dir(cfg, "withbench"))
+
+    text = (out / "report.md").read_text()
+    assert "benchmark B&H" in text
+    assert "excess CAGR" in text
+    assert "vs benchmark" in (out / "report.html").read_text()
+    payload = json.loads((out / "metrics.json").read_text())
+    assert payload["benchmark_return"] == pytest.approx(0.05, rel=1e-3)

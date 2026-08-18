@@ -6,11 +6,18 @@ import json
 from datetime import date
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from swing.backtest.gate import check_gate, find_reports
 from swing.backtest.metrics import compute_metrics
-from swing.backtest.report import build_report, report_dir
+from swing.backtest.report import (
+    bootstrap_extras,
+    bootstrap_settings,
+    build_report,
+    report_dir,
+)
+from swing.backtest.runner import _benchmark_series, load_earnings
 from swing.backtest.walkforward import (
     apply_overrides,
     grid_points,
@@ -191,6 +198,25 @@ def test_walk_forward_is_deterministic():
     assert a.chosen_params == b.chosen_params
 
 
+def test_bootstrap_intervals_are_identical_across_runs():
+    """The bootstrap must not be the thing that breaks byte-reproducibility:
+    a manifest that changes between two identical runs cannot be diffed."""
+    bars = _wf_universe()
+    cfg = _bootstrap_config(n_resamples=50, block_days=10)
+    a = run_walk_forward(cfg, bars)
+    b = run_walk_forward(cfg, bars)
+
+    tables_a, manifest_a, warnings_a = bootstrap_extras(cfg, a.equity)
+    tables_b, manifest_b, warnings_b = bootstrap_extras(cfg, b.equity)
+
+    assert manifest_a == manifest_b
+    assert warnings_a == warnings_b
+    assert list(tables_a) == list(tables_b)
+    for name, table in tables_a.items():
+        assert table.equals(tables_b[name])
+    assert manifest_a["bootstrap"]["n_resamples"] == 50
+
+
 def test_walk_forward_needs_enough_history():
     bars = _wf_universe(n_bars=300)
     cfg = _wf_config()
@@ -341,3 +367,285 @@ def test_gate_status_describe_is_readable(tmp_path):
                              "n_trades": 60, "sharpe": 0.9})
     text = check_gate(cfg).describe()
     assert "PASS" in text and "profit_factor" in text
+
+
+# ---------------------------------------------------------------------------
+# bootstrap wiring ([reports.bootstrap], NOT [backtest] — see Config.hash)
+# ---------------------------------------------------------------------------
+def _bootstrap_config(**bootstrap):
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    if bootstrap:
+        data["reports"]["bootstrap"] = {"enabled": True, "seed": 7, **bootstrap}
+    return Config(data)
+
+
+def test_bootstrap_settings_fall_back_to_code_defaults():
+    """`[reports.bootstrap]` does not exist in the shipped config yet, and the
+    code must not need it to."""
+    cfg = _wf_config()
+    assert "bootstrap" not in cfg.reports
+    assert bootstrap_settings(cfg) == {
+        "enabled": True, "n_resamples": 1000, "block_days": 20, "seed": 7,
+    }
+
+
+def test_bootstrap_settings_read_partial_overrides():
+    cfg = _bootstrap_config(n_resamples=25)
+    assert bootstrap_settings(cfg)["n_resamples"] == 25
+    assert bootstrap_settings(cfg)["block_days"] == 20      # still the default
+
+
+def test_bootstrap_knobs_do_not_change_the_config_hash():
+    """Adding a knob under [account][universe][strategy][backtest] would
+    silently invalidate every user's existing gate validation."""
+    assert _wf_config().hash == _bootstrap_config(n_resamples=25).hash
+
+
+def test_bootstrap_can_be_switched_off_entirely():
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    data["reports"]["bootstrap"] = {"enabled": False}
+    cfg = Config(data)
+    equity = pd.Series(
+        np.linspace(10_000, 12_000, 400),
+        index=pd.bdate_range("2020-01-01", periods=400),
+    )
+    assert bootstrap_extras(cfg, equity) == ({}, {}, [])
+
+
+def test_a_short_curve_warns_instead_of_reporting_an_interval():
+    cfg = _wf_config()
+    equity = pd.Series(
+        np.linspace(10_000, 11_000, 30),
+        index=pd.bdate_range("2020-01-01", periods=30),
+    )
+    tables, manifest, warnings = bootstrap_extras(cfg, equity)
+    assert tables == {} and manifest == {}
+    assert "too small to bootstrap" in warnings[0]
+
+
+def test_the_bootstrap_table_lands_in_the_report(tmp_path):
+    from swing.config import Config
+
+    data = _bootstrap_config(n_resamples=30, block_days=10).as_dict()
+    data["reports"]["dir"] = str(tmp_path / "reports")
+    cfg = Config(data)
+
+    equity = pd.Series(
+        np.linspace(10_000, 13_000, 400),
+        index=pd.bdate_range("2020-01-01", periods=400),
+    )
+    tables, manifest, warnings = bootstrap_extras(cfg, equity)
+    report = build_report(
+        cfg, "wf", type("R", (), {
+            "equity": equity, "trades": pd.DataFrame(), "exposure": None,
+            "open_positions": None, "warnings": warnings,
+        })(), kind="walk_forward", extra_tables=tables, manifest_extra=manifest,
+    )
+    out = report.write(report_dir(cfg, "walkforward"))
+
+    assert "bootstrap (n=30, block=10d)" in (out / "report.md").read_text()
+    assert (out / "bootstrap_n_30_block_10d.csv").exists()
+    written = json.loads((out / "manifest.json").read_text())
+    assert written["bootstrap"]["n_resamples"] == 30
+    assert "floor on the uncertainty" in " ".join(written["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# benchmark comparison window
+# ---------------------------------------------------------------------------
+def test_benchmark_covers_exactly_the_reported_window():
+    cfg = _wf_config()
+    equity = pd.Series(
+        np.linspace(10_000, 12_000, 200),
+        index=pd.bdate_range("2016-01-01", periods=200),
+    )
+    bench_bars = make_bars(np.linspace(100, 130, 800), start="2014-01-01")
+    series, warnings = _benchmark_series(cfg, bench_bars, equity)
+    assert warnings == []
+    assert list(series.index) == list(equity.index)
+    assert float(series.iloc[0]) == pytest.approx(10_000.0)
+
+
+def test_a_benchmark_outside_the_window_warns_instead_of_crashing():
+    cfg = _wf_config()
+    equity = pd.Series(
+        np.linspace(10_000, 12_000, 50),
+        index=pd.bdate_range("2016-01-01", periods=50),
+    )
+    late = make_bars(np.linspace(100, 130, 50), start="2024-01-01")
+    for benchmark in (None, late, pd.DataFrame()):
+        series, warnings = _benchmark_series(cfg, benchmark, equity)
+        assert series is None
+        assert "no bars in the reported window" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# earnings-calendar wiring
+# ---------------------------------------------------------------------------
+def _install_calendar_module(monkeypatch, calendar):
+    """Provide ``swing.data.earnings_calendar`` for the wiring tests.
+
+    The loader itself is owned by another package; this test only cares that
+    the runner calls the frozen contract and handles what it returns (or
+    raises). If the real module is already in the tree it is patched in place,
+    so the test keeps working once that lands.
+    """
+    import importlib
+    import sys
+    import types
+    from pathlib import Path
+
+    name = "swing.data.earnings_calendar"
+    try:
+        module = importlib.import_module(name)
+    except ModuleNotFoundError:
+        module = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, module)
+
+    def _load(path):
+        if not Path(path).exists():
+            raise FileNotFoundError(path)
+        return calendar
+
+    monkeypatch.setattr(module, "load_earnings_calendar", _load, raising=False)
+    return module
+
+
+def test_no_earnings_calendar_key_changes_nothing():
+    assert load_earnings(_wf_config()) == (None, {})
+
+
+def test_an_empty_earnings_calendar_path_changes_nothing():
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    data["data"]["earnings_calendar"] = "   "
+    assert load_earnings(Config(data)) == (None, {})
+
+
+def test_a_missing_earnings_calendar_file_exits_naming_the_path(tmp_path, monkeypatch):
+    from swing.config import Config
+
+    _install_calendar_module(monkeypatch, {})
+    missing = tmp_path / "earnings-2010-2024.csv"
+    data = _wf_config().as_dict()
+    data["data"]["earnings_calendar"] = str(missing)
+
+    with pytest.raises(SystemExit) as excinfo:
+        load_earnings(Config(data))
+    assert str(missing) in str(excinfo.value)
+
+
+def test_a_supplied_calendar_is_loaded_and_counted(tmp_path, monkeypatch):
+    from swing.config import Config
+
+    calendar = {"S00": [date(2016, 5, 4), date(2016, 8, 3)], "S01": [date(2016, 5, 5)]}
+    _install_calendar_module(monkeypatch, calendar)
+    path = tmp_path / "earnings.csv"
+    path.write_text("symbol,date\n")
+
+    data = _wf_config().as_dict()
+    data["data"]["earnings_calendar"] = str(path)
+    loaded, manifest = load_earnings(Config(data))
+
+    assert loaded == calendar
+    assert manifest["earnings_calendar"] == str(path)
+    assert manifest["earnings_calendar_symbols"] == 2
+    assert manifest["earnings_calendar_dates"] == 3
+
+
+def test_earnings_calendar_config_does_not_change_the_config_hash(tmp_path):
+    """[data] is outside Config.hash, so wiring a calendar in must not re-lock
+    a gate that was validated without one."""
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    before = Config(data).hash
+    data["data"]["earnings_calendar"] = str(tmp_path / "earnings.csv")
+    assert Config(data).hash == before
+
+
+def test_supplying_earnings_silences_the_missing_calendar_warning():
+    """The engine warns loudly when the blackout could not be applied. Once a
+    calendar is wired through the runner, that warning must disappear —
+    otherwise the report keeps disclaiming something it now does."""
+    bars = _wf_universe(n_symbols=3, n_bars=1100)
+    cfg = _wf_config()
+    assert int(cfg.strategy.earnings.blackout_days_before) > 0
+
+    without = run_walk_forward(cfg, bars)
+    assert any("no historical earnings calendar" in w for w in without.warnings)
+
+    calendar = {
+        sym: [date(2016, 2, 10), date(2016, 5, 11), date(2017, 2, 8)]
+        for sym in bars
+    }
+    with_calendar = run_walk_forward(cfg, bars, earnings=calendar)
+    assert not any(
+        "no historical earnings calendar" in w for w in with_calendar.warnings
+    )
+    assert len(with_calendar.segments) == len(without.segments)
+
+
+# ---------------------------------------------------------------------------
+# the assembled runner path
+# ---------------------------------------------------------------------------
+def test_the_walk_forward_runner_writes_benchmark_bootstrap_and_earnings(
+    tmp_path, monkeypatch
+):
+    """End-to-end over the runner: one report directory that answers 'did this
+    beat buy-and-hold?', carries an interval on the headline numbers, and
+    records the earnings calendar it applied."""
+    import argparse
+
+    from swing.backtest import runner as runner_module
+    from swing.config import Config
+
+    bars = _wf_universe(n_symbols=4, n_bars=1300)
+    benchmark = next(iter(bars.values())).copy()
+    calendar_path = tmp_path / "earnings.csv"
+    calendar_path.write_text("symbol,date\n")
+    _install_calendar_module(monkeypatch, {sym: [date(2016, 5, 4)] for sym in bars})
+
+    data = _wf_config().as_dict()
+    data["reports"]["dir"] = str(tmp_path / "reports")
+    data["reports"]["bootstrap"] = {
+        "enabled": True, "n_resamples": 40, "block_days": 10, "seed": 7,
+    }
+    data["data"]["earnings_calendar"] = str(calendar_path)
+    cfg = Config(data)
+
+    monkeypatch.setattr(
+        runner_module, "load_universe_bars",
+        lambda cfg, etf_only=False: (bars, None, benchmark),
+    )
+    args = argparse.Namespace(
+        tag=None, start=None, end=None, full=False, ablations=False,
+        sensitivity=False, walk_forward=True, etf_only=False,
+    )
+    runner_module._run_walk_forward(cfg, args, date(2014, 1, 1), None, etf_only=False)
+
+    out = sorted((tmp_path / "reports").glob("*walkforward*"))[-1]
+    manifest = json.loads((out / "manifest.json").read_text())
+
+    assert manifest["bootstrap"]["n_resamples"] == 40
+    assert manifest["earnings_calendar"] == str(calendar_path)
+    assert manifest["earnings_calendar_symbols"] == len(bars)
+    assert manifest["metrics"]["benchmark_return"] is not None
+    assert manifest["metrics"]["excess_cagr"] == pytest.approx(
+        manifest["metrics"]["cagr"] - manifest["metrics"]["benchmark_cagr"], abs=1e-6
+    )
+    # A calendar was supplied, so the engine must not still be disclaiming one.
+    assert not any(
+        "no historical earnings calendar" in w for w in manifest["warnings"]
+    )
+
+    text = (out / "report.md").read_text()
+    assert "benchmark B&H" in text
+    assert "bootstrap (n=40, block=10d)" in text
+    assert (out / "bootstrap_n_40_block_10d.csv").exists()
+    assert "vs benchmark" in (out / "report.html").read_text()

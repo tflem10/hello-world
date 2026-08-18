@@ -25,6 +25,7 @@ import pandas as pd
 from .. import __version__
 from ..config import REPO_ROOT, Config
 from ..logging_setup import get_logger
+from .bootstrap import BootstrapResult, bootstrap_equity
 from .metrics import (
     Metrics,
     compute_metrics,
@@ -91,6 +92,7 @@ class BacktestReport:
         *,
         exposure: pd.Series | None = None,
         open_positions: pd.Series | None = None,
+        benchmark: pd.Series | None = None,
         warnings: list[str] | None = None,
         extra_tables: dict[str, pd.DataFrame] | None = None,
         manifest_extra: dict | None = None,
@@ -103,6 +105,9 @@ class BacktestReport:
         self.metrics = metrics
         self.exposure = exposure
         self.open_positions = open_positions
+        # Buy-and-hold benchmark equity over the same window, already aligned
+        # and scaled by the caller (see metrics.benchmark_equity).
+        self.benchmark = benchmark if benchmark is not None and len(benchmark) else None
         self.warnings = list(warnings or [])
         self.extra_tables = extra_tables or {}
         self.manifest_extra = manifest_extra or {}
@@ -122,7 +127,7 @@ class BacktestReport:
         )
         for name, table in self.extra_tables.items():
             if table is not None and len(table):
-                table.to_csv(out_dir / f"{name}.csv")
+                table.to_csv(out_dir / f"{_slug(name)}.csv")
 
         charts = self._write_charts(out_dir)
         (out_dir / "report.md").write_text(self.to_markdown())
@@ -167,7 +172,16 @@ class BacktestReport:
         fig, axes = plt.subplots(
             2, 1, figsize=(11, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
         )
-        axes[0].plot(self.equity.index, self.equity.to_numpy(), lw=1.4, color="#1f77b4")
+        axes[0].plot(
+            self.equity.index, self.equity.to_numpy(), lw=1.4, color="#1f77b4",
+            label="strategy",
+        )
+        if self.benchmark is not None:
+            axes[0].plot(
+                self.benchmark.index, self.benchmark.to_numpy(), lw=1.2,
+                color="#7f7f7f", ls="--", label="benchmark",
+            )
+            axes[0].legend(loc="upper left")
         axes[0].set_ylabel("equity ($)")
         axes[0].set_title(self.title)
         axes[0].grid(alpha=0.25)
@@ -236,7 +250,7 @@ class BacktestReport:
 
         for name, table in self.extra_tables.items():
             if table is not None and len(table):
-                lines += [f"## {name.replace('_', ' ').title()}", "", _md_table(table), ""]
+                lines += [f"## {_table_title(name)}", "", _md_table(table), ""]
 
         if self.trades is not None and len(self.trades):
             cols = ["symbol", "entry_date", "exit_date", "exit_reason", "pnl", "r_multiple"]
@@ -270,6 +284,9 @@ class BacktestReport:
             ("Expectancy", f"{m.expectancy_r:+.3f} R"),
             ("Avg hold", f"{m.avg_hold_days:.0f} d"),
         ]
+        if m.excess_cagr is not None:
+            # The one number that answers "was any of this worth it?".
+            cards.insert(1, ("vs benchmark", f"{m.excess_cagr:+.2%} CAGR"))
         card_html = "".join(
             f'<div class="card"><div class="k">{k}</div><div class="v">{v}</div></div>'
             for k, v in cards
@@ -298,7 +315,7 @@ class BacktestReport:
             tables.append(("Exits", exits.round(3).to_html(classes="tbl")))
         for name, table in self.extra_tables.items():
             if table is not None and len(table):
-                tables.append((name.replace("_", " ").title(), table.to_html(classes="tbl")))
+                tables.append((_table_title(name), table.to_html(classes="tbl")))
         table_html = "".join(f"<h2>{_esc(t)}</h2>{html}" for t, html in tables)
 
         summary = _esc("\n".join(m.summary_lines()))
@@ -384,6 +401,32 @@ def _format_yearly(yearly: pd.DataFrame) -> pd.DataFrame:
     return out.rename(columns={"return": "return %", "max_drawdown": "max dd %"})
 
 
+def _table_title(name: str) -> str:
+    """Heading for an extra table.
+
+    Identifier-style keys are prettified the way they always were
+    (``walk_forward_windows`` -> ``Walk Forward Windows``); a key that is
+    already prose — ``bootstrap (n=1000, block=20d)`` — is left alone, because
+    title-casing it turns the units into nonsense (``10D``, ``N=1000``).
+    """
+    name = str(name)
+    return name if " " in name else name.replace("_", " ").title()
+
+
+_SLUG_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _slug(name: str) -> str:
+    """File-safe version of an extra-table name.
+
+    Table titles are human text ("bootstrap (n=1000, block=20d)"); file names
+    should not contain spaces or parentheses. Plain identifier-ish names such
+    as ``walk_forward_windows`` pass through unchanged, so existing report
+    directories keep the file names they have always had.
+    """
+    return _SLUG_CHARS.sub("_", str(name)).strip("_") or "table"
+
+
 def _md_table(frame: pd.DataFrame, index_label: str = "") -> str:
     header = [index_label or (frame.index.name or "")] + [str(c) for c in frame.columns]
     lines = ["| " + " | ".join(header) + " |",
@@ -439,6 +482,70 @@ def _jsonable(obj):
     return obj
 
 
+BOOTSTRAP_DEFAULTS = {"enabled": True, "n_resamples": 1000, "block_days": 20, "seed": 7}
+
+BOOTSTRAP_NOTE = (
+    "Bootstrap intervals resample ONE historical path, so they can only "
+    "reshuffle regimes that actually occurred in this sample. They are a floor "
+    "on the uncertainty, not an estimate of it: the true interval is wider."
+)
+
+
+def bootstrap_settings(cfg: Config) -> dict:
+    """Read ``[reports.bootstrap]``, falling back to code defaults.
+
+    Deliberately *not* under ``[backtest]``: ``Config.hash`` covers
+    ``[account][universe][strategy][backtest]``, and adding a key there would
+    silently invalidate every user's existing walk-forward gate validation.
+    Reporting knobs do not change trades, so they live in ``[reports]``.
+    """
+    node = cfg.reports.get("bootstrap", None)
+    settings = dict(BOOTSTRAP_DEFAULTS)
+    if node is None:
+        return settings
+    getter = getattr(node, "get", None)
+    if getter is None:                      # something odd in the TOML
+        return settings
+    settings["enabled"] = bool(getter("enabled", BOOTSTRAP_DEFAULTS["enabled"]))
+    settings["n_resamples"] = int(getter("n_resamples", BOOTSTRAP_DEFAULTS["n_resamples"]))
+    settings["block_days"] = int(getter("block_days", BOOTSTRAP_DEFAULTS["block_days"]))
+    settings["seed"] = int(getter("seed", BOOTSTRAP_DEFAULTS["seed"]))
+    return settings
+
+
+def bootstrap_extras(
+    cfg: Config, equity: pd.Series
+) -> tuple[dict[str, pd.DataFrame], dict, list[str]]:
+    """(extra tables, manifest extra, warnings) for the bootstrap block.
+
+    Returns empties when ``[reports.bootstrap] enabled = false``, so a report
+    built with it switched off is exactly the report that was built before this
+    feature existed.
+    """
+    settings = bootstrap_settings(cfg)
+    if not settings["enabled"]:
+        return {}, {}, []
+
+    result: BootstrapResult | None = bootstrap_equity(
+        equity,
+        n_resamples=settings["n_resamples"],
+        block_days=settings["block_days"],
+        seed=settings["seed"],
+    )
+    if result is None:
+        return {}, {}, [
+            "sample too small to bootstrap: the out-of-sample curve has fewer "
+            "than 60 daily returns, so no confidence interval is reported. "
+            "Treat the headline numbers as a single draw."
+        ]
+
+    return (
+        {result.label(): result.to_frame()},
+        {"bootstrap": result.as_dict()},
+        [BOOTSTRAP_NOTE],
+    )
+
+
 def build_report(
     cfg: Config,
     title: str,
@@ -446,6 +553,7 @@ def build_report(
     kind: str = "backtest",
     extra_tables: dict[str, pd.DataFrame] | None = None,
     manifest_extra: dict | None = None,
+    benchmark: pd.Series | None = None,
 ) -> BacktestReport:
     """Build a report from either a BacktestResult or a WalkForwardResult."""
     metrics = getattr(result, "metrics", None)
@@ -461,6 +569,7 @@ def build_report(
         metrics=metrics,
         exposure=getattr(result, "exposure", None),
         open_positions=getattr(result, "open_positions", None),
+        benchmark=benchmark,
         warnings=list(getattr(result, "warnings", []) or []),
         extra_tables=extra_tables,
         manifest_extra=manifest_extra,

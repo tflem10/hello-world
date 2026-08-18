@@ -14,6 +14,11 @@ really convention disagreements:
 * Profit factor is gross wins / gross losses. With no losing trades it is
   reported as infinity rather than being quietly clipped, because that is a
   sample-size warning, not a triumph.
+* The benchmark comparison is **buy-and-hold on the regime benchmark over the
+  exact window the equity curve covers**, scaled to the same starting capital.
+  A strategy that trails buy-and-hold on its own benchmark has not earned the
+  complexity it costs, and the report says so on the headline rather than
+  leaving the reader to do the arithmetic.
 """
 
 from __future__ import annotations
@@ -56,11 +61,19 @@ class Metrics:
     time_in_market: float
     trades_per_year: float
 
+    # Buy-and-hold on the benchmark over the same window. Optional, because a
+    # report may be built without one (no benchmark bars, ablation runs); the
+    # summary and the JSON both have to survive that cleanly.
+    benchmark_return: float | None = None
+    benchmark_cagr: float | None = None
+    benchmark_max_drawdown: float | None = None
+    excess_cagr: float | None = None
+
     def as_dict(self) -> dict:
         return asdict(self)
 
     def summary_lines(self) -> list[str]:
-        return [
+        lines = [
             f"period            {self.start} -> {self.end}  ({self.years:.2f}y)",
             f"equity            {self.initial_equity:,.0f} -> {self.final_equity:,.0f}"
             f"  ({self.total_return:+.1%})",
@@ -78,6 +91,21 @@ class Metrics:
             f"exposure          {self.avg_exposure:.1%} of capital, "
             f"{self.time_in_market:.1%} of days with a position",
         ]
+        if (
+            self.benchmark_return is not None
+            and self.benchmark_cagr is not None
+            and self.benchmark_max_drawdown is not None
+        ):
+            lines.append(
+                f"benchmark B&H     {self.benchmark_return:+.1%} total, "
+                f"{self.benchmark_cagr:.2%} CAGR, "
+                f"{self.benchmark_max_drawdown:.2%} max drawdown"
+            )
+        if self.excess_cagr is not None:
+            lines.append(
+                f"excess CAGR       {self.excess_cagr:+.2%} vs buy-and-hold"
+            )
+        return lines
 
 
 def compute_metrics(
@@ -97,7 +125,7 @@ def compute_metrics(
     initial, final = float(equity.iloc[0]), float(equity.iloc[-1])
     total_return = final / initial - 1.0 if initial > 0 else 0.0
 
-    cagr = ((final / initial) ** (1 / years) - 1.0) if (initial > 0 and years > 0) else 0.0
+    cagr = annualised_return(initial, final, n_days)
     vol = float(returns.std(ddof=1)) * np.sqrt(TRADING_DAYS) if len(returns) > 1 else 0.0
 
     daily_rf = risk_free_rate / TRADING_DAYS
@@ -146,6 +174,78 @@ def compute_metrics(
         **{k: v for k, v in stats.items() if k != "n_trades"},
         n_trades=stats["n_trades"],
     )
+
+
+def annualised_return(initial: float, final: float, n_days: int) -> float:
+    """CAGR under the house convention: ``n_days`` equity points, 252 per year.
+
+    Factored out so the bootstrap and the benchmark comparison annualise
+    exactly the way :func:`compute_metrics` does, rather than approximately.
+    """
+    years = n_days / TRADING_DAYS
+    if initial <= 0 or years <= 0:
+        return 0.0
+    if final <= 0:                          # wiped out: -100%, not "no return"
+        return -1.0
+    return (final / initial) ** (1 / years) - 1.0
+
+
+def benchmark_equity(
+    bench_bars: pd.DataFrame, index: pd.DatetimeIndex, initial: float
+) -> pd.Series:
+    """Buy-and-hold on the benchmark's close, aligned to a strategy equity index.
+
+    The benchmark is reindexed onto ``index`` and forward-filled, so a holiday
+    the benchmark did not trade through does not punch a hole in the
+    comparison, and then scaled so it starts at ``initial``. Both curves
+    therefore start from the same capital on the same day, which is the only
+    way "did this beat buy-and-hold?" has an answer.
+
+    Returns an **empty series** when the benchmark has no usable bars at or
+    before the window (the caller is expected to say so in the report rather
+    than silently omit the comparison).
+    """
+    empty = pd.Series(dtype="float64", name="benchmark")
+    if bench_bars is None or not len(bench_bars) or index is None or not len(index):
+        return empty
+    if "close" not in getattr(bench_bars, "columns", []):
+        return empty
+
+    close = pd.Series(bench_bars["close"]).astype(float).dropna()
+    close = close[~close.index.duplicated(keep="last")].sort_index()
+    if not len(close):
+        return empty
+
+    aligned = close.reindex(close.index.union(index)).ffill().reindex(index)
+    aligned = aligned.dropna()          # bars before the benchmark's first day
+    if not len(aligned):
+        return empty
+
+    first = float(aligned.iloc[0])
+    if first <= 0:
+        return empty
+    return (aligned * (initial / first)).rename("benchmark")
+
+
+def apply_benchmark(metrics: Metrics, bench_equity: pd.Series | None) -> Metrics:
+    """Populate the benchmark fields on ``metrics`` in place, and return it.
+
+    A benchmark curve with fewer than two points leaves every field ``None``,
+    which is how the report knows to omit the comparison instead of printing a
+    zero that reads like "buy-and-hold went nowhere".
+    """
+    if bench_equity is None or len(bench_equity) < 2:
+        return metrics
+    initial = float(bench_equity.iloc[0])
+    final = float(bench_equity.iloc[-1])
+    if initial <= 0:
+        return metrics
+
+    metrics.benchmark_return = final / initial - 1.0
+    metrics.benchmark_cagr = annualised_return(initial, final, len(bench_equity))
+    metrics.benchmark_max_drawdown = drawdown_stats(bench_equity)[0]
+    metrics.excess_cagr = metrics.cagr - metrics.benchmark_cagr
+    return metrics
 
 
 def drawdown_series(equity: pd.Series) -> pd.Series:
