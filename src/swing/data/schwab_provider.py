@@ -118,31 +118,18 @@ class SchwabProvider:
 
     # -- quotes ------------------------------------------------------------
     def quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        """Quotes with fallback. Fine for the pre-open confirm; NOT for execution.
+
+        Use :func:`live_quotes` in any code path that is about to transmit an
+        order — silently substituting a 15-minute-delayed print for a live NBBO
+        is exactly the kind of degradation that must never happen with money
+        moving.
+        """
         symbols = [s.upper() for s in symbols]
         try:
-            client = self.client
-            response = client.get_quotes(symbols)
-            response.raise_for_status()
-            payload = response.json()
+            return live_quotes(self.client, symbols)
         except Exception as exc:
             return self._fall_back("quotes", exc).quotes(symbols)
-
-        out: dict[str, Quote] = {}
-        for symbol in symbols:
-            entry = payload.get(symbol) or {}
-            quote = entry.get("quote") or {}
-            price = _first(quote, ("lastPrice", "mark", "closePrice"))
-            if price is None:
-                continue
-            out[symbol] = Quote(
-                symbol=symbol,
-                price=float(price),
-                bid=_first(quote, ("bidPrice",)),
-                ask=_first(quote, ("askPrice",)),
-                timestamp=_quote_time(quote),
-                stale=False,          # Schwab quotes are real-time, unlike yfinance
-            )
-        return out
 
     # -- earnings ----------------------------------------------------------
     def earnings_dates(self, symbols: list[str]) -> dict[str, date | None]:
@@ -189,6 +176,34 @@ class SchwabProvider:
             log.info("filling %d fundamental gap(s) from yfinance", len(unresolved))
             out.update(self._yfinance().fundamentals(unresolved))
         return out
+
+
+def live_quotes(client, symbols: list[str]) -> dict[str, Quote]:
+    """Real-time Schwab quotes, with **no fallback**.
+
+    Raises if the request fails. Callers in the execution path want that: no
+    quote means the quote-drift guardrail blocks, which is the correct outcome.
+    """
+    symbols = [s.upper() for s in symbols]
+    response = client.get_quotes(symbols)
+    response.raise_for_status()
+    payload = response.json()
+
+    out: dict[str, Quote] = {}
+    for symbol in symbols:
+        quote = (payload.get(symbol) or {}).get("quote") or {}
+        price = _first(quote, ("lastPrice", "mark", "closePrice"))
+        if price is None:
+            continue
+        out[symbol] = Quote(
+            symbol=symbol,
+            price=float(price),
+            bid=_first(quote, ("bidPrice",)),
+            ask=_first(quote, ("askPrice",)),
+            timestamp=_quote_time(quote),
+            stale=False,              # Schwab quotes are real-time, unlike yfinance
+        )
+    return out
 
 
 def _as_float(value) -> float | None:

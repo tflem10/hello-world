@@ -78,6 +78,10 @@ def token_status(cfg: Config, now: datetime | None = None) -> TokenStatus:
     """
     path = token_path(cfg)
     now = now or datetime.now()
+    if now.tzinfo is not None:
+        # Token timestamps are naive local time; callers (the executor) may pass
+        # a market-timezone-aware clock. Normalise rather than raising.
+        now = now.astimezone().replace(tzinfo=None)
     if not path.exists():
         return TokenStatus(exists=False, path=path)
 
