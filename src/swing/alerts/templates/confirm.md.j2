@@ -1,0 +1,19 @@
+# Swing confirmation — {{ asof }}
+
+- **Confirmed:** {{ counts.confirmed }}
+- **Invalidated:** {{ counts.invalidated }}
+- **No quote available:** {{ counts.unknown }}
+
+{% if rows %}
+| Symbol | Quote | Outcome | Why |
+| --- | ---: | --- | --- |
+{% for row in rows %}
+| **{{ row.symbol }}** | {{ row.quote | money }} | {{ row.label }} | {{ row.reason }} |
+{% endfor %}
+{% else %}
+There were no drafted picks left to re-check.
+{% endif %}
+
+A pick is invalidated when this morning's price has already run more than one
+ATR past the planned entry: the move happened without us, and chasing it buys a
+worse trade than the one that was tested.

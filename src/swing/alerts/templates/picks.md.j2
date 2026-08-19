@@ -1,0 +1,59 @@
+# Swing scan — {{ asof }}
+
+- **Backtest gate:** {% if gate_passed %}PASSED{% else %}NOT PASSED — no picks may be emitted{% endif +%}
+{% for reason in gate_reasons %}
+  - {{ reason }}
+{% endfor %}
+- **Market regime:** {% if regime_ok %}entries allowed{% else %}entries BLOCKED (existing positions are unaffected){% endif +%}
+- **Account equity:** {{ equity | money }}
+- **Generated:** {{ generated_at }}
+
+## Picks ({{ picks | length }})
+
+{% if picks %}
+Committing {{ total_notional | money }} with {{ total_risk | money }} at risk if every stop fills.
+
+| Symbol | Entry | Stop | Shares | Risk $ | Risk % of account | Notional | Earnings | Thesis |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+{% for row in picks %}
+| **{{ row.symbol }}** | {{ row.entry | money }} | {{ row.stop | money }} | {{ row.shares }} | {{ row.risk_amount | money }} | {{ row.risk_pct | pct }} | {{ row.notional | money }} | {% if row.earnings_unknown %}⚠️ UNKNOWN{% else %}{{ row.earnings_label }}{% endif %} | {{ row.thesis }} |
+{% endfor %}
+{% else %}
+Nothing is tradable tonight.
+{% endif %}
+
+## Watch — passed every rule, sized to zero shares ({{ watch | length }})
+
+{% if watch %}
+These are the real output of a {{ equity | money }} account: each one cleared the
+trend, liquidity and entry rules, and each one needs more capital than there is
+to buy a single share at the required stop distance. They are listed so the plan
+is visible before the money exists — not as an afterthought.
+
+| Symbol | Entry | Stop | Risk / share | Would need | Earnings | Thesis |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+{% for row in watch %}
+| **{{ row.symbol }}** | {{ row.entry | money }} | {{ row.stop | money }} | {{ row.risk_per_share | money }} | {{ row.entry | money }} for 1 share | {% if row.earnings_unknown %}⚠️ UNKNOWN{% else %}{{ row.earnings_label }}{% endif %} | {{ row.thesis }} |
+{% endfor %}
+{% else %}
+Nothing reached the watch list either.
+{% endif %}
+
+{% if any_earnings_unknown %}
+> ⚠️ **UNKNOWN earnings date.** The data provider had no scheduled report date
+> for at least one name above, so the earnings blackout could not be applied to
+> it. Check the date yourself before entering.
+{% endif %}
+
+{% if notes %}
+## Notes
+
+{% for note in notes %}
+- {{ note }}
+{% endfor %}
+{% endif %}
+
+---
+
+Every pick here is a *proposal*, not advice. Orders are drafted, never sent, by
+this report.

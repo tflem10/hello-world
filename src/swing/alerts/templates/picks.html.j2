@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swing scan {{ asof }}</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #14181d;
+    --muted: #5b6572;
+    --line: #dfe3e8;
+    --accent: #1f6feb;
+    --ok-bg: #e4f6ea; --ok-ink: #10633a;
+    --bad-bg: #fdeaea; --bad-ink: #9b1c1c;
+    --warn-bg: #fdf3d8; --warn-ink: #7a5300;
+    --watch-bg: #eef2ff; --watch-line: #c3ccff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --card: #161b22;
+      --ink: #e6edf3;
+      --muted: #9198a1;
+      --line: #2a313a;
+      --accent: #6cb0ff;
+      --ok-bg: #12301f; --ok-ink: #6ee7a5;
+      --bad-bg: #3a1616; --bad-ink: #ff9b9b;
+      --warn-bg: #382c10; --warn-ink: #f7cd6b;
+      --watch-bg: #171d33; --watch-line: #2c3663;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line);
+            border-radius: 12px; padding: 18px; margin: 0 0 18px; }
+  section.watch { background: var(--watch-bg); border-color: var(--watch-line); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; }
+  .chip { display: inline-block; padding: 4px 10px; border-radius: 999px;
+          font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+  .chip.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .chip.bad { background: var(--bad-bg); color: var(--bad-ink); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .lede { color: var(--muted); margin: 0 0 14px; font-size: 13.5px; }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+  th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left;
+           vertical-align: top; }
+  th { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
+       color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .sym { font-weight: 700; letter-spacing: 0.02em; }
+  .thesis { color: var(--muted); font-size: 12.5px; min-width: 260px; }
+  .tag { display: inline-block; padding: 2px 7px; border-radius: 6px;
+         font-size: 11px; font-weight: 700; background: var(--warn-bg); color: var(--warn-ink); }
+  ul { margin: 6px 0 0; padding-left: 20px; }
+  li { margin: 2px 0; }
+  details { margin: 8px 0 0; }
+  summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+        padding: 12px; overflow-x: auto; font-size: 12px; line-height: 1.45;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; padding: 4px 0 8px; }
+  .empty { color: var(--muted); font-style: italic; margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Swing scan — {{ asof }}</h1>
+  <p class="sub">Account {{ equity | money }} · generated {{ generated_at }}</p>
+
+  <section>
+    <div class="chips">
+      {% if gate_passed %}
+      <span class="chip ok">Backtest gate PASSED</span>
+      {% else %}
+      <span class="chip bad">Backtest gate NOT PASSED</span>
+      {% endif %}
+      {% if regime_ok %}
+      <span class="chip ok">Regime: entries allowed</span>
+      {% else %}
+      <span class="chip bad">Regime: entries blocked</span>
+      {% endif %}
+      <span class="chip warn">{{ picks | length }} picks · {{ watch | length }} watch</span>
+    </div>
+    {% if gate_reasons %}
+    <ul>
+      {% for reason in gate_reasons %}
+      <li>{{ reason }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if notes %}
+    <ul>
+      {% for note in notes %}
+      <li>{{ note }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Picks ({{ picks | length }})</h2>
+    {% if picks %}
+    <p class="lede">Committing {{ total_notional | money }} with {{ total_risk | money }}
+      at risk if every stop fills.</p>
+    <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th><th class="n">Entry</th><th class="n">Stop</th>
+          <th class="n">Shares</th><th class="n">Risk $</th><th class="n">Risk % acct</th>
+          <th class="n">Notional</th><th>Earnings</th><th>Thesis</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in picks %}
+        <tr>
+          <td class="sym">{{ row.symbol }}</td>
+          <td class="n">{{ row.entry | money }}</td>
+          <td class="n">{{ row.stop | money }}</td>
+          <td class="n">{{ row.shares }}</td>
+          <td class="n">{{ row.risk_amount | money }}</td>
+          <td class="n">{{ row.risk_pct | pct }}</td>
+          <td class="n">{{ row.notional | money }}</td>
+          <td>{% if row.earnings_unknown %}<span class="tag">UNKNOWN</span>{% else %}{{ row.earnings_label }}{% endif %}</td>
+          <td class="thesis">{{ row.thesis }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="empty">Nothing is tradable tonight.</p>
+    {% endif %}
+  </section>
+
+  <section class="watch">
+    <h2>Watch — passed every rule, sized to zero shares ({{ watch | length }})</h2>
+    {% if watch %}
+    <p class="lede">These are the real output of a {{ equity | money }} account. Each one cleared
+      the trend, liquidity and entry rules; each one needs more capital than there is to buy a
+      single share at the required stop distance. They are here so the plan is visible before the
+      money exists.</p>
+    <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th><th class="n">Entry</th><th class="n">Stop</th>
+          <th class="n">Risk / share</th><th class="n">Cost of 1 share</th>
+          <th>Earnings</th><th>Thesis</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in watch %}
+        <tr>
+          <td class="sym">{{ row.symbol }}</td>
+          <td class="n">{{ row.entry | money }}</td>
+          <td class="n">{{ row.stop | money }}</td>
+          <td class="n">{{ row.risk_per_share | money }}</td>
+          <td class="n">{{ row.entry | money }}</td>
+          <td>{% if row.earnings_unknown %}<span class="tag">UNKNOWN</span>{% else %}{{ row.earnings_label }}{% endif %}</td>
+          <td class="thesis">{{ row.thesis }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="empty">Nothing reached the watch list either.</p>
+    {% endif %}
+  </section>
+
+  {% if any_earnings_unknown %}
+  <section>
+    <p><span class="tag">UNKNOWN</span> earnings date: the data provider had no scheduled report
+      date for at least one name above, so the earnings blackout could not be applied to it.
+      Check the date yourself before entering.</p>
+  </section>
+  {% endif %}
+
+  {% if order_json %}
+  <section>
+    <h2>Drafted Schwab orders</h2>
+    <p class="lede">Drafted only. Nothing here has been sent to a broker.</p>
+    {% for symbol, body in order_json | dictsort %}
+    <details>
+      <summary>{{ symbol }}</summary>
+      <pre>{{ body }}</pre>
+    </details>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <footer>Every pick is a proposal, not advice. Orders are drafted, never sent, by this report.</footer>
+</div>
+</body>
+</html>
