@@ -28,9 +28,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "JOURNAL_FILENAME",
     "KILL_FILENAME",
+    "OPEN_ORDER_STATUS",
+    "STATUSES",
     "Journal",
     "PickRecord",
-    "STATUSES",
     "clear_kill",
     "engage_kill",
     "kill_active",
@@ -53,10 +54,15 @@ STATUSES: tuple[str, ...] = (
 )
 KINDS: tuple[str, ...] = ("pick", "watch")
 
-#: Order states that mean an order is no longer working at the broker.
-_CLOSED_ORDER_STATES = frozenset(
-    {"filled", "cancelled", "canceled", "rejected", "expired", "closed", "replaced"}
-)
+#: The status a recorded order carries until something moves it on. An order
+#: dict written before this field existed is treated as open, so old journals
+#: keep working.
+OPEN_ORDER_STATUS = "open"
+
+
+def _order_status(order: dict[str, Any]) -> str:
+    """The normalised status of a recorded order; missing means open."""
+    return str(order.get("status", OPEN_ORDER_STATUS)).strip().lower()
 
 
 @dataclass
@@ -328,19 +334,67 @@ class Journal:
     # -- orders -------------------------------------------------------------
 
     def record_order(self, order: dict[str, Any]) -> None:
-        """Record a submitted (or drafted) order and persist."""
+        """Record a submitted (or drafted) order and persist.
+
+        An order without a ``status`` is stored as ``"open"``, so every
+        recorded order has a status that :meth:`update_order_status` can move.
+        """
         if not isinstance(order, dict):
             raise TypeError("record_order expects a dict describing the order.")
-        self._orders.append(dict(order))
+        stored = dict(order)
+        stored.setdefault("status", OPEN_ORDER_STATUS)
+        self._orders.append(stored)
         self.save()
 
     def open_orders(self) -> list[dict[str, Any]]:
-        """Orders that are still working — anything not filled/cancelled/rejected."""
-        return [
-            dict(o)
-            for o in self._orders
-            if str(o.get("status", "open")).lower() not in _CLOSED_ORDER_STATES
-        ]
+        """Orders still working at the broker — those whose status is ``"open"``.
+
+        Orders recorded before the status field existed have no ``status`` key
+        and are treated as open, which fails safe: the duplicate-suppression
+        guardrail sees them and refuses rather than double-ordering.
+        """
+        return [dict(o) for o in self._orders if _order_status(o) == OPEN_ORDER_STATUS]
+
+    def update_order_status(
+        self, symbol: str, new_status: str, *, only_status: str | None = None
+    ) -> int:
+        """Move the recorded orders for ``symbol`` to ``new_status``; persist.
+
+        Without this an order could never leave ``"open"``, so cancelling at the
+        broker left the journal claiming the order was still working and the
+        duplicate guardrail refused that symbol forever.
+
+        Args:
+            symbol: the ticker whose orders should change, matched
+                case-insensitively.
+            new_status: the status to write, e.g. ``"cancelled"``.
+            only_status: when given, change only the orders currently in this
+                status (an order with no status counts as ``"open"``).
+
+        Returns:
+            How many orders were changed. Zero when nothing matched — an
+            unknown symbol is a no-op, not an error.
+        """
+        if not isinstance(new_status, str) or not new_status.strip():
+            raise ValueError(
+                "update_order_status needs a status to write, such as 'cancelled', "
+                "but it was given an empty value."
+            )
+        target = symbol.strip().upper()
+        wanted = only_status.strip().lower() if only_status is not None else None
+
+        changed = 0
+        for order in self._orders:
+            if str(order.get("symbol", "")).strip().upper() != target:
+                continue
+            if wanted is not None and _order_status(order) != wanted:
+                continue
+            order["status"] = new_status
+            changed += 1
+
+        if changed:
+            self.save()
+        return changed
 
     @property
     def orders(self) -> list[dict[str, Any]]:

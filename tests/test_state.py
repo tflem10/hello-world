@@ -16,6 +16,7 @@ import pytest
 from swing.state import (
     JOURNAL_FILENAME,
     KILL_FILENAME,
+    OPEN_ORDER_STATUS,
     STATUSES,
     Journal,
     PickRecord,
@@ -240,13 +241,39 @@ def test_updating_a_pick_that_is_not_there_is_an_error(test_cfg) -> None:
 
 def test_record_order_and_open_orders(test_cfg) -> None:
     journal = Journal.load(test_cfg)
-    journal.record_order({"id": 1, "symbol": "AAPL", "status": "working"})
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
     journal.record_order({"id": 2, "symbol": "MSFT", "status": "filled"})
     journal.record_order({"id": 3, "symbol": "NVDA"})  # no status ⇒ assumed open
 
     reloaded = Journal.load(test_cfg)
     assert [o["id"] for o in reloaded.open_orders()] == [1, 3]
     assert len(reloaded.orders) == 3
+
+
+def test_record_order_defaults_the_status_to_open(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL"})
+
+    stored = Journal.load(test_cfg).orders[0]
+    assert stored["status"] == OPEN_ORDER_STATUS
+    assert (
+        json.loads((test_cfg.paths.state_dir / JOURNAL_FILENAME).read_text())["orders"][0]["status"]
+        == "open"
+    )
+
+
+def test_record_order_does_not_mutate_the_caller_dict(test_cfg) -> None:
+    order = {"id": 1, "symbol": "AAPL"}
+    Journal.load(test_cfg).record_order(order)
+    assert "status" not in order
+
+
+def test_open_orders_counts_only_open_ones(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    for status in ("open", "filled", "cancelled", "rejected", "replaced"):
+        journal.record_order({"symbol": "AAPL", "status": status})
+
+    assert [o["status"] for o in journal.open_orders()] == ["open"]
 
 
 def test_open_orders_returns_copies(test_cfg) -> None:
@@ -259,6 +286,120 @@ def test_open_orders_returns_copies(test_cfg) -> None:
 def test_record_order_rejects_non_dicts(test_cfg) -> None:
     with pytest.raises(TypeError):
         Journal.load(test_cfg).record_order(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# order status transitions
+#
+# Without these an order recorded as "open" could never move, so cancelling it
+# at the broker left the journal insisting it was still working and the
+# duplicate guardrail refused that symbol forever.
+# ---------------------------------------------------------------------------
+
+
+def test_update_order_status_closes_an_order_and_reports_the_count(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
+
+    assert journal.update_order_status("AAPL", "cancelled") == 1
+    assert journal.open_orders() == []
+    assert journal.orders[0]["status"] == "cancelled"
+
+
+def test_update_order_status_persists_across_a_reload(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
+    journal.update_order_status("AAPL", "cancelled")
+
+    reloaded = Journal.load(test_cfg)
+    assert reloaded.open_orders() == []
+    assert reloaded.orders[0]["status"] == "cancelled"
+
+
+def test_update_order_status_touches_every_order_for_the_symbol(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
+    journal.record_order({"id": 2, "symbol": "AAPL", "status": "open"})
+    journal.record_order({"id": 3, "symbol": "MSFT", "status": "open"})
+
+    assert journal.update_order_status("AAPL", "cancelled") == 2
+    assert [o["id"] for o in journal.open_orders()] == [3]
+
+
+def test_update_order_status_only_status_filters(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
+    journal.record_order({"id": 2, "symbol": "AAPL", "status": "filled"})
+
+    assert journal.update_order_status("AAPL", "cancelled", only_status="open") == 1
+
+    by_id = {o["id"]: o["status"] for o in Journal.load(test_cfg).orders}
+    assert by_id == {1: "cancelled", 2: "filled"}  # the filled one is left alone
+
+
+def test_update_order_status_only_status_that_matches_nothing_changes_nothing(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "filled"})
+
+    assert journal.update_order_status("AAPL", "cancelled", only_status="open") == 0
+    assert journal.orders[0]["status"] == "filled"
+
+
+def test_update_order_status_for_an_unknown_symbol_is_a_no_op(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL", "status": "open"})
+
+    assert journal.update_order_status("NVDA", "cancelled") == 0
+    assert journal.orders[0]["status"] == "open"
+
+
+def test_update_order_status_on_an_empty_journal_is_a_no_op(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    assert journal.update_order_status("AAPL", "cancelled") == 0
+    assert not journal.path.exists()  # a no-op writes nothing
+
+
+def test_update_order_status_matches_symbols_case_insensitively(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "aapl", "status": "open"})
+
+    assert journal.update_order_status(" AAPL ", "cancelled") == 1
+    assert journal.orders[0]["status"] == "cancelled"
+
+
+def test_a_legacy_order_without_a_status_is_open_and_still_updatable(test_cfg) -> None:
+    """Journals written before the status field existed must keep working."""
+    path = test_cfg.paths.state_dir / JOURNAL_FILENAME
+    path.write_text(
+        json.dumps({"version": 1, "picks": [], "orders": [{"id": 1, "symbol": "AAPL"}]}),
+        encoding="utf-8",
+    )
+
+    journal = Journal.load(test_cfg)
+    assert [o["id"] for o in journal.open_orders()] == [1]  # no status ⇒ open
+
+    assert journal.update_order_status("AAPL", "cancelled", only_status="open") == 1
+    assert journal.open_orders() == []
+    assert Journal.load(test_cfg).orders[0]["status"] == "cancelled"
+
+
+def test_update_order_status_needs_a_status_to_write(test_cfg) -> None:
+    journal = Journal.load(test_cfg)
+    journal.record_order({"id": 1, "symbol": "AAPL"})
+    with pytest.raises(ValueError, match="needs a status"):
+        journal.update_order_status("AAPL", "   ")
+
+
+def test_the_kill_then_reorder_cycle_frees_the_symbol_again(test_cfg) -> None:
+    """The bug this amendment exists for, end to end."""
+    journal = Journal.load(test_cfg)
+    journal.record_order({"symbol": "AAPL", "date": "2026-08-18", "status": "open"})
+    assert len(journal.open_orders()) == 1  # duplicate guardrail would refuse AAPL
+
+    # `swing kill` cancels at the broker and tells the journal
+    assert journal.update_order_status("AAPL", "cancelled", only_status="open") == 1
+
+    assert Journal.load(test_cfg).open_orders() == []  # AAPL is orderable again
 
 
 def test_positions_shows_filled_picks_only(test_cfg) -> None:
