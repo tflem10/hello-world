@@ -231,3 +231,55 @@ def test_output_feeds_the_engine_blackout_mask(tmp_path):
         assert isinstance(symbol, str)
         assert isinstance(dates, list)
         assert all(isinstance(d, dt.date) and not isinstance(d, dt.datetime) for d in dates)
+
+
+def test_an_implausible_ticker_is_treated_as_a_malformed_row(tmp_path, caplog):
+    """The one path where this loader could return wrong rather than partial data.
+
+    Lines are read individually so warnings can cite real line numbers, so a
+    quoted field with an embedded newline splits in two. When the split lands
+    in the symbol column the continuation can parse as a record with a garbled
+    symbol and a valid-looking date. A shape check demotes that to an ordinary
+    malformed row instead of silently inventing a calendar entry.
+    """
+    path = tmp_path / "cal.csv"
+    path.write_text(
+        "symbol,date\n"
+        "AAPL,2024-02-01\n"
+        'PL",2024-03-15\n'
+        "MSFT,2024-01-30\n"
+    )
+    with caplog.at_level("WARNING"):
+        calendar = load_earnings_calendar(path)
+
+    assert set(calendar) == {"AAPL", "MSFT"}
+    assert 'PL"' not in calendar
+    assert "not a plausible ticker" in caplog.text
+
+
+def test_a_newline_inside_a_quoted_symbol_cannot_inject_an_entry(tmp_path):
+    """End to end version of the same hazard, built the way it really occurs."""
+    path = tmp_path / "cal.csv"
+    path.write_text(
+        'symbol,date\n'
+        'AAPL,2024-02-01\n'
+        '"AP\nPL",2024-03-15\n'
+        'MSFT,2024-01-30\n'
+    )
+    calendar = load_earnings_calendar(path)
+    # Only the two clean rows survive; nothing garbled is invented.
+    assert set(calendar) == {"AAPL", "MSFT"}
+
+
+def test_real_world_ticker_shapes_still_load(tmp_path):
+    """The guard must not reject legitimate tickers."""
+    path = tmp_path / "cal.csv"
+    path.write_text(
+        "symbol,date\n"
+        "BRK.B,2024-02-01\n"
+        "MOG-A,2024-02-02\n"
+        "F,2024-02-03\n"
+        "GOOGL,2024-02-04\n"
+    )
+    calendar = load_earnings_calendar(path)
+    assert set(calendar) == {"BRK.B", "MOG-A", "F", "GOOGL"}

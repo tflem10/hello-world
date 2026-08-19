@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import re
 from pathlib import Path
 
 from ..logging_setup import get_logger
@@ -64,6 +65,17 @@ from ..logging_setup import get_logger
 log = get_logger("swing.data.earnings_calendar")
 
 SYMBOL_COLUMN = "symbol"
+
+# A ticker is letters, digits, dots and dashes — nothing else, and never long.
+# This is not cosmetic validation. Lines are read one physical line at a time so
+# that warnings can cite the file's own line numbers, which means a quoted field
+# containing an embedded newline splits across two "rows". If the split lands in
+# the symbol column, the continuation line can parse as a plausible-looking
+# record with a garbled symbol (PL", say) and a coincidentally valid date, and
+# it would be added to the calendar silently — the one way this loader could
+# return data that is wrong rather than merely incomplete. A shape check turns
+# that into an ordinary malformed row, counted and logged like any other.
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
 DATE_COLUMN = "date"
 
 
@@ -125,6 +137,15 @@ def load_earnings_calendar(path: str | Path) -> dict[str, list[dt.date]]:
         if not symbol:
             malformed += 1
             log.warning("earnings calendar %s line %d: empty symbol, row skipped", path, lineno)
+            continue
+
+        if not SYMBOL_PATTERN.match(symbol):
+            malformed += 1
+            log.warning(
+                "earnings calendar %s line %d: %r is not a plausible ticker, row "
+                "skipped (a quoted field containing a newline can produce this)",
+                path, lineno, symbol,
+            )
             continue
 
         parsed = _parse_date(raw_date)
