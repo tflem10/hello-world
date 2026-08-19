@@ -16,6 +16,7 @@ import pytest
 
 from conftest import build_config
 from swing.backtest.engine import empty_equity
+from swing.backtest.metrics import PROFIT_FACTOR_CAP
 from swing.backtest.walkforward import (
     MIN_IS_TRADES,
     OBJECTIVE_DESCRIPTION,
@@ -463,3 +464,67 @@ def test_sensitivity_rows_carry_the_metrics_the_report_prints(tmp_path):
             "trades",
         ):
             assert key in row
+
+
+# ---------------------------------------------------------------------------
+# BUG-041 — the tuner must not maximise the no-losses sentinel
+# ---------------------------------------------------------------------------
+
+
+def capped(trades: int, max_dd: float = 1.0) -> dict[str, object]:
+    """The metrics a parameter set with zero losing trades produces."""
+    return {
+        "profit_factor": PROFIT_FACTOR_CAP,
+        "profit_factor_capped": True,
+        "trades": trades,
+        "max_drawdown_pct": max_dd,
+    }
+
+
+def test_a_capped_profit_factor_loses_to_a_measured_one():
+    """BUG-041: eight lucky zero-loss trades outranked a genuinely measured edge.
+
+    9999.0 is a sentinel standing in for infinity, not a measurement, and the
+    parameter set that produced it went on to drive a whole out-of-sample year.
+    """
+    lucky = objective_key(capped(MIN_IS_TRADES))
+    measured = objective_key(
+        {
+            "profit_factor": 1.5,
+            "profit_factor_capped": False,
+            "trades": MIN_IS_TRADES,
+            "max_drawdown_pct": 20.0,
+        }
+    )
+    assert measured > lucky
+
+
+def test_a_capped_set_still_beats_one_that_never_cleared_the_trade_floor():
+    """Ranking the sentinel at 0.0 must not push it below an unevidenced set."""
+    thin = objective_key(
+        {
+            "profit_factor": 4.0,
+            "profit_factor_capped": False,
+            "trades": MIN_IS_TRADES - 1,
+            "max_drawdown_pct": 1.0,
+        }
+    )
+    assert objective_key(capped(MIN_IS_TRADES)) > thin
+
+
+def test_between_two_capped_sets_the_better_evidenced_one_wins():
+    """With profit factor neutralised the fallback is trades, then drawdown."""
+    assert objective_key(capped(300)) > objective_key(capped(MIN_IS_TRADES))
+    assert objective_key(capped(50, max_dd=5.0)) > objective_key(capped(50, max_dd=30.0))
+
+
+def test_a_capped_set_is_still_chosen_when_it_is_the_only_option():
+    """Neutralising the sentinel must not make the tuner refuse to choose."""
+    only = objective_key(capped(MIN_IS_TRADES))
+    assert only > objective_key({"profit_factor": 0.0, "trades": 0, "max_drawdown_pct": 100.0})
+
+
+def test_the_objective_documents_the_sentinel_rule():
+    """Contract 11 requires the objective to be written down in the report."""
+    assert "9999" in OBJECTIVE_DESCRIPTION
+    assert "no losing trades" in OBJECTIVE_DESCRIPTION

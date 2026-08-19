@@ -39,6 +39,16 @@ directory but does **not** update ``latest.json``. An ablation deliberately
 cripples the strategy to measure a component's contribution; letting one become
 the gate's reference would be the most quietly destructive bug this system could
 have.
+
+LABELS ARE NAMES, NOT PATHS (audit BUG-042)
+--------------------------------------------
+``--label`` names one directory under ``<reports_dir>/backtest`` and nothing
+else, so it is validated against :data:`LABEL_PATTERN`. A label containing a
+separator used to relocate the run directory — leaving the real ``latest.json``
+stale while the user believed they had refreshed it, and slipping an
+``ablate``-prefixed run past the guard by burying the prefix in a subdirectory.
+``latest.json`` is now always located by :func:`swing.backtest.gate.latest_path`,
+never derived from the run directory.
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, fields, is_dataclass, replace
@@ -56,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from swing.backtest.engine import run_engine
+from swing.backtest.gate import ABLATION_PREFIX, latest_path
 from swing.backtest.metrics import by_year_table, compute_metrics
 from swing.backtest.walkforward import (
     OBJECTIVE_DESCRIPTION,
@@ -69,6 +81,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "ABLATION_PREFIX",
     "FLOAT_PRECISION",
+    "LABEL_PATTERN",
     "UNIVERSE_CHOICES",
     "config_hash",
     "data_hash",
@@ -78,11 +91,11 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: Runs whose label starts with this never update ``latest.json``.
-ABLATION_PREFIX = "ablate"
-
 #: Decimal places every float is rounded to before being written.
 FLOAT_PRECISION = 6
+
+#: A run label is one directory name: letters, digits, dot, dash, underscore.
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 UNIVERSE_CHOICES: tuple[str, ...] = ("full", "etf", "stocks")
 
@@ -275,19 +288,49 @@ def _load_bars(
     return tradable, spy
 
 
-def _load_earnings(cfg: Config, symbols: Sequence[str]) -> dict[str, date | None]:
-    """Best-effort earnings dates; a provider failure degrades to "unknown"."""
+def _load_earnings(
+    cfg: Config, symbols: Sequence[str], start: date, end: date
+) -> tuple[dict[str, Any], bool]:
+    """Best-effort earnings dates; a provider failure degrades to "unknown".
+
+    Returns ``(dates_by_symbol, simulated)``. ``simulated`` is True only when
+    the provider could supply *historical* announcement dates (contract
+    amendment A12). A provider that only knows the next upcoming date cannot
+    block a single historical bar, so the blackout the live scanner applies is
+    simply not present in the backtest — the summary carries the flag so that
+    divergence is declared rather than assumed away (audit BUG-036).
+    """
     from swing.data import get_provider
 
     try:
-        return get_provider(cfg).earnings_dates(list(symbols))
+        provider = get_provider(cfg)
+        history = getattr(provider, "earnings_history", None)
+        if callable(history):
+            return dict(history(list(symbols), start, end)), True
+        return dict(provider.earnings_dates(list(symbols))), False
     except Exception as exc:  # noqa: BLE001 - earnings are optional, never fatal
         log.warning(
             "Could not load earnings dates (%s); the backtest will run without an earnings "
             "blackout, which slightly overstates results.",
             exc,
         )
-        return {}
+        return {}, False
+
+
+def _validate_label(label: str) -> str:
+    """Return ``label`` if it names one directory, else refuse in plain English (BUG-042).
+
+    ``.`` and ``..`` satisfy the character pattern but are not names — they are
+    the current and parent directory, and ``..`` is exactly the escape the
+    finding is about.
+    """
+    if not LABEL_PATTERN.match(label) or label in {".", ".."}:
+        raise ValueError(
+            f"The run label {label!r} is not usable as a directory name. A label may contain "
+            f"only letters, digits, dots, dashes and underscores — no slashes, spaces or "
+            f"'..' — because it names one directory inside reports/backtest and nothing else."
+        )
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +370,11 @@ def write_report(
     (directory / "report.html").write_text(render_html(summary, equity, trades), encoding="utf-8")
 
     if update_latest:
-        _write_json(directory.parent / "latest.json", summary)
+        # BUG-042: the gate's file is wherever the gate looks for it, never
+        # "one level up from wherever this run happened to land".
+        reference = latest_path(cfg)
+        reference.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(reference, summary)
     else:
         log.info(
             "Label %r starts with %r, so reports/backtest/latest.json was left untouched: "
@@ -364,7 +411,8 @@ def run_backtest(
         walkforward: run the walk-forward search (the default, and the only
             kind of run the gate will accept). ``False`` runs the configured
             parameters over the full period and marks the report ineligible.
-        label: run directory name. Defaults to ``backtest-YYYYMMDD-HHMMSS``.
+        label: run directory name — one path component matching
+            :data:`LABEL_PATTERN`. Defaults to ``backtest-YYYYMMDD-HHMMSS``.
             A label starting with ``ablate`` suppresses the ``latest.json``
             update.
         progress: optional sink for progress lines. Defaults to ``print``, so
@@ -373,8 +421,18 @@ def run_backtest(
 
     Returns:
         The path of the run directory that was written.
+
+    Raises:
+        ValueError: on an unknown universe, an empty universe, no price
+            history, or a label that is not a single usable directory name.
     """
     emit = print if progress is None else progress
+
+    # Validated before any work happens: a bad label should cost a sentence,
+    # not forty minutes of simulation (BUG-042). Only `None` means "no label
+    # given" — an empty string is a mistake, and gets said so.
+    default_label = f"backtest-{datetime.now():%Y%m%d-%H%M%S}"
+    run_label = _validate_label(default_label if label is None else label)
 
     instruments = _select_universe(cfg, universe)
     symbols = sorted({instrument.symbol for instrument in instruments})
@@ -398,7 +456,7 @@ def run_backtest(
             "the data provider and the cache directory."
         )
     emit(f"Loaded {len(bars)} symbols with data.")
-    earnings = _load_earnings(cfg, sorted(bars))
+    earnings, earnings_simulated = _load_earnings(cfg, sorted(bars), cfg.data.start_date, run_end)
 
     last_bar = max(frame.index[-1].date() for frame in bars.values())
     effective_end = min(run_end, last_bar)
@@ -416,11 +474,12 @@ def run_backtest(
     )
 
     summary: dict[str, Any] = {
-        "label": label or f"backtest-{datetime.now():%Y%m%d-%H%M%S}",
+        "label": run_label,
         "universe": universe,
         "start": run_start.isoformat(),
         "end": effective_end.isoformat(),
         "walkforward": bool(walkforward),
+        "earnings_blackout_simulated": bool(earnings_simulated),
         "n_symbols": len(bars),
         "initial_equity": float(cfg.backtest.initial_equity),
         "config_hash": config_hash(cfg),
@@ -465,6 +524,12 @@ def run_backtest(
         )
         summary["oos"] = wf.metrics
         summary["windows"] = [fold.as_dict() for fold in wf.folds]
+        if wf.folds:
+            # BUG-043: the numbers cover the stitched OOS stretches, not the
+            # data span. `start`/`end` stay in the summary as provenance, but
+            # every headline reads these two.
+            summary["oos_start"] = wf.folds[0].window.oos_start.isoformat()
+            summary["oos_end"] = wf.folds[-1].window.oos_end.isoformat()
         headline_trades = wf.trades
         headline_equity = wf.equity
         headline_initial = wf.initial_equity
@@ -490,7 +555,6 @@ def run_backtest(
         end=effective_end,
     )
 
-    run_label = str(summary["label"])
     directory = Path(cfg.paths.reports_dir) / "backtest" / run_label
     write_report(
         cfg,

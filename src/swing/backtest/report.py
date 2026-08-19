@@ -13,6 +13,14 @@ Three audiences, three renderings of the same ``summary.json``:
 ``generated_at`` appears in the HTML and **nowhere else**. Contract 11 requires
 byte-identical reruns of ``summary.json``, ``trades.csv`` and ``equity.csv``,
 and a timestamp in any of them would break that for no benefit.
+
+WHICH PERIOD THE HEADLINE NAMES (audit BUG-043)
+-------------------------------------------------
+A walk-forward run loads years of warm-up data and often stops measuring months
+before the last bar, so ``start``/``end`` describe the *data*, not the record.
+Every headline here names ``oos_start``/``oos_end`` — the stretch the numbers
+directly above it actually cover — and the data span is demoted to provenance,
+where it belongs.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "METRIC_LABELS",
     "format_metric",
+    "measured_period",
     "print_latest",
     "render_html",
     "render_markdown",
@@ -85,6 +94,19 @@ def _metric_table(metrics: dict[str, Any]) -> list[str]:
     return lines
 
 
+def measured_period(summary: dict[str, Any]) -> str:
+    """The span the headline numbers actually cover, as ``"<start> to <end>"``.
+
+    For a walk-forward run that is the stitched out-of-sample stretch
+    (``oos_start``..``oos_end``); for anything else it is the simulated window.
+    Never the data span, which starts years earlier so indicators can warm up
+    (audit BUG-043).
+    """
+    if bool(summary.get("walkforward")) and summary.get("oos_start") and summary.get("oos_end"):
+        return f"{summary['oos_start']} to {summary['oos_end']}"
+    return f"{summary.get('start', '?')} to {summary.get('end', '?')}"
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
     """Render ``summary.json`` as a Markdown report."""
     walkforward = bool(summary.get("walkforward"))
@@ -93,27 +115,37 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
         f"- **Universe**: {summary.get('universe', 'unknown')} "
         f"({summary.get('n_symbols', '?')} symbols)",
-        f"- **Period**: {summary.get('start', '?')} to {summary.get('end', '?')}",
+        f"- **Measured period**: {measured_period(summary)}",
+        f"- **Data span**: {summary.get('start', '?')} to {summary.get('end', '?')}",
         f"- **Walk-forward**: {'yes' if walkforward else 'NO — cannot open the trading gate'}",
         f"- **Config hash**: `{summary.get('config_hash', '')[:16]}`",
         f"- **Code ref**: `{summary.get('code_ref', 'unknown')}`",
         f"- **Data hash**: `{summary.get('data_hash', '')[:16]}`",
         "",
     ]
+    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
+        out += [
+            "> **Earnings blackout not simulated.** No historical announcement dates were",
+            "> available, so the backtest took entries the live scanner would have blocked.",
+            "> Results are slightly optimistic against the strategy as it is actually run.",
+            "",
+        ]
 
     if walkforward:
         out += [
             "## Out-of-sample (headline)",
             "",
-            "These are the numbers the deployment gate reads. Every parameter used to",
-            "produce them was chosen on data that ended before the trade did.",
+            f"These are the numbers the deployment gate reads, covering "
+            f"{measured_period(summary)}. Every parameter used to produce them was chosen",
+            "on data that ended before the trade did.",
             "",
         ]
     else:
         out += [
             "## Full period (in-sample — NOT gate-eligible)",
             "",
-            "This run tuned nothing, but it also proved nothing out of sample.",
+            f"This run tuned nothing over {measured_period(summary)}, but it also proved",
+            "nothing out of sample.",
             "",
         ]
     out += _metric_table(summary.get("oos") or summary.get("full_period") or {})
@@ -191,17 +223,24 @@ def render_markdown(summary: dict[str, Any]) -> str:
 
 
 def _png_data_uri(figure: Any) -> str:
-    """Serialise a matplotlib figure to a base64 ``data:`` URI and close it."""
+    """Serialise a matplotlib figure to a base64 ``data:`` URI and close it.
+
+    LEAK-006: the close is in a ``finally`` and the buffer is a context manager,
+    so a failing ``savefig`` cannot leave a figure registered with pyplot (and
+    therefore alive) for the life of the process.
+    """
     import matplotlib.pyplot as plt
 
-    buffer = io.BytesIO()
-    figure.savefig(buffer, format="png", dpi=110, bbox_inches="tight")
-    plt.close(figure)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    try:
+        with io.BytesIO() as buffer:
+            figure.savefig(buffer, format="png", dpi=110, bbox_inches="tight")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    finally:
+        plt.close(figure)
     return f"data:image/png;base64,{encoded}"
 
 
-def _equity_chart(equity: pd.DataFrame) -> str:
+def _equity_chart(equity: pd.DataFrame, *, title: str = "Equity") -> str:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -209,7 +248,7 @@ def _equity_chart(equity: pd.DataFrame) -> str:
 
     figure, axes = plt.subplots(figsize=(10, 4))
     axes.plot(equity.index, equity["equity"], linewidth=1.2, color="#1f4e79")
-    axes.set_title("Out-of-sample equity")
+    axes.set_title(title)
     axes.set_ylabel("Account equity ($)")
     axes.grid(alpha=0.3)
     return _png_data_uri(figure)
@@ -289,16 +328,16 @@ _HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
 <h1>Backtest — {label}</h1>
-<p class="sub">{universe} universe ({n_symbols} symbols) &middot; {start} to {end}</p>
+<p class="sub">{universe} universe ({n_symbols} symbols) &middot; {measured_period}</p>
 <div class="banner {banner_class}">{banner}</div>
-
+{earnings_note}
 <h2>{headline_title}</h2>
 {headline_table}
 
 {full_period_section}
 
 <h2>Equity</h2>
-<img src="{equity_chart}" alt="Out-of-sample equity curve">
+<img src="{equity_chart}" alt="{equity_alt}">
 <img src="{drawdown_chart}" alt="Drawdown">
 
 <h2>Monthly returns (%)</h2>
@@ -310,6 +349,8 @@ _HTML_TEMPLATE = """<!doctype html>
 
 <h2>Provenance</h2>
 <table>
+<tr><td>Data span</td><td>{start} to {end}</td></tr>
+<tr><td>Measured period</td><td>{measured_period}</td></tr>
 <tr><td>Config hash</td><td><code>{config_hash}</code></td></tr>
 <tr><td>Code ref</td><td><code>{code_ref}</code></td></tr>
 <tr><td>Data hash</td><td><code>{data_hash}</code></td></tr>
@@ -357,19 +398,33 @@ def render_html(
     headline = summary.get("oos") if walkforward else summary.get("full_period")
     headline = headline or {}
 
+    period = measured_period(summary)
     if walkforward:
         banner = (
-            "Walk-forward run: the headline numbers below are out-of-sample and are what the "
-            "trading gate reads."
+            f"Walk-forward run: the headline numbers below are out-of-sample, cover {period}, "
+            f"and are what the trading gate reads."
         )
         banner_class = "ok"
         headline_title = "Out-of-sample (headline)"
+        # DEBT-016: only a walk-forward run has an out-of-sample curve to draw.
+        chart_title = "Out-of-sample equity"
+        equity_alt = "Out-of-sample equity curve"
     else:
         banner = (
             "NOT a walk-forward run. These numbers are in-sample and cannot open the trading gate."
         )
         banner_class = "warn"
         headline_title = "Full period (in-sample)"
+        chart_title = "Full-period equity (in-sample)"
+        equity_alt = "Full-period in-sample equity curve"
+
+    earnings_note = ""
+    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
+        earnings_note = (
+            '<div class="banner warn">Earnings blackout NOT simulated: no historical '
+            "announcement dates were available, so this run took entries the live scanner "
+            "would have blocked.</div>"
+        )
 
     full_period_section = ""
     if walkforward and summary.get("full_period"):
@@ -445,12 +500,15 @@ def render_html(
         n_symbols=summary.get("n_symbols", "?"),
         start=summary.get("start", "?"),
         end=summary.get("end", "?"),
+        measured_period=period,
         banner=banner,
         banner_class=banner_class,
+        earnings_note=earnings_note,
         headline_title=headline_title,
         headline_table=_html_metric_table(headline),
         full_period_section=full_period_section,
-        equity_chart=_equity_chart(equity) if not equity.empty else "",
+        equity_alt=equity_alt,
+        equity_chart=_equity_chart(equity, title=chart_title) if not equity.empty else "",
         drawdown_chart=_drawdown_chart(equity) if not equity.empty else "",
         monthly_table=_monthly_table_html(equity),
         by_year_section=by_year_section,
@@ -479,8 +537,14 @@ def print_latest(cfg: Config) -> None:
     """
     from swing.backtest import gate
 
-    summary = gate.load_latest(cfg)
+    summary, problem = gate.read_latest(cfg)
     if summary is None:
+        if problem is not None:
+            # BUG-017: a hostile or half-written report is a refusal sentence,
+            # not an OverflowError traceback out of `swing report`.
+            print(f"The backtest report at {gate.latest_path(cfg)} cannot be used: {problem}.")
+            print("Re-run `swing backtest` to regenerate it.")
+            return
         print(f"No backtest report found at {gate.latest_path(cfg)}.")
         print("Run `swing backtest` first — the scanner will not emit picks without one.")
         return
@@ -491,13 +555,20 @@ def print_latest(cfg: Config) -> None:
         f"  universe   {summary.get('universe', 'unknown')} "
         f"({summary.get('n_symbols', '?')} symbols)"
     )
-    print(f"  period     {summary.get('start', '?')} to {summary.get('end', '?')}")
+    print(f"  measured   {measured_period(summary)}")
+    print(f"  data span  {summary.get('start', '?')} to {summary.get('end', '?')}")
     print(f"  method     {'walk-forward' if walkforward else 'full period (in-sample only)'}")
     print(f"  code_ref   {summary.get('code_ref', 'unknown')}")
+    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
+        print("  note       earnings blackout NOT simulated — results are slightly optimistic")
     print()
 
     headline = (summary.get("oos") if walkforward else summary.get("full_period")) or {}
-    heading = "Out-of-sample results" if walkforward else "Full-period results (in-sample)"
+    heading = (
+        f"Out-of-sample results ({measured_period(summary)})"
+        if walkforward
+        else "Full-period results (in-sample)"
+    )
     print(heading)
     for key, (label, _unit) in METRIC_LABELS.items():
         if key in headline:

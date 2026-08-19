@@ -31,6 +31,12 @@ A symbol is a candidate on bar ``t`` when ALL of these are true at ``t``::
 
     trend_template & entry_signal & liquidity_ok & entries_allowed & ~earnings_blackout
 
+...and its momentum score is a finite number. A NaN score means the symbol is
+still warming up or its ATR% is under the floor
+(:data:`swing.strategy.scoring.MIN_ATR_PCT`); ``rank_candidates`` drops those
+outright, so the engine drops them too rather than merely ranking them last
+(audit BUG-003).
+
 ``entries_allowed`` (the SPY regime filter) gates **entries only**. A regime
 that turns off does not close existing positions; they keep trailing their
 stops until a stop, the time stop, or the end of data takes them out.
@@ -46,7 +52,16 @@ b. **Time stop.** A time stop signalled at the close of ``t-1`` fills at
 c. **Intraday breach.** ``low(t) <= effective_stop(t-1)`` with an open above
    it — the stop order is resting in the book, so it fills AT the stop price.
 d. **End of data.** Anything still open on the last bar is marked out at that
-   bar's close with reason ``end_of_data``.
+   bar's close with reason ``end_of_data``. The same applies *per symbol*: a
+   symbol whose bars simply stop mid-run is marked out at its own last close
+   the moment the calendar moves past that bar (audit BUG-016), so a delisted
+   or acquired name can never hold a slot and its capital for the rest of the
+   fold. Expect a one-day seam there, and do not read it as a bug: the trade is
+   dated to the symbol's own last bar, while ``n_positions`` and ``cash`` only
+   show the slot freed on the NEXT trading day. That is forced by no-lookahead
+   — the engine cannot know bar X was the last one until it observes that bar
+   X+1 never came — so a reader diffing ``trades.csv`` against ``equity.csv``
+   by date will always see the exit land one row before the release.
 
 Reasons (a) and (c) are reported as ``chandelier`` when the effective stop has
 ratcheted above where it started, and ``stop`` when it is still the initial
@@ -68,6 +83,15 @@ the risk it was sized against. Two positions in the same symbol entered on
 different days would carry different effective stops; the engine never opens
 two, but the ratchet lives on the position object for exactly this reason.
 
+BAD BARS
+--------
+A bar whose open, high, low or close is not a finite number is not a bar. Such
+rows are treated exactly like a day the symbol did not trade (``row_of_day ==
+-1``) with one warning per symbol, and a non-finite close never becomes a
+position's mark (audit BUG-005). Contract 3 already drops these rows in
+``normalize_bars``; this is the belt-and-braces guard for callers who build
+frames themselves.
+
 MONEY
 -----
 Whole shares, cash accounting, no margin, no fractional anything, one position
@@ -76,7 +100,9 @@ Sizing is delegated to :func:`swing.strategy.sizing.size_position`, which is
 handed the *cost-inclusive* entry price (so the risk per share is the real one)
 and the cash actually available at the moment of the fill. A pick that sizes to
 zero shares is skipped and does **not** consume a slot — the next-ranked
-candidate gets it.
+candidate gets it, which is why the engine carries a bench of
+``max_positions * 3`` orders rather than exactly ``max_positions`` (audit
+BUG-053).
 
 DETERMINISM
 -----------
@@ -87,8 +113,12 @@ the clock. Same inputs in, same trades out, byte for byte.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import math
-from collections.abc import Callable
+import sys
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -102,6 +132,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
 __all__ = [
+    "DEFAULT_CACHE_BYTES",
     "EQUITY_COLUMNS",
     "EXIT_CHANDELIER",
     "EXIT_END_OF_DATA",
@@ -117,7 +148,14 @@ __all__ = [
     "run_engine",
 ]
 
+log = logging.getLogger(__name__)
+
 T = TypeVar("T")
+
+#: How many orders the engine carries overnight, as a multiple of
+#: ``max_positions``. Picks that size to zero shares must not waste a slot
+#: (audit BUG-053), so the bench is deeper than the number of slots.
+BENCH_MULTIPLE = 3
 
 #: Exit reasons, exactly the four Contract 11 allows.
 EXIT_STOP = "stop"
@@ -242,6 +280,8 @@ class _SymbolPlan:
     high_prox: np.ndarray
     signal: np.ndarray  # bool, per row of this symbol's frame
     row_of_day: np.ndarray  # len(calendar) ints; -1 where the symbol has no bar
+    day_of_row: np.ndarray  # len(frame) ints; -1 where the row is off-calendar
+    last_valid_day: int  # last calendar index with a usable bar; -1 when none
 
 
 # ---------------------------------------------------------------------------
@@ -249,55 +289,158 @@ class _SymbolPlan:
 # ---------------------------------------------------------------------------
 
 
+#: Default byte budget for one :class:`SignalCache`. At 1,545 symbols a fold's
+#: worth of arrays measured ~520 MB (audit PERF-005), so 1 GiB holds a whole
+#: fold on a normal machine while still bounding a pathological universe.
+DEFAULT_CACHE_BYTES = 1 << 30
+
+#: Cache kinds that do not depend on any tuned parameter. Every grid point
+#: reuses these, so they are the *last* thing evicted: throwing one away costs
+#: 81 rebuilds, throwing a tuned entry away costs one.
+_INVARIANT_KINDS: frozenset[str] = frozenset(
+    {"atr", "blackout", "calendar", "liquid", "plan_static", "prox", "regime", "score", "trend"}
+)
+
+
+def _value_bytes(value: Any) -> int:
+    """Best-effort byte size of a cached value. Arrays are exact; the rest is small."""
+    if isinstance(value, np.ndarray):
+        return int(value.nbytes)
+    if isinstance(value, pd.Index):
+        return int(value.nbytes)
+    if isinstance(value, pd.Series):
+        return int(value.memory_usage(deep=False))
+    if isinstance(value, tuple | list):
+        return sum(_value_bytes(item) for item in value) + sys.getsizeof(value)
+    return sys.getsizeof(value)
+
+
 class SignalCache:
-    """Memoises the WP-C/WP-D Series that a backtest asks for over and over.
+    """Memoises the arrays a backtest asks for over and over.
 
     The walk-forward search runs the same universe through 81 parameter
-    combinations per window. Most of the expensive Series do not depend on the
-    tuned parameters at all (the trend template, liquidity, ATR, the momentum
-    score), and the ones that do depend on only one or two of them. Keying the
-    cache on ``(what, symbol-identity, the params that actually matter)`` turns
-    81 full recomputations into a handful.
+    combinations per window. Most of the expensive quantities do not depend on
+    the tuned parameters at all (the trend template, liquidity, ATR, the
+    momentum score, the master calendar, the regime filter), and the ones that
+    do depend on only one or two of them. Keying the cache on ``(what,
+    symbol-identity, the params that actually matter)`` turns 81 full
+    recomputations into a handful.
 
-    Scope it to one walk-forward window and throw it away afterwards; it holds
-    references to every Series it has built. It is an ordinary object, never a
-    module-level singleton, so two simulations can never contaminate each other.
+    Values are stored as **numpy arrays**, already aligned to the frame they
+    came from, so a cache hit costs a dict lookup rather than eleven
+    ``reindex -> astype -> to_numpy`` round-trips (audit PERF-001).
+
+    The cache is bounded (audit PERF-005): once the stored bytes exceed
+    ``max_bytes`` it evicts least-recently-used entries, tuned entries before
+    grid-invariant ones. Eviction can only cost time — a re-miss rebuilds the
+    identical array — so results never depend on the budget.
+
+    Scope it to one walk-forward window and throw it away afterwards. It is an
+    ordinary object, never a module-level singleton, so two simulations can
+    never contaminate each other.
     """
 
-    __slots__ = ("_values", "hits", "misses")
+    __slots__ = ("_budget", "_nbytes", "_sizes", "_values", "evictions", "hits", "misses")
 
-    def __init__(self) -> None:
-        self._values: dict[tuple[Any, ...], Any] = {}
+    def __init__(self, *, max_bytes: int = DEFAULT_CACHE_BYTES) -> None:
+        self._values: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+        self._sizes: dict[tuple[Any, ...], int] = {}
+        self._budget = int(max_bytes)
+        self._nbytes = 0
         self.hits = 0
         self.misses = 0
+        self.evictions = 0
 
     def get(self, key: tuple[Any, ...], build: Callable[[], T]) -> T:
         """Return the cached value for ``key``, building it on first sight."""
         if key in self._values:
             self.hits += 1
+            self._values.move_to_end(key)
             return self._values[key]  # type: ignore[return-value]
         self.misses += 1
         value = build()
+        size = _value_bytes(value)
         self._values[key] = value
+        self._sizes[key] = size
+        self._nbytes += size
+        if self._nbytes > self._budget:
+            self._evict(protect=key)
         return value
 
+    def stats(self) -> dict[str, int]:
+        """Hit/miss/eviction counters plus the current and maximum byte footprint."""
+        return {
+            "entries": len(self._values),
+            "hits": self.hits,
+            "misses": self.misses,
+            "evictions": self.evictions,
+            "bytes": self._nbytes,
+            "max_bytes": self._budget,
+        }
+
     def clear(self) -> None:
-        """Drop everything (and the hit/miss counters)."""
+        """Drop everything (and the counters)."""
         self._values.clear()
+        self._sizes.clear()
+        self._nbytes = 0
         self.hits = 0
         self.misses = 0
+        self.evictions = 0
+
+    def _evict(self, *, protect: tuple[Any, ...]) -> None:
+        """Shed LRU entries until the budget is met, tuned entries first."""
+        for invariant in (False, True):
+            if self._nbytes <= self._budget:
+                return
+            doomed = [
+                key
+                for key in self._values
+                if key != protect and (str(key[0]) in _INVARIANT_KINDS) is invariant
+            ]
+            for key in doomed:
+                self._nbytes -= self._sizes.pop(key, 0)
+                del self._values[key]
+                self.evictions += 1
+                if self._nbytes <= self._budget:
+                    return
 
 
-def _frame_id(symbol: str, frame: pd.DataFrame) -> tuple[Any, ...]:
+def _frame_id(symbol: str, frame: pd.DataFrame | None) -> tuple[Any, ...]:
     """A cheap identity for a bars frame that is stable across calls.
 
     Symbol name alone is not enough (two windows may pass different slices),
     and ``id()`` is recycled by the allocator, so we fingerprint the index.
     """
+    if frame is None:
+        return (symbol, -1, 0, 0)
     index = frame.index
     if len(index) == 0:
         return (symbol, 0, 0, 0)
     return (symbol, len(index), int(index[0].value), int(index[-1].value))
+
+
+def _calendar_id(calendar: pd.DatetimeIndex) -> str:
+    """A collision-resistant fingerprint of a master calendar, computed once per run.
+
+    ``row_of_day`` and the regime array are both functions of (frame, calendar),
+    so the calendar has to be part of their cache keys. Hashing the raw int64
+    buffer is O(len(calendar)) once per :func:`run_engine` call — irrelevant
+    beside the work it lets us skip — and unlike a (length, first, last) tuple
+    it cannot alias two genuinely different calendars.
+    """
+    digest = hashlib.blake2b(np.asarray(calendar.asi8).tobytes(), digest_size=16)
+    return digest.hexdigest()
+
+
+def _earnings_key(earnings: date | Sequence[date] | None) -> Any:
+    """A hashable cache key for the earnings argument.
+
+    Contract-3 amendment A12 widened the value from a single date to a sequence
+    of announcement dates; lists are not hashable, so normalise to a tuple.
+    """
+    if earnings is None or isinstance(earnings, date):
+        return earnings
+    return tuple(earnings)
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +519,50 @@ def _high_prox(frame: pd.DataFrame) -> pd.Series:
     return frame["close"] / yearly_high.replace(0.0, np.nan)
 
 
+def _plan_static(
+    symbol: str, frame: pd.DataFrame, calendar: pd.DatetimeIndex
+) -> tuple[np.ndarray, ...]:
+    """The part of a plan that depends only on (bars, calendar) — never on parameters.
+
+    Returns ``(open, high, low, close, row_of_day, day_of_row)``.
+
+    BUG-005: a row whose OHLC is not entirely finite is not a bar. It is mapped
+    out of ``row_of_day`` so every consumer — the exit ladder, the fill, the
+    close-of-day mark, the candidate list — sees exactly what it sees on a
+    holiday: nothing. One warning per symbol, naming the dates.
+    """
+    index = frame.index
+    open_ = frame["open"].astype("float64").to_numpy()
+    high = frame["high"].astype("float64").to_numpy()
+    low = frame["low"].astype("float64").to_numpy()
+    close = frame["close"].astype("float64").to_numpy()
+    row_of_day = np.asarray(index.get_indexer(calendar), dtype=np.int64)
+
+    usable = np.isfinite(open_) & np.isfinite(high) & np.isfinite(low) & np.isfinite(close)
+    if not usable.all():
+        bad = np.flatnonzero(~usable)
+        log.warning(
+            "%s has %d bar(s) whose open/high/low/close is not a finite number (first %s, "
+            "last %s); the backtest treats those days as if the symbol did not trade. Check "
+            "the data provider — Contract 3 should have dropped these rows.",
+            symbol,
+            len(bad),
+            index[bad[0]].date(),
+            index[bad[-1]].date(),
+        )
+        mapped = row_of_day >= 0
+        poisoned = np.zeros(len(row_of_day), dtype=bool)
+        poisoned[mapped] = ~usable[row_of_day[mapped]]
+        row_of_day = np.where(poisoned, -1, row_of_day)
+
+    # The inverse map, derived rather than recomputed: both indexes are unique
+    # and sorted, so ``row_of_day`` inverts exactly (and poisoned rows stay -1).
+    day_of_row = np.full(len(index), -1, dtype=np.int64)
+    mapped = row_of_day >= 0
+    day_of_row[row_of_day[mapped]] = np.flatnonzero(mapped)
+    return (open_, high, low, close, row_of_day, day_of_row)
+
+
 def _build_plan(
     symbol: str,
     frame: pd.DataFrame,
@@ -383,16 +570,21 @@ def _build_plan(
     calendar: pd.DatetimeIndex,
     *,
     is_etf: bool,
-    earnings_date: date | None,
+    earnings_date: date | Sequence[date] | None,
     cache: SignalCache,
+    calendar_ident: str,
 ) -> _SymbolPlan | None:
-    """Compute every Series this symbol needs and flatten them to numpy.
+    """Compute every array this symbol needs.
 
     All Series are computed on the symbol's FULL history — the ``start``/``end``
     arguments of :func:`run_engine` bound the *simulation*, not the data, so
     indicators warm up on bars that precede the window. Restricting the data
     instead would silently change every signal near a window boundary, which is
     exactly the bug walk-forward exists to avoid.
+
+    Everything is memoised as a flat numpy array rather than as a Series
+    (audit PERF-001): the alignment work is part of the cached value, so the
+    81st grid point pays a dict lookup instead of eleven pandas round-trips.
     """
     from swing.strategy import rules, scoring
 
@@ -401,6 +593,7 @@ def _build_plan(
 
     ident = _frame_id(symbol, frame)
     strat = cfg.strategy
+    index = frame.index
 
     # --- invariant across the whole tuning grid: computed once per symbol ----
     # Each key names only the settings the callee actually reads, so a grid
@@ -418,24 +611,24 @@ def _build_plan(
             strat.max_below_high_pct,
             strat.adx_min,
         ),
-        lambda: rules.trend_template(frame, cfg, is_etf=is_etf),
+        lambda: _as_bool_array(rules.trend_template(frame, cfg, is_etf=is_etf), index),
     )
     liquid = cache.get(
         ("liquid", ident, is_etf, strat.min_price, strat.min_dollar_volume),
-        lambda: rules.liquidity_ok(frame, cfg, is_etf=is_etf),
+        lambda: _as_bool_array(rules.liquidity_ok(frame, cfg, is_etf=is_etf), index),
     )
-    atr_series = cache.get(
+    atr = cache.get(
         ("atr", ident, strat.atr_window),
-        lambda: _atr_series(frame, strat.atr_window),
+        lambda: _as_float_array(_atr_series(frame, strat.atr_window), index),
     )
     score = cache.get(
         ("score", ident, strat.mom_weight_126, strat.mom_weight_63, strat.mom_skip_days),
-        lambda: scoring.momentum_score(frame, cfg),
+        lambda: _as_float_array(scoring.momentum_score(frame, cfg), index),
     )
-    prox = cache.get(("prox", ident), lambda: _high_prox(frame))
+    prox = cache.get(("prox", ident), lambda: _as_float_array(_high_prox(frame), index))
     blackout = cache.get(
-        ("blackout", ident, earnings_date, strat.earnings_blackout_days),
-        lambda: rules.earnings_blackout(frame.index, earnings_date, cfg),
+        ("blackout", ident, _earnings_key(earnings_date), strat.earnings_blackout_days),
+        lambda: _as_bool_array(rules.earnings_blackout(index, earnings_date, cfg), index),
     )
 
     # --- depends on the tuned parameters: a handful of variants per symbol ---
@@ -450,38 +643,38 @@ def _build_plan(
             strat.rsi2_enabled,
             strat.sma_fast,
         ),
-        lambda: rules.entry_signal(frame, cfg),
+        lambda: _as_bool_array(rules.entry_signal(frame, cfg), index),
     )
     init_stop = cache.get(
         ("init_stop", ident, strat.atr_stop_mult, strat.atr_window),
-        lambda: rules.initial_stop(frame, cfg),
+        lambda: _as_float_array(rules.initial_stop(frame, cfg), index),
     )
     chandelier = cache.get(
         ("chandelier", ident, strat.chandelier_mult, strat.atr_window),
-        lambda: rules.chandelier_stop(frame, cfg),
+        lambda: _as_float_array(rules.chandelier_stop(frame, cfg), index),
     )
 
-    index = frame.index
-    signal = (
-        _as_bool_array(trend, index)
-        & _as_bool_array(entry, index)
-        & _as_bool_array(liquid, index)
-        & ~_as_bool_array(blackout, index)
+    open_, high, low, close, row_of_day, day_of_row = cache.get(
+        ("plan_static", ident, calendar_ident),
+        lambda: _plan_static(symbol, frame, calendar),
     )
 
+    mapped_days = np.flatnonzero(row_of_day >= 0)
     return _SymbolPlan(
         symbol=symbol,
-        open_=frame["open"].astype("float64").to_numpy(),
-        high=frame["high"].astype("float64").to_numpy(),
-        low=frame["low"].astype("float64").to_numpy(),
-        close=frame["close"].astype("float64").to_numpy(),
-        atr=_as_float_array(atr_series, index),
-        initial_stop=_as_float_array(init_stop, index),
-        chandelier=_as_float_array(chandelier, index),
-        score=_as_float_array(score, index),
-        high_prox=_as_float_array(prox, index),
-        signal=signal,
-        row_of_day=np.asarray(index.get_indexer(calendar), dtype=np.int64),
+        open_=open_,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        initial_stop=init_stop,
+        chandelier=chandelier,
+        score=score,
+        high_prox=prox,
+        signal=trend & entry & liquid & ~blackout,
+        row_of_day=row_of_day,
+        day_of_row=day_of_row,
+        last_valid_day=int(mapped_days[-1]) if len(mapped_days) else -1,
     )
 
 
@@ -523,7 +716,7 @@ def run_engine(
     spy_bars: pd.DataFrame,
     cfg: Config,
     *,
-    earnings: dict[str, date | None] | None = None,
+    earnings: dict[str, date | Sequence[date] | None] | None = None,
     is_etf: dict[str, bool] | None = None,
     start: date | None = None,
     end: date | None = None,
@@ -558,7 +751,13 @@ def run_engine(
     symbols = sorted(s for s, f in bars_by_symbol.items() if f is not None and not f.empty)
     initial_equity = float(cfg.account.equity)
 
-    calendar = _master_calendar(bars_by_symbol, symbols, start, end)
+    # The calendar depends only on the bars and the window, so every grid point
+    # in a fold shares one (audit PERF-004).
+    bars_ident = tuple(_frame_id(symbol, bars_by_symbol[symbol]) for symbol in symbols)
+    calendar, calendar_ident = cache.get(
+        ("calendar", bars_ident, start, end),
+        lambda: _calendar_with_ident(bars_by_symbol, symbols, start, end),
+    )
     if len(calendar) == 0 or not symbols:
         return EngineResult(
             trades=empty_trades(),
@@ -577,6 +776,7 @@ def run_engine(
             is_etf=bool(is_etf.get(symbol, False)),
             earnings_date=earnings.get(symbol),
             cache=cache,
+            calendar_ident=calendar_ident,
         )
         if plan is not None:
             plans.append(plan)
@@ -588,18 +788,38 @@ def run_engine(
             initial_equity=initial_equity,
         )
 
-    index_of_symbol = {plan.symbol: i for i, plan in enumerate(plans)}
-    candidates_by_day = _candidates_by_day(plans, bars_by_symbol, calendar)
-    regime_ok = _regime_array(spy_bars, cfg, calendar)
+    candidates_by_day = _candidates_by_day(plans, calendar)
+    # The regime filter is a pure function of SPY, three config knobs and the
+    # calendar — grid-invariant, so it is cached alongside them (PERF-004).
+    regime_ok = cache.get(
+        (
+            "regime",
+            _frame_id(cfg.regime.symbol, spy_bars),
+            bool(cfg.regime.enabled),
+            int(cfg.regime.sma_window),
+            calendar_ident,
+        ),
+        lambda: _regime_array(spy_bars, cfg, calendar),
+    )
 
     return _simulate(
         plans=plans,
-        index_of_symbol=index_of_symbol,
         candidates_by_day=candidates_by_day,
         regime_ok=regime_ok,
         calendar=calendar,
         cfg=cfg,
     )
+
+
+def _calendar_with_ident(
+    bars_by_symbol: dict[str, pd.DataFrame],
+    symbols: list[str],
+    start: date | None,
+    end: date | None,
+) -> tuple[pd.DatetimeIndex, str]:
+    """The master calendar plus its fingerprint, built together and cached together."""
+    calendar = _master_calendar(bars_by_symbol, symbols, start, end)
+    return calendar, _calendar_id(calendar)
 
 
 def _master_calendar(
@@ -627,26 +847,21 @@ def _master_calendar(
     return pd.DatetimeIndex(calendar, name="date")
 
 
-def _candidates_by_day(
-    plans: list[_SymbolPlan],
-    bars_by_symbol: dict[str, pd.DataFrame],
-    calendar: pd.DatetimeIndex,
-) -> list[list[int]]:
+def _candidates_by_day(plans: list[_SymbolPlan], calendar: pd.DatetimeIndex) -> list[list[int]]:
     """Invert the per-symbol signal arrays into a per-day candidate list.
 
     Signals are sparse, so this costs a scan of a boolean array per symbol and
     saves the daily loop from ever touching a symbol that has nothing to say.
     Symbols are visited in sorted order, so each day's list is already in a
-    deterministic order before ranking.
+    deterministic order before ranking. ``day_of_row`` is the cached inverse of
+    ``row_of_day``, so a bar the engine has ruled out (holiday, non-finite OHLC)
+    cannot produce a candidate.
     """
     buckets: list[list[int]] = [[] for _ in range(len(calendar))]
     for si, plan in enumerate(plans):
-        frame_index = bars_by_symbol[plan.symbol].index
-        day_of_row = np.asarray(calendar.get_indexer(frame_index), dtype=np.int64)
-        for row in np.flatnonzero(plan.signal):
-            day = int(day_of_row[row])
-            if day >= 0:
-                buckets[day].append(si)
+        days = plan.day_of_row[plan.signal]
+        for day in days[days >= 0]:
+            buckets[int(day)].append(si)
     return buckets
 
 
@@ -656,7 +871,11 @@ def _rank_key(plan: _SymbolPlan, row: int) -> tuple[int, float, float, str]:
     This reproduces the ordering of :func:`swing.strategy.scoring.rank_candidates`
     (score desc, tiebreak high_prox desc) from Series that were precomputed
     once per symbol, and appends the symbol name so the order is total even
-    when two names tie on both floats. Non-finite scores sort last.
+    when two names tie on both floats.
+
+    Non-finite scores still sort last, but that is now belt and braces: the
+    caller drops them before they ever reach a rank key, because the scanner
+    drops them too (audit BUG-003).
     """
     score = plan.score[row]
     prox = plan.high_prox[row]
@@ -669,7 +888,6 @@ def _rank_key(plan: _SymbolPlan, row: int) -> tuple[int, float, float, str]:
 def _simulate(
     *,
     plans: list[_SymbolPlan],
-    index_of_symbol: dict[str, int],
     candidates_by_day: list[list[int]],
     regime_ok: np.ndarray,
     calendar: pd.DatetimeIndex,
@@ -680,7 +898,11 @@ def _simulate(
 
     costs = CostModel.from_config(cfg)
     max_positions = int(cfg.account.max_positions)
+    bench_depth = max_positions * BENCH_MULTIPLE
     time_stop_days = int(cfg.strategy.time_stop_days)
+    # Materialising the whole index once is ~30x cheaper than ``calendar[di]``
+    # inside the loop, which rebuilds a Timestamp every day (audit PERF-004).
+    calendar_days: list[pd.Timestamp] = list(calendar)
 
     cash = float(cfg.account.equity)
     initial_equity = cash
@@ -694,7 +916,7 @@ def _simulate(
     last_day = len(calendar) - 1
 
     for di in range(len(calendar)):
-        day = calendar[di]
+        day = calendar_days[di]
 
         # ------------------------------------------------------------------
         # 1. EXITS — priced off the stop as it stood at the close of t-1.
@@ -704,8 +926,38 @@ def _simulate(
             plan = plans[position.symbol_index]
             row = int(plan.row_of_day[di])
             if row < 0:
-                # No bar for this symbol today (halt, holiday, late listing):
-                # the position simply carries, marked at its last close.
+                if (
+                    di > plan.last_valid_day
+                    and position.last_row >= 0
+                    and _finite(position.last_close)
+                ):
+                    # BUG-016: the symbol's history has ENDED — this is not a
+                    # halt it can come back from. Mark the position out at the
+                    # last bar it actually printed, exactly as the end-of-run
+                    # close-out would (same reason, same price, same guards),
+                    # and give the slot and the cash back.
+                    cash = _close_position(
+                        position=position,
+                        exit_day=position.last_day,
+                        exit_date=calendar_days[position.last_day],
+                        exit_price=position.last_close,
+                        reason=EXIT_END_OF_DATA,
+                        atr_for_exit=plan.atr[position.last_row],
+                        costs=costs,
+                        cash=cash,
+                        trade_rows=trade_rows,
+                    )
+                    del open_positions[symbol]
+                    log.warning(
+                        "%s stopped printing bars after %s while a position was open; the "
+                        "backtest closed it at that bar's close (%.4f) rather than freezing "
+                        "the slot for the rest of the run.",
+                        symbol,
+                        calendar_days[position.last_day].date(),
+                        position.last_close,
+                    )
+                # Otherwise: no bar for this symbol today (halt, holiday, late
+                # listing) — the position carries, marked at its last close.
                 continue
 
             open_px = plan.open_[row]
@@ -717,17 +969,21 @@ def _simulate(
                 EXIT_CHANDELIER if position.stop > position.initial_stop + 1e-12 else EXIT_STOP
             )
 
+            # The prices are what needs guarding, not the stop: ``stop`` is
+            # validated finite at entry and only ever ratcheted with a finite
+            # chandelier, while ``open_px``/``low_px`` come straight from the
+            # vendor (audit DEBT-015, BUG-005).
             exit_price: float | None = None
             reason = ""
-            if _finite(stop) and open_px <= stop:
+            if _finite(open_px) and open_px <= stop:
                 # (a) gapped through overnight — you get the open, not the stop.
                 exit_price = float(open_px)
                 reason = stop_reason
-            elif position.time_exit_pending:
+            elif position.time_exit_pending and _finite(open_px):
                 # (b) time stop signalled at yesterday's close, fills at the open.
                 exit_price = float(open_px)
                 reason = EXIT_TIME
-            elif _finite(stop) and low_px <= stop:
+            elif _finite(low_px) and low_px <= stop:
                 # (c) resting stop order touched intraday — fills AT the stop.
                 exit_price = float(stop)
                 reason = stop_reason
@@ -822,9 +1078,13 @@ def _simulate(
                     # THE RATCHET: never below yesterday's stop, never below the
                     # stop this position was sized against.
                     position.stop = max(position.stop, float(chandelier), position.initial_stop)
-                position.last_row = row
-                position.last_close = float(plan.close[row])
-                position.last_day = di
+                close_px = plan.close[row]
+                if _finite(close_px):
+                    # BUG-005: a non-finite close must never become the mark —
+                    # it would poison equity, drawdown and the end-of-data exit.
+                    position.last_row = row
+                    position.last_close = float(close_px)
+                    position.last_day = di
             # Days held, counted on the master calendar. Armed at the close, so
             # the fill lands at tomorrow's open (see the exit ladder).
             if di - position.entry_day >= time_stop_days:
@@ -849,6 +1109,16 @@ def _simulate(
                 row = int(plan.row_of_day[di])
                 if row < 0:
                     continue
+                if not math.isfinite(plan.score[row]):
+                    # BUG-003 residual: `rank_candidates` DROPS a symbol whose
+                    # momentum score is not finite (warm-up, or an ATR% under
+                    # the floor). Merely sorting it last here was enough while
+                    # the bench was exactly max_positions deep and something
+                    # scored above it; with a deeper bench (BUG-053) and an
+                    # empty slot it could actually be filled, so the engine
+                    # would trade a name the live scanner never even ranks.
+                    # Shared rules mean the same candidate set, not a similar one.
+                    continue
                 ranked.append(
                     _PendingEntry(
                         symbol_index=si,
@@ -858,9 +1128,12 @@ def _simulate(
                 )
             if ranked:
                 ranked.sort(key=lambda order: order.rank_key)
-                # Carry at most max_positions orders: tomorrow's exits can free
-                # every slot, but never more than that.
-                pending = ranked[:max_positions]
+                # BUG-053: carry a BENCH, not just the slots. Tomorrow's exits
+                # can free every slot, and a pick that sizes to zero shares
+                # must be replaced by the next-ranked candidate rather than
+                # wasting the slot — which is exactly what a bench of
+                # max_positions orders could not do.
+                pending = ranked[:bench_depth]
 
     # ----------------------------------------------------------------------
     # END OF DATA — snapshot what is open, then mark it out at the last close.
@@ -890,7 +1163,7 @@ def _simulate(
         cash = _close_position(
             position=position,
             exit_day=position.last_day,
-            exit_date=calendar[position.last_day],
+            exit_date=calendar_days[position.last_day],
             exit_price=position.last_close,
             reason=EXIT_END_OF_DATA,
             # Marking out at a close, so that bar's ATR is legitimately known.

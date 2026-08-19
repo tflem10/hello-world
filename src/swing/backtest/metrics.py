@@ -98,9 +98,15 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     """Return ``(max drawdown as a positive percent, longest underwater days)``.
 
     The duration is measured in **calendar days** between the high-water mark
-    and the first bar that regains it. A drawdown that never recovers is
+    and the bar that regains it — the recovery bar is *included*, because the
+    drawdown is not over until the high-water mark is back (audit BUG-052; the
+    code used to stop at the last bar still under water, contradicting this
+    docstring and the test that quoted it). A drawdown that never recovers is
     measured to the last bar in the series, which is the honest reading: it is
     still going.
+
+    Vectorised end to end (audit PERF-004): the per-bar Python loop this
+    replaced was ~43% of :func:`compute_metrics`.
     """
     if equity.empty:
         return 0.0, 0
@@ -111,19 +117,34 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     worst = float(drawdown.min())
     max_dd_pct = abs(worst) * 100.0 if worst < 0 else 0.0
 
-    # Underwater stretches: each begins the first bar below a peak and ends on
-    # the bar that matches the peak again (or at the end of the series).
-    longest = 0
-    peak_date = values.index[0]
-    peak_value = float(values.iloc[0])
-    for stamp, value in values.items():
-        value = float(value)
-        if value >= peak_value:
-            peak_value = value
-            peak_date = stamp
-        else:
-            span = (stamp - peak_date).days
-            longest = max(longest, int(span))
+    raw = values.to_numpy(dtype="float64", copy=False)
+    # ``fmax`` rather than ``maximum`` so a NaN bar leaves the high-water mark
+    # where it was instead of poisoning every bar after it.
+    running_peak = np.fmax.accumulate(raw)
+    at_peak = raw >= running_peak  # a bar that equals the running max IS the peak
+
+    positions = np.arange(len(raw), dtype=np.int64)
+    peak_at = np.maximum.accumulate(np.where(at_peak, positions, -1))
+    # The peak a bar is measured against is the one in force BEFORE it.
+    reference = np.empty(len(raw), dtype=np.int64)
+    reference[0] = 0
+    reference[1:] = peak_at[:-1]
+
+    # Whole calendar days, truncated exactly the way ``Timedelta.days`` does.
+    # Going through timedelta64 keeps this correct whatever resolution the
+    # index carries (pandas 3 defaults daily bars to microseconds, not nanos).
+    stamps = pd.DatetimeIndex(values.index).values
+    spans = (stamps[positions] - stamps[reference]).astype("timedelta64[D]").astype(np.int64)
+
+    previous_at_peak = np.empty(len(raw), dtype=bool)
+    previous_at_peak[0] = True
+    previous_at_peak[1:] = at_peak[:-1]
+    # Every underwater bar counts, and so does the bar that ENDS a stretch by
+    # regaining the mark. A peak that follows a peak is not a drawdown at all.
+    counts = ~at_peak | ~previous_at_peak
+    counts[0] = False
+
+    longest = int(spans[counts].max()) if counts.any() else 0
     return round(max_dd_pct, 10), longest
 
 
@@ -245,6 +266,14 @@ def compute_metrics(
     }
 
 
+def _seeded_curve(curve: pd.Series) -> pd.Series:
+    """Prepend a 1.0 bar the day before ``curve`` starts, so bar one has a peak to fall from."""
+    if curve.empty:
+        return curve
+    opening_stamp = curve.index[0] - pd.Timedelta(days=1)
+    return pd.concat([pd.Series([1.0], index=[opening_stamp]), curve])
+
+
 def by_year_table(
     trades: pd.DataFrame,
     equity: pd.DataFrame,
@@ -258,7 +287,8 @@ def by_year_table(
     year of a backtest) is handled the same way as any other. ``trades`` counts
     trades by their **exit** date — that is when the P&L is realised. The
     drawdown is measured inside the year only, so a multi-year drawdown shows
-    up in each year it passes through, at the depth it reached there.
+    up in each year it passes through, at the depth it reached there, and each
+    year's curve is seeded at 1.0 so a fall on its very first bar still counts.
     """
     if equity is None or equity.empty:
         return {}
@@ -276,7 +306,11 @@ def by_year_table(
     out: dict[str, dict[str, float]] = {}
     for year, group in returns.groupby(returns.index.year):
         compounded = float((1.0 + group).prod() - 1.0)
-        year_curve = (1.0 + group).cumprod()
+        # BUG-040: seed the year at 1.0, one day before its first bar, the same
+        # way compute_metrics prepends ``initial_equity``. Without the seed the
+        # high-water mark is set AFTER the year's first move, so a year that
+        # opens -20% and recovers reports a max drawdown of zero.
+        year_curve = _seeded_curve((1.0 + group).cumprod())
         year_dd, _ = max_drawdown(year_curve)
         out[str(int(year))] = {
             "return_pct": compounded * 100.0,

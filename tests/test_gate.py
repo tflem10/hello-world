@@ -13,7 +13,15 @@ import json
 import pytest
 
 from conftest import build_config
-from swing.backtest.gate import GateResult, backtest_dir, check, latest_path, load_latest
+from swing.backtest.gate import (
+    ABLATION_PREFIX,
+    GateResult,
+    backtest_dir,
+    check,
+    latest_path,
+    load_latest,
+    read_latest,
+)
 
 
 def passing_summary(**overrides):
@@ -252,16 +260,22 @@ def test_missing_metrics_fail_closed_not_open(tmp_path):
 
 
 def test_a_nan_profit_factor_fails(tmp_path):
+    """Expectation updated for audit BUG-017.
+
+    ``NaN`` is a JSON *extension*, not JSON, and a report containing one is now
+    refused whole at parse time rather than being read field by field. The
+    refusal names the non-finite number instead of naming the profit factor.
+    """
     cfg = build_config(tmp_path)
     path = latest_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     summary = passing_summary()
     summary["oos"]["profit_factor"] = float("nan")
-    # json.dumps writes bare NaN, which json.load accepts back as float('nan').
+    # json.dumps writes bare NaN, which a naive json.load accepts as float('nan').
     path.write_text(json.dumps(summary), encoding="utf-8")
     verdict = check(cfg)
     assert verdict.passed is False
-    assert any("profit factor" in reason for reason in verdict.reasons)
+    assert any("non-finite number" in reason for reason in verdict.reasons)
 
 
 def test_a_string_where_a_number_belongs_fails(tmp_path):
@@ -272,3 +286,135 @@ def test_a_string_where_a_number_belongs_fails(tmp_path):
 
 def test_load_latest_returns_none_when_the_file_is_absent(tmp_path):
     assert load_latest(build_config(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# BUG-017 — the report is untrusted input
+# ---------------------------------------------------------------------------
+
+
+def test_the_string_false_does_not_open_the_walkforward_gate(tmp_path):
+    """BUG-017: ``bool("false")`` is True, and that used to open the gate.
+
+    A hand-edited or script-generated ``latest.json`` carrying the *string*
+    ``"false"`` described an in-sample fit and was let through. Only the JSON
+    literal ``true`` counts now.
+    """
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(walkforward="false"))
+    verdict = check(cfg)
+    assert verdict.passed is False
+    assert any("walk-forward" in reason for reason in verdict.reasons)
+
+
+@pytest.mark.parametrize("truthy", ["true", "yes", 1, [1], {"a": 1}])
+def test_no_truthy_stand_in_passes_for_walkforward(tmp_path, truthy):
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(walkforward=truthy))
+    assert check(cfg).passed is False
+
+
+def test_an_infinity_literal_is_refused_in_one_sentence_not_a_traceback(tmp_path):
+    """BUG-017: ``"trades": Infinity`` used to raise OverflowError out of `swing report`."""
+    cfg = build_config(tmp_path)
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    summary = passing_summary()
+    summary["oos"]["trades"] = float("inf")
+    path.write_text(json.dumps(summary), encoding="utf-8")  # writes bare Infinity
+
+    verdict = check(cfg)
+    assert verdict.passed is False
+    assert len(verdict.reasons) == 1
+    assert "non-finite number" in verdict.reasons[0]
+    assert load_latest(cfg) is None
+
+
+def test_an_infinity_profit_factor_does_not_pass_the_gate(tmp_path):
+    """BUG-017: the sentinel that "passes" every threshold must fail closed."""
+    cfg = build_config(tmp_path)
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    summary = passing_summary()
+    summary["oos"]["profit_factor"] = float("inf")
+    path.write_text(json.dumps(summary), encoding="utf-8")
+    assert check(cfg).passed is False
+
+
+def test_report_command_refuses_a_non_finite_report_cleanly(tmp_path, capsys):
+    """The same hostile file through `swing report`, which has no guardrail to absorb it."""
+    from swing.backtest.report import print_latest
+
+    cfg = build_config(tmp_path)
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    summary = passing_summary()
+    summary["oos"]["trades"] = float("inf")
+    path.write_text(json.dumps(summary), encoding="utf-8")
+
+    print_latest(cfg)  # must not raise
+    out = capsys.readouterr().out
+    assert "cannot be used" in out
+    assert "non-finite number" in out
+    assert "swing backtest" in out
+
+
+def test_an_overflowing_literal_still_fails_closed(tmp_path):
+    """BUG-017: ``1e400`` parses to inf WITHOUT touching parse_constant.
+
+    This is the case ``parse_constant`` cannot see, so it pins the finite-only
+    coercions rather than the parser.
+    """
+    cfg = build_config(tmp_path)
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(passing_summary()).replace('"profit_factor": 1.75', '"profit_factor": 1e400')
+    assert "1e400" in text
+    path.write_text(text, encoding="utf-8")
+
+    assert load_latest(cfg) is not None  # it parses fine; the value is just infinite
+    verdict = check(cfg)
+    assert verdict.passed is False
+    reason = next(r for r in verdict.reasons if "profit factor" in r)
+    assert "0.00" in reason  # read as the worst possible value, not as infinity
+
+
+def test_an_overflowing_trade_count_fails_closed(tmp_path):
+    """BUG-017: ``int(inf)`` raises OverflowError, which _as_int must absorb."""
+    cfg = build_config(tmp_path)
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(passing_summary()).replace('"trades": 140', '"trades": 1e400')
+    path.write_text(text, encoding="utf-8")
+
+    verdict = check(cfg)
+    assert verdict.passed is False
+    assert any("0 out-of-sample trades" in reason for reason in verdict.reasons)
+
+
+def test_an_ablation_label_can_never_open_the_gate(tmp_path):
+    """BUG-017: rule 3 was enforced only at write time; copying the file bypassed it."""
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(label=f"{ABLATION_PREFIX}-no-regime"))
+    verdict = check(cfg)
+    assert verdict.passed is False
+    reason = next(r for r in verdict.reasons if "ablation" in r)
+    assert "ablate-no-regime" in reason
+
+
+def test_a_normal_label_is_not_mistaken_for_an_ablation(tmp_path):
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(label="backtest-20240101-120000"))
+    assert check(cfg).passed is True
+
+
+def test_read_latest_separates_absence_from_corruption(tmp_path):
+    cfg = build_config(tmp_path)
+    assert read_latest(cfg) == (None, None)
+
+    path = latest_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ nope", encoding="utf-8")
+    summary, problem = read_latest(cfg)
+    assert summary is None
+    assert problem is not None and "valid JSON" in problem

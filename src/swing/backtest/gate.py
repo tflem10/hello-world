@@ -16,8 +16,20 @@ Three rules make the gate hard to fool:
    parameters is an in-sample fit; letting it open the gate would defeat the
    design.
 3. **Ablation runs never become the reference.** Runs labelled ``ablate*`` do
-   not update ``latest.json`` at all (see :mod:`swing.backtest.runner`), so a
-   deliberately-crippled variant cannot be mistaken for the baseline.
+   not update ``latest.json`` at all (see :mod:`swing.backtest.runner`) — and
+   if one is copied over it anyway, this module refuses it on sight.
+
+THE REPORT IS UNTRUSTED INPUT (audit BUG-017)
+----------------------------------------------
+``latest.json`` is an ordinary file a human, a script or a half-finished write
+can produce, so it is parsed defensively rather than believed:
+
+* ``walkforward`` must be the JSON literal ``true``. Python truthiness would
+  read the *string* ``"false"`` as True and open the gate on an in-sample fit.
+* ``Infinity`` / ``-Infinity`` / ``NaN`` are rejected at parse time (they are
+  JSON extensions, not JSON), and every number is re-checked for finiteness
+  after parsing so a plain ``1e400`` cannot slip through as ``inf`` either.
+* An unusable number always falls back to the *worst* possible reading.
 
 Every failure is a plain-English sentence, because it is printed to a human who
 is about to be told they may not trade today and deserves to know why.
@@ -27,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,9 +47,28 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
-__all__ = ["GateResult", "backtest_dir", "check", "latest_path", "load_latest"]
+__all__ = [
+    "ABLATION_PREFIX",
+    "GateResult",
+    "backtest_dir",
+    "check",
+    "latest_path",
+    "load_latest",
+    "read_latest",
+]
 
 log = logging.getLogger(__name__)
+
+#: Runs whose label starts with this are deliberately crippled variants. They
+#: never write ``latest.json`` (:mod:`swing.backtest.runner`) and never open the
+#: gate if one is put there by hand.
+ABLATION_PREFIX = "ablate"
+
+#: What a caller is told when the report contains a number JSON cannot hold.
+NON_FINITE_PROBLEM = (
+    "the report contains a non-finite number (Infinity or NaN), which no real measurement "
+    "produces, so it cannot be trusted"
+)
 
 
 @dataclass(frozen=True)
@@ -65,18 +97,44 @@ def latest_path(cfg: Config) -> Path:
     return backtest_dir(cfg) / "latest.json"
 
 
-def load_latest(cfg: Config) -> dict[str, Any] | None:
-    """Read ``latest.json``, or return ``None`` when it is missing or unreadable."""
+class _NonFiniteJSON(ValueError):
+    """Raised while parsing when the report carries ``Infinity`` / ``NaN``."""
+
+
+def _reject_constant(name: str) -> float:
+    raise _NonFiniteJSON(name)
+
+
+def read_latest(cfg: Config) -> tuple[dict[str, Any] | None, str | None]:
+    """Read ``latest.json`` and say what is wrong with it when it is unusable.
+
+    Returns:
+        ``(summary, problem)``. Exactly one is ever non-``None``: a parsed
+        object, or a plain-English clause naming why there is none. A missing
+        file is reported as ``(None, None)`` — that is not a corruption, it is
+        simply the absence of a report, and callers phrase it their own way.
+    """
     path = latest_path(cfg)
     if not path.is_file():
-        return None
+        return None, None
     try:
         with path.open(encoding="utf-8") as handle:
-            data = json.load(handle)
+            data = json.load(handle, parse_constant=_reject_constant)
+    except _NonFiniteJSON as exc:
+        log.warning("Refusing %s: it contains the JSON literal %s.", path, exc)
+        return None, NON_FINITE_PROBLEM
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("Could not read %s: %s", path, exc)
-        return None
-    return data if isinstance(data, dict) else None
+        return None, "the report could not be read or is not valid JSON"
+    if not isinstance(data, dict):
+        return None, "the report is not a JSON object"
+    return data, None
+
+
+def load_latest(cfg: Config) -> dict[str, Any] | None:
+    """Read ``latest.json``, or return ``None`` when it is missing or unreadable."""
+    summary, _problem = read_latest(cfg)
+    return summary
 
 
 def _resolve_report_path(cfg: Config, summary: dict[str, Any]) -> Path:
@@ -100,9 +158,18 @@ def check(cfg: Config) -> GateResult:
         naming the measured value, the required value, and what to do about it.
     """
     gates = cfg.gates
-    summary = load_latest(cfg)
+    summary, problem = read_latest(cfg)
 
     if summary is None:
+        if problem is not None:
+            return GateResult(
+                passed=False,
+                reasons=[
+                    f"The backtest report at {latest_path(cfg)} cannot be used because "
+                    f"{problem}. Re-run `swing backtest` to regenerate it."
+                ],
+                report_path=latest_path(cfg),
+            )
         return GateResult(
             passed=False,
             reasons=[
@@ -115,11 +182,22 @@ def check(cfg: Config) -> GateResult:
     report_path = _resolve_report_path(cfg, summary)
     reasons: list[str] = []
 
-    if not bool(summary.get("walkforward", False)):
+    # `is True`, not truthiness: bool("false") is True, and a hand-edited or
+    # script-generated report is exactly where that string comes from.
+    if summary.get("walkforward") is not True:
         reasons.append(
             "The most recent backtest was not a walk-forward run, and a backtest whose "
             "parameters were fitted to the same data they were measured on cannot open this "
             "gate. Run `swing backtest` without --no-walkforward."
+        )
+
+    if str(summary.get("label") or "").startswith(ABLATION_PREFIX):
+        reasons.append(
+            f"The most recent backtest is labelled "
+            f"{str(summary.get('label') or '')!r}, which marks it as an ablation — a "
+            f"deliberately crippled variant run to measure one component's contribution. "
+            f"An ablation can never be the reference. Re-run `swing backtest` with a normal "
+            f"label."
         )
 
     oos = summary.get("oos")
@@ -158,16 +236,24 @@ def check(cfg: Config) -> GateResult:
 
 
 def _as_float(value: Any, *, default: float) -> float:
-    """Coerce a JSON value to float, falling back to ``default`` on anything unusable."""
+    """Coerce a JSON value to a FINITE float, falling back to ``default`` otherwise.
+
+    ``default`` is always the worst possible reading, so a report whose numbers
+    are missing, quoted, NaN or infinite fails the gate rather than sailing
+    through it (audit BUG-017). ``1e400`` parses as ``inf`` without ever
+    touching ``parse_constant``, which is why finiteness is re-checked here.
+    """
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
-    return result if result == result else default  # NaN-safe
+    return result if math.isfinite(result) else default
 
 
 def _as_int(value: Any, *, default: int) -> int:
+    """Coerce a JSON value to int; ``inf`` raises OverflowError, not a traceback."""
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return result

@@ -108,8 +108,10 @@ OBJECTIVE_DESCRIPTION = (
     "In-sample selection maximises profit factor among parameter sets with at least "
     f"{MIN_IS_TRADES} in-sample trades (sets below that floor rank last whatever their "
     "ratio), breaking ties by more trades, then by shallower maximum drawdown, then by "
-    "the frozen grid order. Profit factor is used because it is the quantity the "
-    "deployment gate tests."
+    "the frozen grid order. A parameter set with no losing trades at all reports the "
+    "9999.0 profit-factor sentinel rather than a measurement, so it is ranked as 0.0 and "
+    "wins only on trade count and drawdown. Profit factor is used because it is the "
+    "quantity the deployment gate tests."
 )
 
 #: Parameters perturbed one at a time in the sensitivity table.
@@ -227,10 +229,18 @@ def objective_key(metrics: dict[str, Any]) -> tuple[int, float, int, float]:
 
     Returned as a tuple to be maximised: ``(clears_floor, profit_factor,
     trades, -max_drawdown_pct)``.
+
+    BUG-041: ``profit_factor`` is :data:`~swing.backtest.metrics.PROFIT_FACTOR_CAP`
+    whenever a parameter set happened to take no losing trades, and that
+    sentinel is not a measurement — reading it literally makes eight lucky
+    trades outrank three hundred honestly measured ones and hands a whole
+    out-of-sample year to a curve fit. A capped set therefore scores 0.0 on
+    profit factor and has to win on evidence (trades) and drawdown instead.
     """
     trades = int(metrics.get("trades", 0))
     clears_floor = 1 if trades >= MIN_IS_TRADES else 0
-    profit_factor = float(metrics.get("profit_factor", 0.0))
+    capped = bool(metrics.get("profit_factor_capped", False))
+    profit_factor = 0.0 if capped else float(metrics.get("profit_factor", 0.0))
     max_dd = float(metrics.get("max_drawdown_pct", 0.0))
     return (clears_floor, profit_factor, trades, -max_dd)
 
@@ -357,7 +367,7 @@ def run_walkforward(
     spy_bars: pd.DataFrame,
     cfg: Config,
     *,
-    earnings: dict[str, date | None] | None = None,
+    earnings: dict[str, date | Sequence[date] | None] | None = None,
     is_etf: dict[str, bool] | None = None,
     start: date | None = None,
     end: date | None = None,
@@ -536,7 +546,7 @@ def sensitivity_table(
     spy_bars: pd.DataFrame,
     cfg: Config,
     *,
-    earnings: dict[str, date | None] | None = None,
+    earnings: dict[str, date | Sequence[date] | None] | None = None,
     is_etf: dict[str, bool] | None = None,
     start: date | None = None,
     end: date | None = None,

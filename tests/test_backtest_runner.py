@@ -562,3 +562,280 @@ def test_print_latest_explains_itself_when_there_is_no_report(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "No backtest report found" in out
     assert "swing backtest" in out
+
+
+# ---------------------------------------------------------------------------
+# BUG-042 — a label is one directory name, and latest.json has one home
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "sub/run-1",  # relocates latest.json; the real one goes stale
+        "sub/ablate-x",  # buries the prefix so the ablation guard never sees it
+        "../escaped",  # writes outside the reports tree entirely
+        "/absolute",
+        "with space",
+        "trailing/",
+        "",  # not the default: an explicit empty label is a mistake
+        ".",
+        "..",
+    ],
+)
+def test_a_label_that_is_not_a_directory_name_is_refused(tmp_path, wired, label):
+    cfg = runner_cfg(tmp_path)
+    with pytest.raises(ValueError, match="not usable as a directory name"):
+        go(cfg, label=label)
+
+
+def test_the_ablate_guard_cannot_be_bypassed_with_a_path_separator(tmp_path, wired):
+    """BUG-042 repro: ``--label sub/ablate-x`` slipped past ``startswith('ablate')``."""
+    cfg = runner_cfg(tmp_path)
+    go(cfg, label="baseline")
+    baseline_bytes = latest_path(cfg).read_bytes()
+
+    with pytest.raises(ValueError, match="not usable as a directory name"):
+        go(cfg, label=f"sub/{ABLATION_PREFIX}-x")
+
+    assert latest_path(cfg).read_bytes() == baseline_bytes
+    assert not (cfg.paths.reports_dir / "backtest" / "sub").exists()
+
+
+def test_a_bad_label_is_refused_before_any_work_happens(tmp_path, wired):
+    """A sentence, not forty minutes of simulation followed by a sentence."""
+    cfg = runner_cfg(tmp_path)
+    with pytest.raises(ValueError, match="not usable as a directory name"):
+        go(cfg, label="reports/../../etc/run")
+    assert wired.requested == []
+
+
+@pytest.mark.parametrize(
+    "label", ["baseline", "backtest-20240101-120000", "ablate-no-regime", "run_1.v2", "A"]
+)
+def test_ordinary_labels_are_accepted(tmp_path, wired, label):
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label=label)
+    assert directory.name == label
+    assert directory.parent == cfg.paths.reports_dir / "backtest"
+
+
+def test_latest_json_is_written_where_the_gate_looks_for_it(tmp_path, wired):
+    """BUG-042: the reference file location comes from the gate, never from the run dir."""
+    from swing.backtest.runner import write_report
+
+    cfg = runner_cfg(tmp_path)
+    summary = json.loads((go(cfg, label="source") / "summary.json").read_text())
+    latest_path(cfg).unlink()
+
+    elsewhere = tmp_path / "somewhere" / "else" / "deep"
+    write_report(cfg, elsewhere, summary, pd.DataFrame(), pd.DataFrame())
+
+    assert latest_path(cfg).is_file()
+    assert json.loads(latest_path(cfg).read_text())["label"] == "source"
+    assert not (elsewhere.parent / "latest.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# BUG-043 — the headline names the period the numbers cover
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def wf_wired(monkeypatch):
+    monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: FakeProvider(wf_bars()))
+    monkeypatch.setattr(
+        "swing.backtest.walkforward.TUNING_GRID",
+        {"atr_stop_mult": (1.5, 2.5), "donchian_window": (15, 25)},
+    )
+
+
+def walkforward_run(tmp_path, **overrides):
+    cfg = runner_cfg(tmp_path, backtest={"is_years": 1, "oos_years": 1})
+    directory = go(
+        cfg,
+        label="span",
+        walkforward=True,
+        start=date(2021, 6, 1),
+        end=date(2025, 5, 31),
+        **overrides,
+    )
+    return cfg, directory, json.loads((directory / "summary.json").read_text())
+
+
+def test_a_walkforward_summary_records_the_out_of_sample_span(tmp_path, wf_wired):
+    """BUG-043: 'Period: 2010-01-01 to 2026-08-18' sat above metrics covering
+    2013-01-02 to 2025-12-31 — three years of warm-up and eight unused months
+    presented as measured record."""
+    _cfg, _directory, summary = walkforward_run(tmp_path)
+
+    assert summary["oos_start"] == summary["windows"][0]["oos_start"]
+    assert summary["oos_end"] == summary["windows"][-1]["oos_end"]
+    # The measured span is strictly inside the data span, which is the point.
+    assert summary["start"] < summary["oos_start"]
+    assert summary["oos_end"] <= summary["end"]
+
+
+def test_the_markdown_headline_names_the_measured_span_not_the_data_span(tmp_path, wf_wired):
+    _cfg, directory, summary = walkforward_run(tmp_path)
+    text = (directory / "report.md").read_text()
+
+    assert f"**Measured period**: {summary['oos_start']} to {summary['oos_end']}" in text
+    # The data span is still recorded — demoted, not deleted.
+    assert f"**Data span**: {summary['start']} to {summary['end']}" in text
+    assert f"covering {summary['oos_start']} to {summary['oos_end']}" in text
+
+
+def test_the_html_headline_names_the_measured_span(tmp_path, wf_wired):
+    _cfg, directory, summary = walkforward_run(tmp_path)
+    html = (directory / "report.html").read_text()
+
+    assert f"{summary['oos_start']} to {summary['oos_end']}" in html
+    assert "<td>Data span</td>" in html
+    assert f"<td>{summary['start']} to {summary['end']}</td>" in html
+
+
+def test_print_latest_separates_the_measured_span_from_the_data_span(tmp_path, wf_wired, capsys):
+    from swing.backtest.report import print_latest
+
+    cfg, _directory, summary = walkforward_run(tmp_path)
+    print_latest(cfg)
+    out = capsys.readouterr().out
+
+    assert f"measured   {summary['oos_start']} to {summary['oos_end']}" in out
+    assert f"data span  {summary['start']} to {summary['end']}" in out
+    assert f"Out-of-sample results ({summary['oos_start']} to {summary['oos_end']})" in out
+
+
+def test_a_non_walkforward_report_falls_back_to_the_simulated_window(tmp_path, wired):
+    """With no folds there is no OOS span, and the headline says so honestly."""
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label="in-sample", walkforward=False)
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert "oos_start" not in summary
+    text = (directory / "report.md").read_text()
+    assert f"**Measured period**: {summary['start']} to {summary['end']}" in text
+
+
+# ---------------------------------------------------------------------------
+# DEBT-016 — the chart is not titled "out-of-sample" on an in-sample run
+# ---------------------------------------------------------------------------
+
+
+def test_an_in_sample_report_does_not_call_its_chart_out_of_sample(tmp_path, wired):
+    cfg = runner_cfg(tmp_path)
+    html = (go(cfg, label="in-sample-chart", walkforward=False) / "report.html").read_text()
+    assert "NOT a walk-forward run" in html
+    assert 'alt="Full-period in-sample equity curve"' in html
+    assert "Out-of-sample equity curve" not in html
+
+
+def test_a_walkforward_report_does_call_its_chart_out_of_sample(tmp_path, wf_wired):
+    _cfg, directory, _summary = walkforward_run(tmp_path)
+    assert 'alt="Out-of-sample equity curve"' in (directory / "report.html").read_text()
+
+
+# ---------------------------------------------------------------------------
+# A12 / BUG-036 — the earnings divergence is declared, not assumed away
+# ---------------------------------------------------------------------------
+
+
+def test_a_provider_without_earnings_history_declares_the_divergence(tmp_path, wired):
+    """The FakeProvider only knows the next upcoming date, like yfinance did."""
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label="no-history")
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["earnings_blackout_simulated"] is False
+    assert "Earnings blackout not simulated" in (directory / "report.md").read_text()
+    assert "Earnings blackout NOT simulated" in (directory / "report.html").read_text()
+
+
+def test_a_provider_with_earnings_history_is_used_and_not_flagged(tmp_path, monkeypatch):
+    """A12: when real announcement dates exist the runner passes SEQUENCES through."""
+    provider = FakeProvider(fake_universe())
+    seen: dict[str, object] = {}
+
+    def earnings_history(symbols, start, end):
+        seen["symbols"] = list(symbols)
+        seen["window"] = (start, end)
+        return {symbol: (date(2021, 3, 1), date(2021, 6, 1)) for symbol in symbols}
+
+    provider.earnings_history = earnings_history
+    monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: provider)
+
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label="with-history")
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["earnings_blackout_simulated"] is True
+    assert seen["symbols"] == ["AAA", "BBB"]
+    assert "Earnings blackout not simulated" not in (directory / "report.md").read_text()
+
+
+def test_a_broken_earnings_history_endpoint_still_does_not_stop_the_run(tmp_path, monkeypatch):
+    provider = FakeProvider(fake_universe())
+
+    def boom(symbols, start, end):
+        raise RuntimeError("the earnings endpoint is having a day")
+
+    provider.earnings_history = boom
+    monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: provider)
+
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label="history-broken")
+    assert json.loads((directory / "summary.json").read_text())["earnings_blackout_simulated"] is (
+        False
+    )
+    assert pd.read_csv(directory / "trades.csv").shape[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# LEAK-006 — a failed chart render must not strand the figure
+# ---------------------------------------------------------------------------
+
+
+def test_a_failing_chart_render_does_not_leak_the_figure(monkeypatch):
+    """LEAK-006: ``plt.close`` sat after ``savefig`` rather than in a ``finally``.
+
+    A figure that pyplot still has registered is a figure that is still
+    allocated — harmless for a one-shot CLI, a slow leak for anything
+    long-lived.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from swing.backtest.report import _equity_chart
+
+    equity = pd.DataFrame(
+        {"equity": [1.0, 2.0], "drawdown": [0.0, 0.0]},
+        index=pd.bdate_range("2020-01-01", periods=2),
+    )
+    plt.close("all")
+    assert plt.get_fignums() == []
+
+    def exploding_savefig(self, *args, **kwargs):
+        raise RuntimeError("the disk is full")
+
+    monkeypatch.setattr(matplotlib.figure.Figure, "savefig", exploding_savefig)
+    with pytest.raises(RuntimeError, match="the disk is full"):
+        _equity_chart(equity)
+
+    assert plt.get_fignums() == []  # before the fix this was [1]
+
+
+def test_a_successful_chart_render_leaves_no_figure_either(tmp_path, wired):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
+    go(runner_cfg(tmp_path), label="no-leak")
+    assert plt.get_fignums() == []

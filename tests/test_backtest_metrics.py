@@ -175,15 +175,18 @@ def test_max_drawdown_by_hand():
 
 
 def test_max_drawdown_duration_counts_calendar_days_to_recovery():
+    # Expectation corrected for audit BUG-052: the code stopped at the last
+    # underwater bar while this comment and the docstring both said "to
+    # recovery". All three now agree on recovery.
     # Peak on day 0 (Wed 2020-01-01), under water on days 1-3, back to the peak
-    # on day 4. Business days: Jan 1, 2, 3, 6, 7 -> the last underwater bar is
-    # Jan 6, which is 5 calendar days after the Jan 1 peak.
+    # on day 4. Business days: Jan 1, 2, 3, 6, 7 -> the drawdown ends on Jan 7,
+    # the bar that regains 100.0, which is 6 calendar days after the Jan 1 peak.
     equity = pd.Series(
         [100.0, 90.0, 80.0, 95.0, 100.0],
         index=pd.bdate_range("2020-01-01", periods=5),
     )
     _depth, duration = max_drawdown(equity)
-    assert duration == 5
+    assert duration == 6
 
 
 def test_unrecovered_drawdown_is_measured_to_the_end():
@@ -321,3 +324,126 @@ def test_by_year_keys_are_strings_for_json():
     equity = make_equity([100.0, 101.0], start="2020-01-01")
     table = by_year_table(empty_trades(), equity)
     assert all(isinstance(key, str) for key in table)
+
+
+# ---------------------------------------------------------------------------
+# BUG-052 — the duration measures to the recovery bar
+# ---------------------------------------------------------------------------
+
+
+def reference_duration(equity: pd.Series) -> int:
+    """The to-recovery duration, written out longhand.
+
+    The shipped implementation is vectorised for speed (audit PERF-004); this
+    is the obvious loop it has to agree with, kept here so the optimisation can
+    never quietly drift from the definition.
+    """
+    longest = 0
+    peak_date = equity.index[0]
+    peak_value = float(equity.iloc[0])
+    underwater = False
+    for stamp, value in equity.items():
+        value = float(value)
+        if value >= peak_value:
+            if underwater:
+                longest = max(longest, int((stamp - peak_date).days))
+                underwater = False
+            peak_value, peak_date = value, stamp
+        else:
+            underwater = True
+            longest = max(longest, int((stamp - peak_date).days))
+    return longest
+
+
+def test_the_duration_includes_the_bar_that_regains_the_high_water_mark():
+    """BUG-052: the code stopped one bar early, at the last bar still under water."""
+    equity = pd.Series(
+        [100.0, 90.0, 100.0],
+        index=pd.DatetimeIndex(["2020-01-01", "2020-01-10", "2020-01-31"]),
+    )
+    _depth, duration = max_drawdown(equity)
+    # Jan 1 peak -> Jan 31 recovery is 30 days. Stopping at the last underwater
+    # bar (Jan 10) reported 9 and called the drawdown three times shorter.
+    assert duration == 30
+
+
+def test_a_rising_curve_has_no_underwater_days():
+    rising = pd.Series(
+        [100.0, 101.0, 102.0, 103.0],
+        index=pd.bdate_range("2020-01-01", periods=4),
+    )
+    depth, duration = max_drawdown(rising)
+    assert depth == 0.0
+    assert duration == 0
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [100.0, 90.0, 80.0, 95.0, 100.0],
+        [100.0, 90.0, 90.0, 90.0],
+        [100.0] * 5,
+        [100.0, 101.0, 102.0],
+        [100.0, 120.0, 90.0, 130.0, 120.0, 140.0],
+        [100.0, 99.0, 100.0, 98.0, 97.0, 105.0, 104.0],
+        [50.0],
+    ],
+)
+def test_the_vectorised_duration_matches_the_longhand_one(values):
+    """PERF-004: the vectorisation must be a pure speed change."""
+    equity = pd.Series(values, index=pd.bdate_range("2020-01-01", periods=len(values)))
+    _depth, duration = max_drawdown(equity)
+    assert duration == reference_duration(equity)
+
+
+def test_the_vectorised_duration_matches_on_a_long_noisy_curve():
+    from conftest import make_bars
+
+    curve = make_bars(400, trend=0.0004)["close"]
+    _depth, duration = max_drawdown(curve)
+    assert duration == reference_duration(curve)
+    assert duration > 0
+
+
+# ---------------------------------------------------------------------------
+# BUG-040 — each year's drawdown must include its own first bar
+# ---------------------------------------------------------------------------
+
+
+def test_a_year_that_opens_down_twenty_percent_reports_that_drawdown():
+    """BUG-040 repro: ``cumprod`` seeded the peak AFTER the year's first move.
+
+    A year that opened -20% and clawed all of it back reported ``max_dd 0.0``
+    — a table whose entire job is answering "was the bad year survivable?"
+    saying the worst year of the run was perfectly calm.
+    """
+    index = pd.DatetimeIndex(["2020-12-31", "2021-01-04", "2021-06-01", "2021-12-31"], name="date")
+    equity = pd.DataFrame(
+        {
+            "equity": [100.0, 80.0, 90.0, 100.0],
+            "cash": [100.0, 80.0, 90.0, 100.0],
+            "n_positions": [0, 0, 0, 0],
+            "drawdown": [0.0, 0.0, 0.0, 0.0],
+        },
+        index=index,
+    )
+    table = by_year_table(empty_trades(), equity)
+
+    assert table["2021"]["max_dd_pct"] == pytest.approx(20.0)
+    # ...and the year really did end flat, which is why the old zero looked plausible.
+    assert table["2021"]["return_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_seeding_the_year_curve_does_not_invent_a_drawdown():
+    """A year that only ever rises must still report zero."""
+    index = pd.DatetimeIndex(["2020-12-31", "2021-03-01", "2021-12-31"], name="date")
+    equity = pd.DataFrame(
+        {
+            "equity": [100.0, 110.0, 130.0],
+            "cash": [100.0, 110.0, 130.0],
+            "n_positions": [0, 0, 0],
+            "drawdown": [0.0, 0.0, 0.0],
+        },
+        index=index,
+    )
+    assert by_year_table(empty_trades(), equity)["2021"]["max_dd_pct"] == 0.0
