@@ -429,6 +429,11 @@ class BacktestCfg:
     spread_atr_frac: float = 0.05
     is_years: int = 3
     oos_years: int = 1
+    #: Reference capital the backtest trades. Deliberately separate from
+    #: account.equity: the backtest is measuring the STRATEGY, so it needs a
+    #: fixed, comparable capital base. Sized on a real $100 account, whole-share
+    #: rounding would reject nearly every entry and the run would prove nothing.
+    initial_equity: float = 10_000.0
 
     def __post_init__(self) -> None:
         _coerce(self)
@@ -452,6 +457,20 @@ class BacktestCfg:
         _at_least(self.is_years, 1, "backtest", "is_years", "in-sample years per walk-forward fold")
         _at_least(
             self.oos_years, 1, "backtest", "oos_years", "out-of-sample years per walk-forward fold"
+        )
+        _positive(
+            self.initial_equity,
+            "backtest",
+            "initial_equity",
+            "the reference capital the backtest trades with",
+        )
+        _at_least(
+            self.initial_equity,
+            100.0,
+            "backtest",
+            "initial_equity",
+            "the reference capital the backtest trades with — below $100 whole-share rounding "
+            "rejects almost every entry, so the run would measure nothing",
         )
 
 

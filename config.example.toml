@@ -100,6 +100,25 @@ spread_atr_frac = 0.05          # assumed half-spread as a fraction of ATR
 is_years = 3                    # in-sample years per walk-forward fold
 oos_years = 1                   # out-of-sample years per fold
 
+# Reference capital the backtest trades with. This is deliberately NOT your
+# [account] equity, and the two are used for different jobs:
+#
+#   backtest.initial_equity  measures the STRATEGY. A fixed reference capital
+#                            keeps runs comparable to each other, and keeps
+#                            whole-share rounding from degenerating the result
+#                            — at a $100 account size almost every entry sizes
+#                            to zero shares, so the backtest would produce
+#                            roughly no fills and prove nothing either way.
+#   account.equity           sizes the REAL picks that `swing scan` gives you.
+#                            At a small balance most picks will land in the
+#                            watch list rather than the buy list. That is the
+#                            correct answer, not a bug: the trade exists, you
+#                            just cannot take it at a sane risk per trade yet.
+#
+# Changing this does not make the strategy better or worse; it changes the
+# capital base the reported CAGR and drawdown are measured against.
+initial_equity = 10000.0        # must be at least 100
+
 
 [gates]
 # The bar the OUT-OF-SAMPLE backtest must clear before `swing scan` will emit

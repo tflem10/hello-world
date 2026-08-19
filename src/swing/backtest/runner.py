@@ -48,7 +48,7 @@ import json
 import logging
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -403,6 +403,18 @@ def run_backtest(
     last_bar = max(frame.index[-1].date() for frame in bars.values())
     effective_end = min(run_end, last_bar)
 
+    # A backtest measures the STRATEGY, not the user's current bank balance, so
+    # every simulation below runs on the reference capital in
+    # ``backtest.initial_equity`` rather than on ``account.equity``. Sized on a
+    # real $100 account, whole-share rounding would reject nearly every entry
+    # and the report would say more about the account than about the rules —
+    # and the same strategy would score differently for two different users.
+    # ``account`` still drives sizing in the live scanner; only the backtest is
+    # rebased.
+    cfg_for_engine = replace(
+        cfg, account=replace(cfg.account, equity=float(cfg.backtest.initial_equity))
+    )
+
     summary: dict[str, Any] = {
         "label": label or f"backtest-{datetime.now():%Y%m%d-%H%M%S}",
         "universe": universe,
@@ -410,6 +422,7 @@ def run_backtest(
         "end": effective_end.isoformat(),
         "walkforward": bool(walkforward),
         "n_symbols": len(bars),
+        "initial_equity": float(cfg.backtest.initial_equity),
         "config_hash": config_hash(cfg),
         "code_ref": code_ref(),
         "data_hash": data_hash(bars),
@@ -425,7 +438,7 @@ def run_backtest(
     full = run_engine(
         bars,
         spy,
-        cfg,
+        cfg_for_engine,
         earnings=earnings,
         is_etf=is_etf,
         start=run_start,
@@ -443,7 +456,7 @@ def run_backtest(
         wf = run_walkforward(
             bars,
             spy,
-            cfg,
+            cfg_for_engine,
             earnings=earnings,
             is_etf=is_etf,
             start=run_start,
@@ -470,7 +483,7 @@ def run_backtest(
     summary["sensitivity"] = sensitivity_table(
         bars,
         spy,
-        cfg,
+        cfg_for_engine,
         earnings=earnings,
         is_etf=is_etf,
         start=run_start,

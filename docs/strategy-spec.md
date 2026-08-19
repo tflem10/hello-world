@@ -413,7 +413,18 @@ Otherwise `capped_by` records which constraint bound, in this precedence:
 **Whole shares only.** No fractional shares. `floor` everywhere. Four positions at 25% each means a
 fully invested book is 100% of equity — no leverage is possible by construction.
 
-### 10.3 What this actually means at $100 equity
+**Which equity.** `size_position` takes `equity` as an argument, so the same formula serves both
+callers with different capital: `swing scan` passes the live `account.equity`, while the backtest
+engine passes its simulated running equity seeded from `backtest.initial_equity` (`10_000.0`) and
+never reads `account.equity` — see [`backtest-methodology.md` §4.1](backtest-methodology.md#41-reference-capital)
+for why strategy validation deliberately uses fixed reference capital. The percentages
+(`account.risk_pct`, `account.max_position_pct`) and `account.max_positions` apply identically in
+both cases.
+
+### 10.3 What this actually means at $100 equity (the live scan)
+
+This subsection describes the **live** path only — `swing scan` with `account.equity = 100.0`.
+Backtests do not run at this capital (§10.2, "Which equity").
 
 At `equity = 100.0`: `risk_budget = $2.50`, `notional_cap = $25.00`.
 

@@ -106,6 +106,73 @@ def go(cfg, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# reference capital: the backtest measures the strategy, not the bank balance
+# ---------------------------------------------------------------------------
+
+
+def test_backtest_runs_on_reference_capital_not_the_users_account(tmp_path, wired):
+    """A real $100 account must not silently empty the backtest.
+
+    Whole-share rounding on $100 rejects every entry in these fixtures, so if
+    ``account.equity`` still reached the engine this run would produce no trades
+    at all and the report would be measuring the account, not the rules.
+    """
+    cfg = runner_cfg(
+        tmp_path,
+        account={"equity": 100.0, "max_position_pct": 20.0},
+        backtest={"initial_equity": 10_000.0},
+    )
+    assert cfg.account.equity == 100.0
+    assert cfg.backtest.initial_equity == 10_000.0
+
+    directory = go(cfg, label="rebased")
+
+    trades = pd.read_csv(directory / "trades.csv")
+    assert len(trades) > 0, "the $100 account leaked into the simulation"
+
+    equity = pd.read_csv(directory / "equity.csv")
+    # The curve starts from the reference capital, give or take day one's P&L.
+    assert equity["equity"].iloc[0] == pytest.approx(10_000.0, rel=0.05)
+    assert equity["equity"].iloc[0] > 100.0
+
+
+def test_summary_records_the_initial_equity_it_used(tmp_path, wired):
+    cfg = runner_cfg(tmp_path, account={"equity": 100.0}, backtest={"initial_equity": 10_000.0})
+    summary = json.loads((go(cfg, label="rebased-summary") / "summary.json").read_text())
+    assert summary["initial_equity"] == 10_000.0
+
+
+def test_the_users_account_equity_cannot_change_the_result(tmp_path, wired):
+    """Two users with wildly different balances must get the same backtest."""
+    poor = runner_cfg(
+        tmp_path / "poor", account={"equity": 100.0}, backtest={"initial_equity": 10_000.0}
+    )
+    rich = runner_cfg(
+        tmp_path / "rich",
+        account={"equity": 5_000_000.0},
+        backtest={"initial_equity": 10_000.0},
+    )
+    first = go(poor, label="same")
+    second = go(rich, label="same")
+
+    for name in DETERMINISTIC_FILES:
+        assert (first / name).read_bytes() == (second / name).read_bytes(), name
+
+
+def test_changing_the_reference_capital_does_change_the_result(tmp_path, wired):
+    """The knob that IS supposed to matter, still matters."""
+    small = runner_cfg(tmp_path / "small", backtest={"initial_equity": 10_000.0})
+    large = runner_cfg(tmp_path / "large", backtest={"initial_equity": 250_000.0})
+    first = go(small, label="capital")
+    second = go(large, label="capital")
+
+    assert (first / "equity.csv").read_bytes() != (second / "equity.csv").read_bytes()
+    # ...and it is part of the provenance hash, so the two reports are
+    # distinguishable after the fact.
+    assert config_hash(small) != config_hash(large)
+
+
+# ---------------------------------------------------------------------------
 # the report directory
 # ---------------------------------------------------------------------------
 

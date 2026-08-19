@@ -114,6 +114,7 @@ def test_config_has_exactly_the_twelve_contract_sections() -> None:
                 "spread_atr_frac": 0.05,
                 "is_years": 3,
                 "oos_years": 1,
+                "initial_equity": 10_000.0,
             },
         ),
         ("gates", {"min_profit_factor": 1.3, "max_drawdown_pct": 35.0, "min_trades": 30}),
@@ -218,6 +219,30 @@ def test_loads_an_explicit_file_and_overrides_only_what_is_given(tmp_path: Path)
     assert cfg.data.provider == "schwab"
     assert cfg.data.start_date == date(2015, 6, 1)
     assert cfg.data.cache_dir == Path.home() / "somewhere" / "cache"  # ~ expanded
+
+
+def test_backtest_initial_equity_is_separate_from_account_equity(tmp_path: Path) -> None:
+    """The backtest measures the strategy at a reference capital, not your balance."""
+    cfg = load_config(
+        _write(
+            tmp_path / "c.toml", "[account]\nequity = 100\n\n[backtest]\ninitial_equity = 50000\n"
+        )
+    )
+    assert cfg.account.equity == 100.0
+    assert cfg.backtest.initial_equity == 50_000.0
+    assert isinstance(cfg.backtest.initial_equity, float)
+
+
+def test_backtest_initial_equity_accepts_the_lower_bound() -> None:
+    assert BacktestCfg(initial_equity=100.0).initial_equity == 100.0
+
+
+def test_backtest_initial_equity_explains_why_it_has_a_floor() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(initial_equity=25.0)
+    message = str(excinfo.value)
+    assert "at least 100" in message
+    assert "whole-share" in message  # says why, not just what
 
 
 def test_dates_may_be_written_as_strings(tmp_path: Path) -> None:
@@ -327,6 +352,9 @@ def test_risk_pct_at_the_boundaries() -> None:
         (lambda: SchwabCfg(callback_url="http://127.0.0.1:8182"), "schwab.callback_url"),
         (lambda: ExecutionCfg(autopilot=True), "execution.autopilot"),
         (lambda: BacktestCfg(start=date(2020, 1, 1), end=date(2019, 1, 1)), "backtest.start"),
+        (lambda: BacktestCfg(initial_equity=0), "backtest.initial_equity"),
+        (lambda: BacktestCfg(initial_equity=-5.0), "backtest.initial_equity"),
+        (lambda: BacktestCfg(initial_equity=99.99), "backtest.initial_equity"),
         (
             lambda: UniverseCfg(sp500=False, sp400=False, sp600=False, etfs=False),
             "universe is empty",

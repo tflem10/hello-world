@@ -19,6 +19,7 @@ than to eliminate it, because it cannot be eliminated with the data available.
 2. [Fill model and gap-through handling](#2-fill-model-and-gap-through-handling)
 3. [Cost model](#3-cost-model)
 4. [Cash, shares and portfolio accounting](#4-cash-shares-and-portfolio-accounting)
+   — incl. [4.1 Reference capital](#41-reference-capital)
 5. [Walk-forward design](#5-walk-forward-design)
 6. [Parameter sensitivity (±25%)](#6-parameter-sensitivity-25)
 7. [Survivorship bias](#7-survivorship-bias)
@@ -188,10 +189,67 @@ cross a spread wider than 0.05 ATR. Sensitivity to this assumption is reported i
   ascending so the resolution is deterministic.
 - Position count is capped at `account.max_positions` at all times.
 
-**Equity used for sizing during a backtest** is the simulated running equity, not
-`account.equity`. A run starting at `account.equity = 100.0` in 2013 compounds; if the strategy works
-the affordability constraint (`strategy-spec.md` §10.3) relaxes over the run, and if it does not, the
-constraint tightens. Both are correct and both are what would have happened.
+### 4.1 Reference capital
+
+Every backtest starts from a **fixed reference capital**, not from the live account balance.
+
+| Parameter | Config key | Default |
+|-----------|-----------|---------|
+| Backtest starting equity (USD) | `backtest.initial_equity` | `10_000.0` |
+
+The engine seeds its simulated equity and cash from `backtest.initial_equity` and compounds from
+there. **`account.equity` is not read by the backtest at all.**
+
+**Why fixed reference capital.**
+
+1. **Comparability.** Ablation variants, walk-forward folds and ±25% sensitivity cells are only
+   comparable if they start from the same capital. If the starting equity tracked whatever happened
+   to be in the live account on the day the run was launched, the same code and the same window
+   would produce different metrics on different days, and `config_hash` would change every time the
+   operator's balance moved — silently breaking the reproducibility contract of §9.
+2. **A $100 account degenerates.** At `account.equity = 100.0` the notional cap is $25, so only
+   names priced between `strategy.min_price` ($5) and $25 can be filled at all
+   (`strategy-spec.md` §10.3), and most qualifying candidates size to **zero** shares. A backtest run
+   at that capital would measure the affordability constraint, not the strategy: trade count would
+   collapse far below `gates.min_trades = 30`, the surviving trades would be a low-priced,
+   high-ATR%, unrepresentative slice of the universe, and profit factor, drawdown and win rate would
+   all be artefacts of rounding. The gate would be unreachable for reasons that have nothing to do
+   with whether the rules work.
+
+**What $10,000 implies — friction still real, but not dominant.** At reference capital the notional
+cap is `25% × $10,000 = $2,500` per position and the risk budget is `2.5% × $10,000 = $250`.
+
+- Whole-share rounding is **still modelled and still costs something**: at $500/share the cap admits
+  5 shares, so position size is quantised in 20% steps; at $2,000/share it admits 1 share, and the
+  quantum is the whole position.
+- Names priced **above $2,500/share drop out entirely** — they can never be filled. That exclusion is
+  real and is left in deliberately rather than papered over.
+- The notional cap still binds more often than the risk formula for most candidates, exactly as it
+  does live.
+- What changes is that friction stops being the *dominant* term. The great majority of the S&P 1500
+  and the ETF list is tradeable at a $2,500 cap, so the measured result is driven by entries, exits
+  and costs rather than by rounding.
+
+$10,000 is chosen as a round number large enough to make the universe representative and small enough
+that whole-share effects remain visible. It is not a claim about how much capital the strategy
+requires.
+
+**Separation of concerns — stated explicitly, because it is easy to misread.**
+
+| Question | Answered by | Capital used |
+|----------|-------------|--------------|
+| Do the strategy's rules work out-of-sample, after costs? | the walk-forward backtest and the gate (§10) | `backtest.initial_equity` |
+| Can *this* account take *this* pick tomorrow? | `swing scan` sizing (`strategy-spec.md` §10) | `account.equity` |
+
+`swing scan` sizes every candidate at the real `account.equity`. At $100–$500 that means **most
+qualifying candidates become watch-list entries with `shares = 0`** (`strategy-spec.md` §10.4). That
+is the designed behaviour, not a malfunction, and it is why the watch list exists.
+
+The consequence, stated plainly: **passing the gate does not mean the live account will fill many
+picks.** The gate certifies the rules; the account decides what it can afford. A run of empty pick
+lists and populated watch lists on a $100 account is a fully working system reporting a capital
+constraint. Live results will therefore diverge from backtest results primarily through
+affordability — a much larger effect at this account size than any modelling difference in §11.
 
 ---
 
@@ -549,9 +607,11 @@ Collected in one place, ordered by how much they should worry a reader.
    from daily bars.
 7. **Earnings-date coverage is incomplete** (`strategy-spec.md` §7). The blackout is diluted in the
    backtest by exactly the fraction of unknown dates, and that fraction is not random.
-8. **The live account's affordability constraint is not applied historically** (§4): the backtest
-   sizes off simulated running equity. A backtest starting at $100 that compounds well will take
-   trades the live $100 account could not have taken at that time.
+8. **The backtest runs at reference capital, not at the live balance** (§4.1). It simulates from
+   `backtest.initial_equity = 10_000.0`, so it takes trades a $100–$500 live account cannot afford.
+   This is deliberate — the alternative measures rounding rather than the strategy — but it means
+   backtest metrics are *not* a forecast of this account's results. The affordability gap is the
+   largest single source of live-versus-backtest divergence at current equity.
 9. **No dividends or cash interest** (§4). Runs pessimistic on the cash side, and cash exposure is
    large when the regime gate is off.
 10. **yfinance adjusted history is mutable.** `data_hash` (§9) detects this but cannot prevent it;
