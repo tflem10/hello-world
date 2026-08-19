@@ -96,8 +96,14 @@ predict. Consistent-with, not confirmation-of.
 
 ### Where it appears in config
 
-`strategy.mom_weight_126 = 0.6`, `strategy.mom_weight_63 = 0.4`, `strategy.mom_skip_days = 5`,
-`strategy.atr_window = 14` (the ATR% denominator).
+`strategy.mom_weight_126 = 0.6`, `strategy.mom_weight_63 = 0.4`, `strategy.mom_skip_days = 5`.
+
+The ATR% denominator is **not** a config key: the score always divides by `ATR(SCORE_ATR_WINDOW)`
+with `SCORE_ATR_WINDOW = 14` fixed in `swing.strategy.scoring`, so that a score means the same thing
+across ablation variants and sensitivity cells. `strategy.atr_window` sizes stops; it does not touch
+the ranking ([`strategy-spec.md` §8.1](strategy-spec.md#81-score-formula)). A name whose ATR% falls
+below `MIN_ATR_PCT = 0.05` has no measurable volatility to normalise by and scores `NaN`, which drops
+it from the ranking rather than sending it to the top.
 
 ---
 
@@ -341,8 +347,10 @@ system after the fundamentals filter, and a reasonable person could disable it.
 
 ### Where it appears in config
 
-`strategy.adx_min = 20.0`, `strategy.atr_window = 14` (ADX shares Wilder's 14-period smoothing).
-MACD: intentionally absent.
+`strategy.adx_min = 20.0`. The smoothing period is Wilder's 14 and is a fixed constant
+(`ADX_WINDOW` in `swing.strategy.rules`), not `strategy.atr_window`. Setting `adx_min = 0.0` disables
+the filter outright — the code then skips the ADX computation entirely, which is also what the
+`adx_off` ablation does. MACD: intentionally absent.
 
 ---
 
@@ -491,11 +499,15 @@ notably the part that makes no prediction at all.
   the Turtle 2× *of a 20-day ATR on futures* and tighter than LeBeau's 3×; the justification is
   horizon. On a 1–8 week hold, a 3× initial stop on a whole-share $100 account makes almost every
   candidate unaffordable (risk per share too large ⇒ zero shares).
-- **Trailing stop**: chandelier at `chandelier_mult = 3.0` × ATR below the running maximum close
-  since entry, ratcheted (never lowered). Wider than the initial stop on purpose: the initial stop
-  answers "was I wrong immediately?", the trailing stop answers "is the trend over?" and needs room.
-  The ratchet is applied per-position by the consumer; `swing.strategy.rules.chandelier_stop`
-  returns the unratcheted rolling series (SPEC Contract 7).
+- **Trailing stop**: chandelier at `chandelier_mult = 3.0` × ATR below the highest close of the last
+  22 bars (`CHANDELIER_WINDOW`), ratcheted per position so the stop in force never falls. Wider than
+  the initial stop on purpose: the initial stop answers "was I wrong immediately?", the trailing stop
+  answers "is the trend over?" and needs room. **Two deliberate deviations from LeBeau above:** we
+  take the highest *close*, not the highest high, so one intraday spike cannot set the anchor; and the
+  window is a fixed 22 bars rather than "since entry", which makes the series depend only on the bars
+  and not on when a position was opened — that is what lets the same function serve the nightly
+  scanner and any historical date in the backtest. The ratchet is applied by the consumer;
+  `swing.strategy.rules.chandelier_stop` returns the unratcheted rolling series (SPEC Contract 7).
 - **Time stop**: `time_stop_days = 40` trading days ≈ 8 weeks, the upper bound of the stated holding
   horizon. This is a *definitional* parameter, not an empirical one: a position that has neither
   stopped out nor trended after 8 weeks is not the trade we intended to take, and it is occupying
@@ -511,6 +523,13 @@ notably the part that makes no prediction at all.
   tiny ($2.50 on a $100 account) and because a smaller fraction would round to zero shares on
   essentially every candidate. **This is a documented consequence of account size, not a claim that
   2.5% is optimal.** As equity grows, this should come down.
+- **A floor under the divisor.** The whole model divides by `entry − stop`, so an instrument whose
+  stop sits a fraction of a cent below its entry — a halt, a merger target pinned at the deal price —
+  would size a five-figure position against fictional risk. Anything below
+  `max($0.01, 0.1% of entry)` returns zero shares with `capped_by = "risk_floor"` instead
+  ([`strategy-spec.md` §10.2](strategy-spec.md#102-sizing-formula)). It is the sizing analogue of the
+  ATR% floor in §1: where the denominator stops describing risk, the answer is "no size", not a very
+  large number.
 - **Caps**: `max_position_pct = 25.0` and `max_positions = 4` together mean a fully invested book is
   4 × 25% = 100% of equity with no leverage. The notional cap binds far more often than the risk
   formula at small equity — see `strategy-spec.md` for the worked examples.
@@ -632,12 +651,20 @@ Adopted as an entry blackout, with two honestly-stated limitations.
   cycle, many positions *will* carry through an announcement regardless. The blackout prevents
   deliberately opening into an event; it does not make the system earnings-neutral. Contract 11
   allows an optional earnings-tighten exit for this reason.
-- **Limitation 2 — unknown dates.** Free earnings-date data is incomplete. When the provider returns
-  `None`, `earnings_blackout` returns all-False (no block) and the pick is **tagged**:
+- **Limitation 2 — unknown dates.** Free earnings-date data is incomplete. When nothing is known,
+  `earnings_blackout` returns all-False (no block) and the pick is **tagged**:
   `PickRecord.earnings_known = False`, surfaced as a visible warning on the pick sheet. We chose
   fail-open plus loud warning over fail-closed because failing closed would silently delete a large,
-  non-random slice of the universe (coverage gaps correlate with smaller names) and would be
-  invisible in the backtest.
+  non-random slice of the universe (coverage gaps correlate with smaller names) — and it would do so
+  invisibly, inside a backtest where there is no operator to notice.
+- **How the backtest handles it now.** The runner asks the provider for each symbol's *historical*
+  announcement dates and feeds the whole sequence to the same rule, so a historical entry inside a
+  blackout is blocked the way the scanner would have blocked it. When no historical source is
+  available at all, the run stamps `earnings_blackout_simulated: false` in `summary.json` and every
+  report says in plain language that it took entries the live scanner would have blocked. The
+  measured effect is still diluted by whatever the provider does not know, but the *divergence
+  between backtest and scanner* is now declared rather than assumed
+  ([`backtest-methodology.md` §11](backtest-methodology.md#11-known-limitations)).
 
 ### Where it appears in config
 
@@ -682,6 +709,19 @@ Run by `scripts/ablations.py`, which loads the config, applies **one change at a
 `walkforward=True` and a per-variant `label`. It tabulates the `oos` block of each run's
 `summary.json` (SPEC Contract 11) into `docs/ablation-results.md`.
 
+Two properties of the runner make the sweep safe to run whenever you like:
+
+- **It cannot touch the trading gate.** Every label starts with `ablate`, which is what stops the
+  runner writing `reports/backtest/latest.json`, and the script verifies that prefix on every variant
+  before the first backtest starts rather than trusting it. `swing scan` keeps gating on your last
+  real `swing backtest` (audit DEBT-005).
+- **The "Change" column is rendered from the config the sweep actually loaded**, not from the
+  shipping defaults, so a table produced against a customised `config.toml` states that config's real
+  baseline (audit DEBT-009).
+
+`--validate-only` applies every variant to the config and exits in about a second, which catches a
+variant that has drifted outside the config's allowed range without burning a multi-hour sweep.
+
 All runs are walk-forward, so the reported metrics are **out-of-sample** (3-year IS / 1-year OOS
 stepped annually, concatenated OOS equity).
 
@@ -689,6 +729,18 @@ stepped annually, concatenated OOS equity).
 
 Executed 2026-08-18. Full metrics, per-variant detail and the reproducibility triple
 (`config_hash` / `code_ref` / `data_hash`) are in [`ablation-results.md`](ablation-results.md).
+
+> **Stale as of 2026-08-19 — this sweep predates the remediation pass.** These numbers were produced
+> on 2026-08-18, before commits `10f6673..94e90f5` fixed the findings in
+> [`CODE_AUDIT_REPORT.md`](../CODE_AUDIT_REPORT.md). Several of those fixes change what the engine
+> computes, so every row below can move: the ATR% floor that drops a pegged name from the ranking
+> (BUG-003), the sizing risk floor that refuses a sub-tick stop (BUG-054), the deeper pending-order
+> queue that stops a zero-share candidate from consuming a slot (BUG-053), the earnings blackout now
+> being simulated from historical announcement dates (A12), and the `end_of_data` exit for a symbol
+> that stops printing bars (BUG-016). **No number here has been adjusted by hand.** The table will be
+> replaced wholesale by the next `uv run python scripts/ablations.py --universe etf` run; until then,
+> read the `code_ref` in `ablation-results.md` as the statement of which code produced it, and treat
+> the qualitative conclusions below — noise-dominated sample, defaults retained — as the durable part.
 
 **Baseline: PF 1.02, CAGR 0.06%, max drawdown 28.56%, 332 OOS trades, 41.6% exposure.** That is a
 system scraping breakeven on this universe, and every delta below should be read against that
@@ -708,6 +760,8 @@ near-zero reference rather than against a healthy baseline.
 | 9 | RSI(2) mean-reversion overlay | [§5](#5-rsi2-short-horizon-mean-reversion) | `strategy.rsi2_enabled` | `False` → `True` | PF −0.03 (0.99), maxDD **+3.90pp** (32.46), **+221 trades** (553), hold 11.7d — *supports shipping OFF* |
 
 ### Interpretation
+
+*(Every figure quoted below comes from the pre-remediation sweep — see the staleness note above.)*
 
 **Outcome in one line: all shipping defaults are retained. None were changed by this sweep.**
 

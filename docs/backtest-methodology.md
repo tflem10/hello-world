@@ -16,6 +16,7 @@ than to eliminate it, because it cannot be eliminated with the data available.
 ## Table of contents
 
 1. [Simulation loop and timing](#1-simulation-loop-and-timing)
+   — incl. [1.1 What the engine assumes about its bars](#11-what-the-engine-is-allowed-to-assume-about-its-bars)
 2. [Fill model and gap-through handling](#2-fill-model-and-gap-through-handling)
 3. [Cost model](#3-cost-model)
 4. [Cash, shares and portfolio accounting](#4-cash-shares-and-portfolio-accounting)
@@ -43,8 +44,8 @@ For each trading day *t* in the test window, in this exact order:
    b. Process **entries** queued at the close of *t−1*, in rank order, subject to available cash and
       free slots.
 2. **Close of day *t*.**
-   a. Mark open positions to the close; update each position's running maximum and ratcheted
-      chandelier stop (`strategy-spec.md` §11.2).
+   a. Mark open positions to the close; ratchet each position's stop against that bar's chandelier
+      level, so it can rise but never fall (`strategy-spec.md` §11.2).
    b. Evaluate exit conditions for every open position and **queue** those that fire for the open of
       *t+1*.
    c. Evaluate the full entry pipeline (`strategy-spec.md` §2) using data through the close of *t*
@@ -68,6 +69,42 @@ each is closed explicitly:
 **No wall-clock in logic.** `asof` is passed down from the entry point; `datetime.now()` is never
 called inside strategy or engine code. This is what makes a rerun of a historical date reproduce that
 date's decisions exactly.
+
+### 1.1 What the engine is allowed to assume about its bars
+
+Bad bars are a correctness problem, not a cosmetic one: a single `NaN` close that reaches the
+arithmetic can mark a position at nothing, size against a phantom stop, or freeze a slot for the rest
+of the run. Three layers deal with it, and they are stated here because the second and third exist
+only because the first can be bypassed by a hand-built fixture.
+
+**1. The data layer drops unusable rows (Contract 3, amendment A3).** `normalize_bars` removes any
+bar where **any** of `open`/`high`/`low`/`close` is `NaN` or infinite — the whole row, because a
+partial bar cannot be repaired without inventing prices. Volume is treated differently: a non-finite
+volume becomes **`0.0`** rather than dropping the bar, since a missing volume print does not make the
+prices wrong, and "no volume" is the honest reading for the liquidity and confirmation tests. What
+reaches the engine is therefore a frame of finite float64 OHLCV on a unique, ascending, tz-naive
+midnight index. An interior vendor gap arrives as a **missing date**, not as a `NaN` row.
+
+**2. Indicators propagate `NaN` across gaps rather than smearing values (audit BUG-031).** The Wilder
+recursion (`atr`, `adx`, `rsi`, `ema`) is seeded on the first *complete* window of consecutive
+observations and its output is then re-masked wherever the input was missing, because a plain
+`ewm` carries the previous mean straight across a hole and reports a stale average as if it were
+measured. The one deliberate exception is `obv`, which treats a missing bar as zero flow and stays
+flat across the gap; it is not traded by any rule.
+
+**3. The engine guards anyway.** Any bar whose OHLC is not finite is mapped out of the symbol's
+calendar and treated exactly as a day the symbol did not trade, with one warning per symbol naming
+the count and the first and last offending date. The last known close is never overwritten with a
+non-finite value, non-finite marks are excluded from the equity sum, and a fill is refused unless the
+price is finite and positive.
+
+**Symbols that stop printing bars** are closed rather than held forever. When a symbol's data ends
+while a position is open, the engine books an `end_of_data` exit at that symbol's **last valid bar's
+close** and warns. The alternative — freezing a slot for the remainder of the run — silently reduces
+the strategy's capacity and flatters nothing in particular; it just makes the result wrong (audit
+BUG-016). One seam is documented and unavoidable: the trade is dated to the symbol's last bar, but
+the freed slot and the returned cash only appear on the next trading day, because the engine cannot
+know a bar was the last one until the following bar fails to arrive.
 
 ---
 
@@ -167,7 +204,9 @@ the time stop exists — trades that neither work nor fail still cost money.
 For the universe the liquidity filter admits (`strategy.min_dollar_volume = 5_000_000`), on positions
 of $25–$125 notional, it is **plausible but not conservative**. Our order size is a rounding error
 against $5M/day so market impact is genuinely nil, but marketable limit orders on a $6/share name can
-cross a spread wider than 0.05 ATR. Sensitivity to this assumption is reported in §6.
+cross a spread wider than 0.05 ATR. The automatic sensitivity table (§6) does **not** cover the cost
+parameters, so testing this assumption means raising both knobs by 25% in `config.toml` and re-running
+the walk-forward.
 
 ---
 
@@ -205,8 +244,9 @@ there. **`account.equity` is not read by the backtest at all.**
 1. **Comparability.** Ablation variants, walk-forward folds and ±25% sensitivity cells are only
    comparable if they start from the same capital. If the starting equity tracked whatever happened
    to be in the live account on the day the run was launched, the same code and the same window
-   would produce different metrics on different days, and `config_hash` would change every time the
-   operator's balance moved — silently breaking the reproducibility contract of §9.
+   would produce different metrics on different days — and `config_hash` would *not* change to
+   explain why, since it deliberately excludes account size (§9). That silently breaks the
+   reproducibility contract.
 2. **A $100 account degenerates.** At `account.equity = 100.0` the notional cap is $25, so only
    names priced between `strategy.min_price` ($5) and $25 can be filled at all
    (`strategy-spec.md` §10.3), and most qualifying candidates size to **zero** shares. A backtest run
@@ -275,11 +315,14 @@ window):
 | … | … | … |
 | N | *(latest complete 3 years)* | *(following year)* |
 
-The first fold's IS window begins **after** the indicator warm-up. Bars are loaded from
-`data.start_date` (`2010-01-01`), and each window reserves a warm-up buffer of
-`max(252, strategy.sma_slow) + strategy.sma_slow_rising_days` bars before its start so that every
-indicator is fully converged on the window's first tradeable day. Warm-up bars are read but never
-traded. With a 2010 data start, the first tradeable IS year is 2011 and the first OOS year is 2014.
+The first fold's IS window begins **after** the indicator warm-up. Bars are always loaded from
+`data.start_date` (`2010-01-01`) regardless of the simulation window, and indicators are computed
+over each symbol's whole series; only dates inside the window are simulated. Warm-up bars are
+therefore read but never traded, and every indicator is converged on the window's first tradeable
+day provided the window starts at least
+`max(252, strategy.sma_slow) + strategy.sma_slow_rising_days` bars after the data does — which is
+what the 2010 data start buys. With it, the first tradeable IS year is 2011 and the first OOS year
+is 2014.
 
 ### Rules — these are the point of the exercise
 
@@ -312,6 +355,34 @@ The IS tuning stage is restricted to a small, pre-declared grid over:
 `strategy.volume_mult`. That is four parameters. Adding a fifth should require an explicit argument
 in this document.
 
+### The selection objective, verbatim
+
+Every walk-forward report carries the objective in `summary.json["objective"]`, so the rule that
+picked each fold's parameters is readable next to its results. The string is
+`swing.backtest.walkforward.OBJECTIVE_DESCRIPTION`:
+
+> In-sample selection maximises profit factor among parameter sets with at least 8 in-sample trades
+> (sets below that floor rank last whatever their ratio), breaking ties by more trades, then by
+> shallower maximum drawdown, then by the frozen grid order. A parameter set with no losing trades
+> at all reports the 9999.0 profit-factor sentinel rather than a measurement, so it is ranked as 0.0
+> and wins only on trade count and drawdown. Profit factor is used because it is the quantity the
+> deployment gate tests.
+
+Two details in there are load-bearing:
+
+- **A "perfect" parameter set is not selected for being perfect.** Profit factor is undefined with
+  zero losing trades, and JSON cannot hold infinity, so `metrics.PROFIT_FACTOR_CAP = 9999.0` is
+  written along with `profit_factor_capped: true`. Ranking a sentinel as the best score would hand
+  every fold to whichever cell happened to take three lucky trades; it is therefore ranked as
+  **0.0** and can only win on the tiebreakers (audit BUG-041). Reports render such a value as
+  "no losing trades" rather than as a number.
+- **The eight-trade floor is a floor, not a filter.** Sets below it are ranked last but still
+  eligible, so a fold in which nothing clears the floor still selects *something* rather than
+  failing.
+
+The grid is 81 combinations (3 × 3 × 3 × 3) evaluated per fold, and ties resolve to the first grid
+point, so selection is deterministic.
+
 ### Sample-size honesty
 
 With `account.max_positions = 4`, a 1–8 week hold and a regime gate that is off perhaps 20–25% of the
@@ -324,38 +395,45 @@ of less than roughly 0.2 in profit factor should be treated as noise.
 
 ## 6. Parameter sensitivity (±25%)
 
-A strategy that only works at one parameter setting is a curve fit. Every walk-forward report
-therefore includes sensitivity tables: each parameter is varied to **−25%, baseline, +25%** with all
-others held at baseline, and the OOS metrics are recomputed.
+A strategy that only works at one parameter setting is a curve fit. Every report therefore includes a
+sensitivity table: each parameter is varied to **−25%, baseline, +25%** on its own, with all others
+held at baseline, and the run is repeated.
+
+`SENSITIVITY_PARAMS` is five knobs — the four tuning-grid members plus `adx_min`:
 
 | Parameter | −25% | Baseline | +25% |
 |-----------|------|----------|------|
 | `strategy.atr_stop_mult` | 1.5 | **2.0** | 2.5 |
 | `strategy.chandelier_mult` | 2.25 | **3.0** | 3.75 |
 | `strategy.donchian_window` | 15 | **20** | 25 |
-| `strategy.time_stop_days` | 30 | **40** | 50 |
 | `strategy.volume_mult` | 0.975 | **1.3** | 1.625 |
 | `strategy.adx_min` | 15.0 | **20.0** | 25.0 |
-| `strategy.mom_weight_126` | 0.45 | **0.6** | 0.75 |
-| `strategy.mom_skip_days` | 4 | **5** | 6 |
-| `strategy.max_below_high_pct` | 18.75 | **25.0** | 31.25 |
-| `strategy.min_above_low_mult` | 1.1875 | **1.25** | 1.3125 |
-| `regime.sma_window` | 150 | **200** | 250 |
-| `backtest.slippage_bps` | 3.75 | **5.0** | 6.25 |
-| `backtest.spread_atr_frac` | 0.0375 | **0.05** | 0.0625 |
 
-Integer-valued parameters are rounded to the nearest integer. `strategy.mom_weight_63` is set to
-`1 − strategy.mom_weight_126` when the 126 weight is varied, so the pair remains a partition.
+(The −25%/+25% columns show the values at shipping defaults; the code perturbs whatever the loaded
+config holds.) Integer knobs are rounded to the nearest integer, and a cell is **skipped** — with no
+row in the table — when the rounded value comes back equal to the baseline, or when the perturbed
+value is one the config's own validation refuses. Skips are logged, not silently dropped.
 
-**How to read them.** The desirable pattern is a *plateau*: metrics that degrade gracefully and
-monotonically as you move away from baseline. The alarming patterns are (a) a sharp peak exactly at
-baseline, which means the value was fitted, and (b) sign flips — a parameter whose ±25% variants
-straddle profitable and unprofitable, which means the result is not robust to a parameter we do not
-actually know the true value of.
+**Read the table for shape, and read it as in-sample.** Two properties of how it is produced bound
+what it can tell you:
 
-Cost parameters (`slippage_bps`, `spread_atr_frac`) are included deliberately. If a +25% cost
-assumption flips the strategy to unprofitable, the strategy is a cost-model artefact, and §3 already
-admits the cost model is plausible rather than conservative.
+- It is computed over the **full period with the configured parameters**, not fold by fold. It is not
+  an out-of-sample measurement and is not comparable to the `oos` block; it answers "is this result
+  balanced on a knife edge?", not "how would this have done".
+- Four of the five parameters are also **tuning-grid members** (§5), so on a walk-forward run the
+  headline result does not use the config values this table perturbs — the tuner re-selects them per
+  fold. The same caveat that makes an ablation of a grid parameter a no-op applies here
+  (`indicator-research.md`, "Ablation plan").
+
+The desirable pattern is a *plateau*: metrics that degrade gracefully and monotonically as you move
+away from baseline. The alarming patterns are (a) a sharp peak exactly at baseline, which means the
+value was fitted, and (b) sign flips — a parameter whose ±25% variants straddle profitable and
+unprofitable, which means the result is not robust to a parameter we do not actually know the true
+value of.
+
+Cost parameters are **not** in the table. Sensitivity to the cost model has to be checked by editing
+`backtest.slippage_bps` / `backtest.spread_atr_frac` and re-running, and §3 already admits that model
+is plausible rather than conservative — so that re-run is worth doing before any conclusion is drawn.
 
 Sensitivity tables are **diagnostic, not selection**. Choosing the best-performing cell is exactly
 the data-snooping failure Sullivan, Timmermann & White (1999) quantify.
@@ -504,13 +582,17 @@ Every run records three hashes (SPEC Contract 11):
 
 | Key | Content |
 |-----|---------|
-| `config_hash` | SHA-256 over a canonical serialisation of the **fully resolved** `Config` — every default materialised, keys sorted, `Path` values stringified, dates ISO-formatted. Two configs that differ in any field produce different hashes; two that differ only in comments or key order produce the same hash. |
-| `code_ref` | Git commit SHA of the working tree, with a `-dirty` suffix when uncommitted changes are present. A `-dirty` result is not reproducible by anyone else and should never be the basis of a deployment decision. |
-| `data_hash` | SHA-256 over the ordered, per-symbol tuple `(symbol, first_date, last_date, row_count, digest_of_close_column)` across every symbol in the run, symbols sorted ascending. Detects silently changed history — vendor restatements, split adjustments applied retroactively, and cache corruption. |
+| `config_hash` | SHA-256 over a canonical serialisation (keys sorted, `Path`s stringified, dates ISO-formatted) of the settings that decide what the strategy would have done: the whole `[strategy]`, `[backtest]` and `[gates]` sections, plus `account.max_positions` / `risk_pct` / `max_position_pct` and `regime.enabled` / `symbol` / `sma_window`. **Deliberately not the whole config** — account size, alert channels, paths and broker credentials are excluded, so the same rules hash identically on two machines and a deposit does not invalidate a report. |
+| `code_ref` | `git rev-parse HEAD`, or the literal `"unknown"` outside a checkout or when git cannot answer within five seconds. It records the commit, **not** whether the tree was clean — a run made on top of uncommitted edits reports the parent commit and is not reproducible by anyone else, so do not base a deployment decision on a run you have not committed. |
+| `data_hash` | SHA-256 over `"{SYMBOL}:{last bar date}:{row count}"` for every symbol in the run, symbols sorted ascending, joined with a pipe character; a symbol that returned nothing contributes `"{SYMBOL}:empty:0"`. Deliberately cheap — it does not scan the price columns. |
 
 `data_hash` matters more than it looks. yfinance's adjusted history is **not stable**: a split or a
 dividend restatement rewrites the entire past series. Without `data_hash`, a run that fails to
-reproduce is indistinguishable from a code bug. With it, the two cases separate immediately.
+reproduce is indistinguishable from a code bug. With it, the two cases separate immediately. Note
+what it does and does not catch: a symbol appearing, disappearing or gaining bars changes the hash,
+while a restatement that rewrites past closes **without** changing the last bar date or the row count
+does not. The cache's own overlap check is the layer that catches that one — it re-fetches a symbol's
+whole history when the freshly downloaded overlap disagrees with what is stored.
 
 ### Determinism requirements on the engine
 
@@ -538,7 +620,54 @@ reproduce is indistinguishable from a code bug. With it, the two cases separate 
 ```
 
 `latest.json` is what `gate.check` reads. It is a copy rather than a symlink so a moved or pruned run
-directory cannot silently invalidate the gate.
+directory cannot silently invalidate the gate. A `--label` names **one directory** under
+`<reports_dir>/backtest` and nothing else: it must match `^[A-Za-z0-9._-]+$` and is validated before
+any data is loaded, so a label cannot relocate the run directory and leave a stale `latest.json`
+behind (audit BUG-042). `latest.json` is always located from the gate's own path, never derived from
+wherever the run happened to land.
+
+A run whose label starts with `ablate` **does not update `latest.json` at all**, and the gate
+independently refuses an `ablate`-labelled report if one is copied over it by hand. That is why
+`scripts/ablations.py` can sweep ten crippled variants without touching your trading permission.
+
+Backtest run directories are **never pruned automatically** — only `reports/scan-YYYY-MM-DD/`
+directories are, at 90 days (see the README). A backtest report is evidence, and evidence that
+deletes itself is not much use; delete old runs by hand when you want the disk back.
+
+### What is in `summary.json`
+
+Beyond the identity triple, the keys a reader is most likely to need:
+
+| Key | Meaning |
+|-----|---------|
+| `walkforward` | JSON `true` only for a walk-forward run — the gate tests this identically |
+| `label`, `universe`, `n_symbols` | which run this was; `n_symbols` counts symbols that returned data |
+| `start`, `end` | the simulation window; `end` is clipped to the last available bar |
+| `oos_start`, `oos_end` | first and last day actually **measured** out-of-sample. Present only for a walk-forward run with at least one fold (audit BUG-043) |
+| `initial_equity` | the reference capital the run traded (§4.1) |
+| `earnings_blackout_simulated` | whether the run could apply a historical earnings blackout (§11, limitation 7) |
+| `objective` | the selection rule quoted in §5; `""` for a non-walk-forward run |
+| `oos` | the headline metric block — the concatenated OOS curve. **For a non-walk-forward run this is a copy of `full_period`**, so the presence of an `oos` block says nothing about whether the run was walk-forward |
+| `full_period` | in-sample-contaminated context (§5, rule 4) |
+| `by_year`, `windows`, `sensitivity`, `costs` | per-year metrics, per-fold detail, the ±25% table (§6), and the cost settings |
+
+Each metric block carries `profit_factor_capped` alongside the twelve metrics, which is how a
+`9999.0` profit factor is distinguishable from a measurement.
+
+### Two dates on every report: "Measured period" and "Data span"
+
+`report.md`, `report.html` and `swing report` all print both, because conflating them is the easiest
+way to overstate a result:
+
+| Line | What it is |
+|------|-----------|
+| **Measured period** | the stretch the headline numbers actually cover — `oos_start` to `oos_end` for a walk-forward run, i.e. the concatenated out-of-sample years only |
+| **Data span** | the simulation window (`start` to `end`) the run was asked for |
+
+For a walk-forward run over 2010–2026 the measured period typically starts in 2014: everything before
+the first fold's OOS year was in-sample tuning or warm-up and is not part of the headline. For a
+non-walk-forward run the two lines are identical, and the report says in a banner that the numbers
+are in-sample and cannot open the gate.
 
 ---
 
@@ -559,6 +688,26 @@ and all three conditions hold on the `oos` block:
 
 **A non-walk-forward run never passes**, whatever its metrics (SPEC Contract 11). `summary.json`
 carries `"walkforward": bool` for exactly this check.
+
+### `latest.json` is untrusted input (audit BUG-017)
+
+`latest.json` is an ordinary file that a human, a script, or a half-finished write can produce, so
+the gate parses it defensively rather than believing it. Every one of these is a refusal, and each
+prints a plain-English sentence to whoever was about to be told they may not trade:
+
+| Refusal | Trigger |
+|---------|---------|
+| no report | the file does not exist |
+| unreadable report | invalid JSON, unreadable file, or a top-level value that is not a JSON object |
+| non-finite report | the JSON literals `Infinity`, `-Infinity` or `NaN` anywhere in the file — rejected **at parse time**, since they are a JSON extension rather than JSON, and every number is re-checked for finiteness after parsing so an overflowing `1e400` cannot arrive as `inf` either |
+| not walk-forward | `walkforward` is not the JSON literal `true`. The test is identity against `True`, so the *string* `"false"` — which Python truthiness reads as true — fails as it should |
+| ablation report | the `label` starts with `ablate`; a deliberately crippled variant can never be the reference |
+| no OOS block | `oos` is missing or is not an object |
+| capped profit factor | `oos.profit_factor_capped` is truthy — zero losing trades means the `9999.0` figure is a sentinel standing in for infinity, not a measurement, and "too good to trust" closes the gate rather than opening it. Plain truthiness here (unlike `walkforward`'s strict `is True`) because every ambiguous value lands on the safe side; a missing key means "not capped", so older reports stay valid |
+| threshold failures | profit factor, drawdown or trade count against the table above |
+
+Unusable numbers fall back to the **worst** possible reading — profit factor `0.0`, drawdown `100%`,
+trades `0` — so a damaged report fails closed rather than passing on a default.
 
 ### Why these three, and why these values
 
@@ -600,13 +749,22 @@ Collected in one place, ordered by how much they should worry a reader.
    acknowledged and not priced.
 4. **Small trade counts** (§5). Confidence intervals on every reported metric are wide; ablation
    differences below ~0.2 profit factor are noise.
-5. **Cost model is plausible, not conservative** (§3). Sensitivity to it is reported (§6) and should
-   be checked before any conclusion is drawn.
+5. **Cost model is plausible, not conservative** (§3), and it is **not** one of the five knobs the
+   automatic sensitivity table varies (§6) — checking it takes a deliberate re-run at higher costs.
 6. **Intrabar path is not modelled.** Stop-versus-target ordering within a bar is resolved
    pessimistically, but real intrabar sequences (a stop touched then reversed) are not reproducible
    from daily bars.
-7. **Earnings-date coverage is incomplete** (`strategy-spec.md` §7). The blackout is diluted in the
-   backtest by exactly the fraction of unknown dates, and that fraction is not random.
+7. **Earnings-date coverage is incomplete, and the run says when it had none** (`strategy-spec.md`
+   §7). The runner asks the provider for each symbol's **historical** announcement dates over the
+   loaded window and feeds them to the same `earnings_blackout` rule the scanner uses, so a
+   historical bar inside a blackout is blocked in the backtest the way it would have been live
+   (amendment A12). Two honest caveats remain. First, coverage is still partial: an announcement the
+   free provider does not know about blocks nothing, and that fraction is not random — it correlates
+   with company size. Second, when no historical earnings source is available at all — the provider
+   exposes only "the next date", or the lookup fails — the run sets
+   `summary.json["earnings_blackout_simulated"] = false` and every report renders a warning saying
+   the backtest took entries the live scanner would have blocked and is therefore slightly
+   optimistic. The flag records that the *mechanism* ran, not that any particular symbol had dates.
 8. **The backtest runs at reference capital, not at the live balance** (§4.1). It simulates from
    `backtest.initial_equity = 10_000.0`, so it takes trades a $100–$500 live account cannot afford.
    This is deliberate — the alternative measures rounding rather than the strategy — but it means

@@ -67,11 +67,25 @@ symbol that fails any stage is dropped and not evaluated further.
 | 5 | **Earnings blackout** — block entries near known events | `swing.strategy.rules.earnings_blackout` |
 | 6 | **Ranking** — risk-adjusted momentum, 52-week-high tiebreak | `swing.strategy.scoring.rank_candidates` |
 | 7 | **Fundamentals soft filter** — stocks only | `swing.strategy.rules.fundamentals_ok` |
+| 7b | **Recent-pick dedupe** — live scan only | `swing.state.Journal.recently_picked` |
 | 8 | **Slot allocation and sizing** | `swing.strategy.sizing.size_position` |
 | 9 | Split into `picks` (affordable) and `watch` (not) | `swing.alerts.pipeline.run_scan` |
 
 Ranking (6) precedes the fundamentals filter (7) because `fundamentals_ok` takes a
 `rank_below_median` argument and therefore needs the score distribution to already exist.
+
+**Stage 7b — dedupe, normative.** The live scanner drops a symbol that the journal already records
+as a **pick** within the last `DEDUPE_WITHIN_DAYS = 7` days (a frozen constant in
+`swing.alerts.pipeline`, not a config key). Three properties of that rule matter and are tested:
+
+- Only records whose `kind` is `"pick"` count. A `watch` entry is still journalled, but it
+  **suppresses nothing** — a name that was unaffordable last Tuesday is a legitimate pick today
+  (audit BUG-011).
+- The window is `0 < (asof − record date) < 7` days. **A same-day record never blocks**, so re-running
+  `swing scan` for the same date reproduces the same report instead of quietly emptying it
+  (BUG-010); and a record exactly 7 days old no longer blocks either.
+- The backtest engine has no dedupe stage. It is a live-operations rule about not re-proposing the
+  same idea to the operator all week, so backtest and scan differ here by design.
 
 **Vectorisation contract.** Stages 1–5 are implemented as functions returning `pd.Series` aligned to
 the bar index, not scalars. The live scanner reads `.iloc[-1]`; the backtest engine reads the value
@@ -106,6 +120,10 @@ strictly greater than its `regime.sma_window`-day simple moving average on *t*.
 - A failed regime gate does **not** suppress the scan report. `run_scan` still writes the full report
   directory with `"regime_ok": false` and an empty `picks` list, so the operator can see the system
   is working and why it is quiet (SPEC Contract 9).
+- **"Regime off" and "regime unknown" are different sentences.** If no price history comes back for
+  the regime symbol at all, the report does not say the market is weak — it says this is a *data*
+  problem, names the symbol, and tells the operator to check the provider and the cache before
+  re-running. A data outage and a bear market must never look alike in the report (audit BUG-015).
 
 ---
 
@@ -152,7 +170,7 @@ All seven conditions must hold simultaneously on date *t*. Let `C = close(t)`,
 | T5 | `C > F` | `strategy.sma_fast` |
 | T6 | `C >= strategy.min_above_low_mult × low52w(t)` | `strategy.min_above_low_mult` |
 | T7 | `C >= high52w(t) × (1 − strategy.max_below_high_pct / 100)` | `strategy.max_below_high_pct` |
-| T8 | `ADX(strategy.atr_window)(t) >= strategy.adx_min` | `strategy.adx_min`, `strategy.atr_window` |
+| T8 | `ADX(ADX_WINDOW)(t) >= strategy.adx_min`, where `ADX_WINDOW = 14` is a fixed constant | `strategy.adx_min` |
 
 | Parameter | Config key | Default | Meaning |
 |-----------|-----------|---------|---------|
@@ -162,12 +180,20 @@ All seven conditions must hold simultaneously on date *t*. Let `C = close(t)`,
 | Slow-SMA rising lookback | `strategy.sma_slow_rising_days` | `21` | ≈ 1 calendar month |
 | Min multiple of 52-week low | `strategy.min_above_low_mult` | `1.25` | 25% above the low |
 | Max % below 52-week high | `strategy.max_below_high_pct` | `25.0` | within 25% of the high |
-| Min ADX | `strategy.adx_min` | `20.0` | Wilder's "trending" boundary |
-| ADX / ATR smoothing period | `strategy.atr_window` | `14` | shared with ATR |
+| Min ADX | `strategy.adx_min` | `20.0` | Wilder's "trending" boundary; `0.0` disables T8 |
+| ADX smoothing period | *(none — `ADX_WINDOW`)* | `14` | fixed constant; **not** `strategy.atr_window` |
 
-**Definitions.** `low52w(t)` and `high52w(t)` are the rolling minimum of `low` and rolling maximum of
-`high` over the trailing 252 trading days ending at *t* inclusive. 252 is a fixed constant, not a
-config key — "52-week" is definitional, not tunable.
+**Definitions.** `low52w(t)` and `high52w(t)` are the rolling minimum and maximum of the **closing**
+price over the trailing 252 trading days ending at *t* inclusive — closes, not intraday extremes, on
+both sides. 252 (`LOOKBACK_52W`) is a fixed constant, not a config key — "52-week" is definitional,
+not tunable.
+
+**`adx_min = 0.0` switches T8 off.** The config accepts `0.0` (the range is inclusive at the bottom),
+and at or below zero the code skips the ADX computation entirely and treats T8 as `True` everywhere.
+That is not a shortcut with an edge case: `ADX >= 0` can only be False where ADX is `NaN`, i.e. inside
+a warm-up strictly contained by T6/T7's 252-bar warm-up, which is already `False` there. It is the
+`adx_off` ablation's mechanism and it makes the trend template roughly five times cheaper
+(audit PERF-010).
 
 **ETF relaxed path.** The template applies to ETFs in full, including T8. What `is_etf=True` relaxes
 is **only** the fundamentals soft filter of §9, which is skipped entirely. ETFs get no relief on
@@ -220,9 +246,10 @@ admits candidates that are credibly at the top of their range. Setting
 
 ```
 swing.strategy.rules.earnings_blackout(index, earnings, cfg) -> pd.Series[bool]   # True = BLOCKED
+# earnings: date | Sequence[date] | None
 ```
 
-**Rule.** For a symbol with a known next earnings date `E`, bar *t* is **blocked** when
+**Rule.** For a known earnings date `E`, bar *t* is **blocked** when
 
 ```
 0 <= (E − t) <= strategy.earnings_blackout_days      # calendar days
@@ -231,6 +258,15 @@ swing.strategy.rules.earnings_blackout(index, earnings, cfg) -> pd.Series[bool] 
 That is: entries are blocked from `strategy.earnings_blackout_days` calendar days before the
 announcement up to and including the announcement date. Bars after `E` are not blocked — the gap risk
 being avoided has already occurred.
+
+`earnings` may be **one date or a whole sequence of them**, and a bar is blocked when it falls inside
+the window of *any* of them. The live scanner passes the single next announcement it knows about; the
+backtest passes a symbol's full announcement history so that historical bars are blocked the way the
+scanner would have blocked them (spec amendment A12 — see
+[`backtest-methodology.md` §11](backtest-methodology.md#11-known-limitations) for what happens when
+that history is unavailable). Comparisons are made on tz-naive calendar days; a tz-aware index is
+normalised before the subtraction rather than being allowed to raise, because the scanner's broad
+exception handling would have turned that raise into a silent "no blackout" (audit BUG-045).
 
 | Parameter | Config key | Default |
 |-----------|-----------|---------|
@@ -260,13 +296,17 @@ earnings-tighten exit; it is not enabled by default and has no config key in v1.
 ## 8. Stage 6 — Ranking
 
 ```
-swing.strategy.scoring.momentum_score(bars, cfg) -> pd.Series[float]
+swing.strategy.scoring.momentum_score(bars, cfg, *, atr_series=None) -> pd.Series[float]
 swing.strategy.scoring.rank_candidates(bars_by_symbol, asof, cfg) -> pd.DataFrame
 ```
 
+`atr_series` is an internal optimisation hook, not a second knob: a caller that has already computed
+`ATR(bars, SCORE_ATR_WINDOW)` may pass it so it is not computed twice (`rank_candidates` does exactly
+that). Passing an ATR over any other window silently rescales the score.
+
 ### 8.1 Score formula
 
-Let `ATRpct(t) = 100 × ATR(bars, strategy.atr_window)(t) / close(t)`.
+Let `ATRpct(t) = 100 × ATR(bars, SCORE_ATR_WINDOW)(t) / close(t)`.
 
 Let `ROC(n)(t) = 100 × (close(t) / close(t − n) − 1)` (percent, Contract 5).
 
@@ -284,12 +324,21 @@ With defaults:
 score(t) = 0.6 × ROC(126, skip 5)(t) / ATRpct(t)  +  0.4 × ROC(63)(t) / ATRpct(t)
 ```
 
+**The ATR in `ATRpct` is a fixed 14, not `strategy.atr_window`.** `SCORE_ATR_WINDOW = 14` is a module
+constant in `swing.strategy.scoring`. The two are equal at shipping defaults, which is why the
+distinction is easy to miss, but they are independent: changing `strategy.atr_window` moves stop
+placement and the ATR term in the cost model (§11, `backtest-methodology.md` §3) and leaves every
+momentum score exactly where it was. The reason is comparability — the score's only job is to *order*
+symbols, and an ablation variant or sensitivity cell that quietly rescaled the denominator would make
+scores from two runs incomparable, which is precisely what those tables exist to compare
+(audit DEBT-010).
+
 | Parameter | Config key | Default | Meaning |
 |-----------|-----------|---------|---------|
 | Weight on the ~6-month leg | `strategy.mom_weight_126` | `0.6` | 126 trading days ≈ 6 months |
 | Weight on the ~3-month leg | `strategy.mom_weight_63` | `0.4` | 63 trading days ≈ 3 months |
 | Skip on the ~6-month leg | `strategy.mom_skip_days` | `5` | ≈ 1 week, avoids short-term reversal |
-| ATR window for `ATRpct` | `strategy.atr_window` | `14` | shared with stops and ADX |
+| ATR window for `ATRpct` | *(none — `SCORE_ATR_WINDOW`)* | `14` | fixed constant; **not** `strategy.atr_window` |
 
 Notes:
 
@@ -301,8 +350,24 @@ Notes:
 - Division by `ATRpct` is the risk adjustment. Without it the ranking systematically selects the
   highest-volatility names in the universe, which on a whole-share small account is the worst
   possible bias (§10).
-- Requires ≥ `126 + strategy.mom_skip_days + strategy.atr_window` bars of history; shorter series
-  yield `NaN` and are excluded from `rank_candidates`.
+- `momentum_score` is `NaN` until `126 + strategy.mom_skip_days` bars of history exist. The history
+  floor that actually governs which symbols get ranked is `MIN_HISTORY_ROWS` — see §8.3.
+
+#### The ATR% floor — normative
+
+```
+if ATRpct(t) < MIN_ATR_PCT:  score(t) = NaN        # MIN_ATR_PCT = 0.05 (percent of close)
+```
+
+The divisor is the one place the formula can collapse. A halted stock, a merger target pinned at the
+deal price, or a stale vendor series repeats one close for days; Wilder's ATR decays geometrically on
+a flat bar, so `ATRpct` heads for zero while the trailing return stays large and the ratio climbs
+without limit — the deadest name in the universe would rank first. Below `MIN_ATR_PCT` (five
+hundredths of one percent of price — a five-cent ATR on a $100 stock) there is no measurable
+volatility to normalise by, so the score is **undefined rather than enormous** and the symbol drops
+out of the ranking exactly the way a warm-up `NaN` does (audit BUG-003).
+
+`MIN_ATR_PCT` is a module constant in `swing.strategy.scoring`, not a config key.
 
 ### 8.2 `rank_candidates` output
 
@@ -311,18 +376,45 @@ A `DataFrame` indexed by symbol with columns:
 | Column | Type | Meaning |
 |--------|------|---------|
 | `score` | float | the value above, evaluated at `asof` |
-| `atr` | float | `ATR(strategy.atr_window)` at `asof`, in dollars |
+| `atr` | float | `ATR(SCORE_ATR_WINDOW)` at `asof`, in dollars — the same fixed 14-bar ATR the score divides by, **not** `ATR(strategy.atr_window)` |
 | `close` | float | close at `asof` |
 | `high_prox` | float | 0..1, `1.0` = at the 52-week high |
 | `rank` | int | 1 = best |
 
-`high_prox(t) = close(t) / high52w(t)`, clipped to `[0, 1]`.
+`high_prox(t) = close(t) / high52w(t)`, where `high52w` is the rolling maximum of the **closing**
+price over 252 bars including *t*. It is not clipped because it cannot exceed 1.0 by construction; a
+symbol whose 52-week high is not positive gets `NaN`, which drops it from the ranking.
 
 **Sort order — normative.** `score` descending, **tiebreak `high_prox` descending**. Any residual tie
 is broken by symbol ascending, so the ordering is total and deterministic (required for the
 byte-identical-rerun property, AC9). The 52-week-high tiebreak is the George & Hwang effect applied
 where it has real discriminating power; it is deliberately *not* a primary sort key
 (`indicator-research.md` §2).
+
+### 8.3 Who gets ranked at all — `MIN_HISTORY_ROWS`
+
+```
+MIN_HISTORY_ROWS = 260        # swing/strategy/scoring.py, not a config key
+```
+
+`rank_candidates` truncates each symbol's history at `asof` (so a ranking for a past date can never
+see the future) and then **skips any symbol with fewer than 260 bars at or before `asof`** — a full
+trading year plus a small cushion, the least history from which every input to the score is defined.
+A symbol that clears every filter in §3–§7 but has only, say, 200 bars is silently absent from the
+ranking and therefore from the picks.
+
+Two consequences worth stating, because they are easy to trip over:
+
+- **Recent IPOs and newly-listed ETFs cannot be picked** until they have ~13 months of bars,
+  regardless of how well they score on everything else.
+- **`MIN_HISTORY_ROWS` is what caps the momentum lookback.** `strategy.mom_skip_days + 126` may not
+  exceed `MAX_MOMENTUM_LOOKBACK_BARS = 250` (`swing/config.py`), a bound chosen to fit inside the
+  260-row floor with margin. A longer momentum reach would validate cleanly and then rank nothing,
+  ever (audit BUG-032).
+
+After scoring, a symbol is dropped when its score is not **finite** — the test is `np.isfinite`, not
+`pd.isna`, so an infinite score is excluded rather than sorted first. Both consumers of this contract
+(the scanner and the backtest engine) have to agree that a non-finite score never wins (BUG-003).
 
 ---
 
@@ -384,8 +476,12 @@ contested").
 Given account `equity`, available `cash`, the intended `entry` price and the initial `stop`:
 
 ```
-risk_budget    = equity × account.risk_pct / 100
+risk_floor     = max(0.01, 0.001 × entry)            # MIN_RISK_PER_SHARE_ABS / _FRAC
 risk_per_share = entry − stop                        # = strategy.atr_stop_mult × ATR
+if risk_per_share < risk_floor:                      # step 0 — see below
+    return SizeResult(shares=0, affordable=False, capped_by="risk_floor")
+
+risk_budget    = equity × account.risk_pct / 100
 shares_risk    = floor(risk_budget / risk_per_share)
 
 notional_cap   = equity × account.max_position_pct / 100
@@ -397,11 +493,32 @@ shares         = min(shares_risk, shares_cap, shares_cash)
 
 If `shares < 1`: `SizeResult(shares=0, affordable=False, capped_by="unaffordable")`.
 
-Otherwise `capped_by` records which constraint bound, in this precedence:
-`"risk"` if `shares == shares_risk`, else `"position_cap"` if `shares == shares_cap`, else `"cash"`;
-`None` when no constraint bound below the risk figure.
+Otherwise `capped_by` names the binding constraint: `None` when the risk budget alone decided it,
+`"position_cap"` when the notional ceiling cut it, `"cash"` when available cash did. On a tie between
+the two caps the **notional cap** is reported, because it is applied first and is the one that
+survives a cash top-up. The frozen enum also lists `"risk"`, but the code never emits it — plain risk
+sizing reports `None`.
 
 `notional = shares × entry`; `risk_amount = shares × risk_per_share`.
+
+**Step 0 — the risk floor, normative.** Risk-first sizing divides by `entry − stop`, and on a pegged
+instrument (a halted stock, a merger target sitting on the deal price) that distance shrinks toward
+zero while the arithmetic happily returns thousands of shares against a few dollars of "risk". A stop
+a fraction of a cent below the entry is not a stop, it is a rounding artefact. So any distance below
+
+```
+max(MIN_RISK_PER_SHARE_ABS, MIN_RISK_PER_SHARE_FRAC × entry)  =  max($0.01, 0.1% of entry)
+```
+
+returns **zero shares with `capped_by = "risk_floor"`** before any cap is consulted (audit BUG-054,
+spec amendment A6). One cent is the tick size of everything this system trades; the 0.1% leg exists
+because a one-cent stop on a $600 ETF is just as fictional. The comparison forgives binary-float dust,
+so a stop exactly one tick away still passes. Both constants live in `swing.strategy.sizing` and are
+not config keys.
+
+A `"risk_floor"` result reaches the operator the same way any other zero-share result does: the
+candidate becomes a `watch` entry (§10.4), not a pick. It is *not* an error and does not stop the
+scan.
 
 | Parameter | Config key | Default |
 |-----------|-----------|---------|
@@ -455,8 +572,10 @@ constraint visible, gives the operator something to act on if they add capital, 
 record of what the strategy *would* have taken — which matters when reconciling live results against
 the backtest, since the backtest does not apply the $100 affordability constraint retroactively.
 
-`kind = "watch"` records are excluded from order drafting (Contract 10) and from all execution
-guardrail accounting (Contract 12).
+`kind = "watch"` records are excluded from order drafting (Contract 10), from all execution
+guardrail accounting (Contract 12), and from the recent-pick dedupe of §2 stage 7b — a watch entry
+records what the strategy wanted, so it must not suppress the pick it becomes once the position is
+affordable.
 
 ---
 
@@ -485,25 +604,30 @@ the chandelier once the chandelier rises above it.
 
 ```
 swing.strategy.rules.chandelier_stop(bars, cfg) -> pd.Series[float]
-chandelier_stop(t) = rolling_max(close)(t) − strategy.chandelier_mult × ATR(bars, strategy.atr_window)(t)
+chandelier_stop(t) = max(close over the last CHANDELIER_WINDOW bars)(t)
+                     − strategy.chandelier_mult × ATR(bars, strategy.atr_window)(t)
 ```
 
 | Parameter | Config key | Default |
 |-----------|-----------|---------|
 | Chandelier ATR multiple | `strategy.chandelier_mult` | `3.0` |
+| Chandelier lookback (bars) | *(none — `CHANDELIER_WINDOW`)* | `22` |
+
+The lookback is the standard Chandelier Exit month, a fixed constant in `swing.strategy.rules`. It
+uses `min_periods=1`, so only the ATR warm-up produces `NaN`.
 
 **The ratchet lives in the consumer, not the rule** (Contract 7 is explicit: "NO ratchet; consumers
-ratchet per-position"). `chandelier_stop` returns an unratcheted rolling series so the same function
-is usable at any date. The backtest engine and the live position manager each maintain, per position:
+ratchet per-position"). `chandelier_stop` returns an unratcheted rolling series that depends only on
+the bars, not on when a position was opened, so the same function is usable at any date. The backtest
+engine and the live position manager each maintain, per position:
 
 ```
-running_max(t)  = max(close(entry_bar) … close(t))
-raw_chand(t)    = running_max(t) − strategy.chandelier_mult × ATR(t)
-effective(t)    = max(effective(t−1), raw_chand(t), initial_stop_at_entry)
+effective(t) = max(effective(t−1), chandelier_stop(t), initial_stop_at_entry)
 ```
 
-`effective` is **monotone non-decreasing** for the life of the position. A falling ATR can raise it;
-nothing can lower it. The running maximum is over closes since entry, not over the whole series.
+`effective` is **monotone non-decreasing** for the life of the position: the position's own state
+carries the ratchet, so a falling `chandelier_stop(t)` — after a pullback drops out of the 22-bar
+window, or after ATR expands — can never lower the stop that is actually in force.
 
 The chandelier is wider than the initial stop by design: the initial stop asks "was I wrong
 immediately?", the trailing stop asks "is the trend over?" and needs room to not be shaken out by
@@ -534,6 +658,12 @@ On any bar where more than one exit condition is met, precedence is:
 3. **Time stop.**
 
 A position is never opened and closed on the same bar.
+
+**A fourth terminator exists in the backtest only.** If a symbol simply stops printing bars while a
+position is open — a delisting, an acquisition, or a vendor gap that never ends — the engine books an
+`end_of_data` exit at that symbol's last valid close rather than holding the slot to the end of the
+run (`backtest-methodology.md` §1.1). It is not a strategy rule and has no live counterpart; live,
+the position is still there and the operator can see it.
 
 ---
 
@@ -575,6 +705,42 @@ that specifies it.
 | `regime.symbol` | `"SPY"` | [§3 Regime gate](#3-stage-1--regime-gate) |
 | `regime.sma_window` | `200` | [§3 Regime gate](#3-stage-1--regime-gate) |
 
+### 12.1 Fixed constants — the knobs that are deliberately not knobs
+
+These decide real behaviour and have **no config key**. Changing one means editing source, which is
+the point: each is either definitional or has to stay fixed for two runs to be comparable.
+
+| Constant | Value | Module | What it decides |
+|----------|-------|--------|-----------------|
+| `LOOKBACK_52W` | `252` | `strategy.rules` | the "52 weeks" in T6/T7 and `high_prox` |
+| `ADX_WINDOW` | `14` | `strategy.rules` | the ADX period in T8 (§5) |
+| `CHANDELIER_WINDOW` | `22` | `strategy.rules` | the chandelier's closing-high lookback (§11.2) |
+| `RSI2_PERIOD` / `RSI2_THRESHOLD` | `2` / `10.0` | `strategy.rules` | the optional pullback entry (§13) |
+| `MOM_LONG_DAYS` / `MOM_SHORT_DAYS` | `126` / `63` | `strategy.scoring` | the two momentum legs (§8.1) |
+| `SCORE_ATR_WINDOW` | `14` | `strategy.scoring` | the ATR the **score** divides by (§8.1) |
+| `MIN_ATR_PCT` | `0.05` | `strategy.scoring` | the ATR% floor below which a score is `NaN` (§8.1) |
+| `MIN_HISTORY_ROWS` | `260` | `strategy.scoring` | the history floor for being ranked at all (§8.3) |
+| `MIN_RISK_PER_SHARE_ABS` / `_FRAC` | `0.01` / `0.001` | `strategy.sizing` | the sizing risk floor (§10.2) |
+| `DEDUPE_WITHIN_DAYS` | `7` | `alerts.pipeline` | the recent-pick dedupe window (§2, stage 7b) |
+
+### 12.2 Config bounds that exist to stop a silent no-op
+
+Several windows validate happily at absurd values and then produce a permanently empty scan, which
+looks exactly like a quiet market. `swing.config` therefore caps them and says so in plain English
+(audit BUG-029/BUG-032, amendment A16):
+
+| Rule | Bound | Why |
+|------|-------|-----|
+| `donchian_window`, `volume_avg_window`, `atr_window` | ≤ `MAX_LOOKBACK_BARS` (`380`) | the scan fetches ~413 bars; a longer window never fills |
+| `sma_slow + sma_slow_rising_days` | ≤ `380` | same fetch window, applied to the trend test |
+| `mom_skip_days + 126` | ≤ `MAX_MOMENTUM_LOOKBACK_BARS` (`250`) | must fit inside the 260-row ranking floor (§8.3) |
+| `breakout_proximity_pct` | `0`–`25` | above ~25% the proximity test stops discriminating at all |
+| `adx_min` | `0`–`100`, `0` disables | see §5 |
+| `time_stop_days` | ≥ `1`, no upper bound | so the `time_stop_off` ablation's 10,000-day sentinel stays legal (§11.3) |
+
+A quoted number (`sma_fast = "50"`) or a `true`/`false` where a number belongs is refused at load
+time with a sentence naming the setting, rather than dying later as a `TypeError` (BUG-033).
+
 ---
 
 ## 13. Optional overlay — RSI(2)
@@ -583,11 +749,19 @@ that specifies it.
 |-----------|-----------|---------|
 | RSI(2) pullback overlay | `strategy.rsi2_enabled` | `False` |
 
-**Ships disabled.** When enabled, it adds an alternative entry path: a candidate that has passed the
-regime gate, liquidity filter and trend template may also be entered on a short-horizon pullback
-(RSI over a 2-period Wilder lookback below its oversold threshold) without satisfying the Donchian
-breakout condition of §6. All other stages — earnings blackout, ranking, fundamentals, sizing, and
-all three exits — apply unchanged.
+**Ships disabled.** When enabled, it adds an alternative entry path inside `entry_signal`: a
+candidate that has passed the regime gate, liquidity filter and trend template may also be entered
+when
+
+```
+RSI(close, RSI2_PERIOD)(t) < RSI2_THRESHOLD   and   close(t) >= SMA(close, strategy.sma_fast)(t)
+```
+
+with `RSI2_PERIOD = 2` and `RSI2_THRESHOLD = 10.0` as fixed constants in `swing.strategy.rules` — no
+config keys — and **no volume confirmation**, deliberately: a mean-reversion entry happens on a
+quiet, sold-out day, so demanding a volume surge would reject exactly the setups the overlay exists
+to take. The breakout path of §6 is unaffected; the two are OR-ed. All other stages — earnings
+blackout, ranking, fundamentals, sizing, and all three exits — apply unchanged.
 
 It is off by default for three stated reasons (`indicator-research.md` §5): horizon mismatch with a
 1–8 week hold, documented post-2010 attenuation of daily-frequency mean-reversion edges, and
@@ -600,8 +774,40 @@ data with our own costs, out-of-sample, via the `rsi2_on` ablation (`scripts/abl
 
 ## 14. Emitted artifacts
 
-Per SPEC Contracts 8 and 9, a scan produces `PickRecord`s in
-`<reports_dir>/scan-YYYY-MM-DD/picks.json`:
+Per SPEC Contracts 8 and 9, a scan writes one directory:
+
+```
+<reports_dir>/scan-YYYY-MM-DD/
+    orders/<SYMBOL>.json   one file per pick, holding all three Schwab payload variants
+    picks.md               the pick sheet
+    picks.html             the same, styled
+    picks.json             the machine-readable record — written LAST
+```
+
+`orders/` is cleared at the start of every scan, so a rerun cannot leave yesterday's drafts next to
+today's picks. A draft that fails its own structural check is **not written**, and the scan says so
+in a note rather than emitting a payload it does not trust — so a symbol can appear in `picks.json`
+with no file in `orders/`.
+
+`picks.json` has these top-level keys:
+
+| Key | Meaning |
+|-----|---------|
+| `generated_at` | ISO timestamp in `schedule.timezone` |
+| `asof` | the scan date |
+| `equity` | `account.equity` the sizing used |
+| `regime_ok` | whether the regime gate allowed entries |
+| `dry_run` | **true when the scan was `--dry-run`** — nothing was journalled and nothing was sent |
+| `gate` | `{"passed": bool, "reasons": [str]}` from `swing.backtest.gate.check` |
+| `picks` / `watch` | the two `PickRecord` arrays |
+
+The plain-English notes a scan produces (regime off, gate failed, dedupe, a draft that failed its
+own validation) are rendered into `picks.md`, `picks.html` and the notification body; they are not
+in `picks.json`. `picks.json` is written **last** in the directory, after the order drafts and the
+rendered sheets, and every file is written atomically — so a half-finished scan never leaves a
+report that looks complete (audit BUG-020).
+
+Each `PickRecord`:
 
 | Field | Source in this spec |
 |-------|---------------------|
@@ -613,12 +819,47 @@ Per SPEC Contracts 8 and 9, a scan produces `PickRecord`s in
 | `shares` | `SizeResult.shares` (§10.2) |
 | `risk_amount` | `SizeResult.risk_amount` (§10.2) |
 | `score` | `rank_candidates.score` (§8.1) |
-| `atr` | `ATR(strategy.atr_window)` at `asof` |
+| `atr` | `rank_candidates.atr` — `ATR(SCORE_ATR_WINDOW)` at `asof` (§8.2) |
 | `earnings_date` | provider, ISO string or `None` (§7) |
 | `earnings_known` | `False` triggers the visible warning (§7) |
 | `thesis` | human-readable summary of which gates passed |
-| `status` | `"drafted"` at scan time |
+| `status` | `"drafted"` at scan time — see below |
+
+### 14.1 The `status` lifecycle
+
+`status` lives in two places that are kept in step: the journal at `~/.swing/journal.json`, and the
+pick record inside `picks.json`.
+
+| Status | Set by | Meaning |
+|--------|--------|---------|
+| `drafted` | `swing scan` | proposed, never re-quoted |
+| `confirmed` | `swing confirm` | the morning quote is still inside the drift band |
+| `invalidated` | `swing confirm` | the morning quote ran away from the scan's entry |
+| `ordered` | `swing execute` | an order for it was accepted by the broker |
+| `filled` | fill sync (`swing execute` / `swing positions`, live only) | the broker reported a fill |
+| `closed` | *nothing, in v1* | reserved in the vocabulary and treated as terminal; position exits are not journalled yet, so a filled pick stays `filled` |
+
+**`swing confirm` rewrites `status` inside `picks.json`, not only in the journal** (atomically, under
+the same file lock). The report and the journal therefore agree after a confirmation, which is what
+makes the report readable as a record rather than as a snapshot of scan time (audit BUG-018/A7).
+
+Two refusals protect that record:
+
+- **A dry-run report cannot be confirmed.** If the newest scan report carries `dry_run: true`,
+  `swing confirm` refuses with a sentence saying so: those picks were never journalled, and
+  confirming them would notify the operator about trades the system never proposed (BUG-019).
+- **A confirmation cannot resurrect a settled pick.** Picks whose *journal* status is already
+  terminal — `invalidated`, `ordered`, `filled`, `closed` — are skipped and listed in the
+  confirmation's `skipped` array with the reason. Re-running `swing confirm` after an execution
+  therefore cannot walk an ordered pick back to `confirmed`.
+
+`swing confirm` re-quotes a pick and invalidates it when `price > entry + max_quote_drift_atr × atr`
+— the threshold is `execution.max_quote_drift_atr` (default `1.0`), the same knob the executor's
+drift guardrail uses, rather than a second hardcoded constant (audit DEBT-006). Only adverse *upward*
+drift invalidates; a price below the entry still confirms. A symbol with no quote is left as it was
+and reported as `unknown` — neither the journal nor `picks.json` changes for it.
 
 **The scan refuses to emit picks when `swing.backtest.gate.check(cfg)` fails**, unless `--force` is
 passed. It still writes the full report directory with the gate status and reasons and an empty
-`picks` array. The gate thresholds and their rationale are in `backtest-methodology.md` §7.
+`picks` array. The gate thresholds and their rationale are in
+[`backtest-methodology.md` §10](backtest-methodology.md#10-the-gate).

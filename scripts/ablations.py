@@ -9,6 +9,15 @@ Every variant is produced with :func:`dataclasses.replace` on the loaded ``Confi
 one knob differs from baseline. All runs use ``walkforward=True``; the tabulated metrics are
 therefore the concatenated out-of-sample figures, not the in-sample-contaminated full-period ones.
 
+The "Change" column is rendered from the *loaded* config at table-build time, so a table produced
+against a customised ``config.toml`` states that config's real baseline values rather than the
+shipping defaults it was written against (audit DEBT-009).
+
+The sweep never touches the trading gate. Every run label starts with
+:data:`swing.backtest.gate.ABLATION_PREFIX`, which the runner keys its "leave ``latest.json``
+alone" branch on, and the prefix is *verified* on every variant before a single backtest starts —
+so ``swing scan`` keeps gating on the last real ``swing backtest`` (audit DEBT-005).
+
 Usage::
 
     uv run python scripts/ablations.py --universe etf
@@ -35,7 +44,7 @@ import dataclasses
 import json
 import sys
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -103,14 +112,25 @@ def load_base_config() -> Any:
     return load_config()
 
 
-def _replace_strategy(cfg: Any, **changes: Any) -> Any:
-    """Return ``cfg`` with ``StrategyCfg`` fields replaced."""
-    return dataclasses.replace(cfg, strategy=dataclasses.replace(cfg.strategy, **changes))
+def ablation_prefix() -> str:
+    """The label prefix that keeps a run out of ``reports/backtest/latest.json``.
+
+    Read from :mod:`swing.backtest.gate` rather than restated here, so the guard this script
+    relies on and the guard the runner enforces can never drift apart.
+    """
+    _ensure_src_on_path()
+    from swing.backtest.gate import ABLATION_PREFIX
+
+    return str(ABLATION_PREFIX)
 
 
-def _replace_regime(cfg: Any, **changes: Any) -> Any:
-    """Return ``cfg`` with ``RegimeCfg`` fields replaced."""
-    return dataclasses.replace(cfg, regime=dataclasses.replace(cfg.regime, **changes))
+def _fmt_setting(value: Any) -> str:
+    """Format one config value for the "Change" column."""
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
 
 
 # --------------------------------------------------------------------------------------------
@@ -120,80 +140,108 @@ def _replace_regime(cfg: Any, **changes: Any) -> Any:
 
 @dataclass(frozen=True)
 class Variant:
-    """One ablation: a name, a run label, a human description, and a config transform."""
+    """One ablation: a name, a run label, and the config fields it overrides.
+
+    The transform and its human description come from the same ``changes`` tuple, so the table
+    can never claim a knob the sweep did not actually move (audit DEBT-009).
+    """
 
     name: str
     label: str
-    change: str
-    apply: Callable[[Any], Any]
+    #: Config section the changes apply to (``"strategy"``, ``"regime"``); ``""`` for baseline.
+    section: str = ""
+    #: ``(field name, new value)`` pairs, applied together to :attr:`section`.
+    changes: tuple[tuple[str, Any], ...] = ()
+    #: Extra clause appended to the description — or the whole of it, for the baseline.
+    note: str = ""
+
+    def apply(self, cfg: Any) -> Any:
+        """Return ``cfg`` with this variant's fields replaced (baseline returns it unchanged)."""
+        if not self.changes:
+            return cfg
+        section = dataclasses.replace(getattr(cfg, self.section), **dict(self.changes))
+        return dataclasses.replace(cfg, **{self.section: section})
+
+    def describe(self, base_cfg: Any) -> str:
+        """Render the "Change" cell against ``base_cfg``'s *actual* values.
+
+        The old-value half is read with ``getattr`` at table-build time rather than hardcoded,
+        so a sweep run against a customised ``config.toml`` documents that config's baseline
+        instead of the shipping defaults this file happened to be written against (DEBT-009).
+        """
+        if not self.changes:
+            return self.note or "none"
+        section = getattr(base_cfg, self.section)
+        keys = "/".join(f"`{self.section}.{name}`" for name, _ in self.changes)
+        before = "/".join(_fmt_setting(getattr(section, name)) for name, _ in self.changes)
+        after = "/".join(_fmt_setting(value) for _, value in self.changes)
+        described = f"{keys} {before} -> {after}"
+        return f"{described} ({self.note})" if self.note else described
 
 
 def build_variants() -> tuple[Variant, ...]:
-    """The fixed ablation set. One change per variant, relative to shipping defaults."""
+    """The fixed ablation set. One change per variant, relative to the loaded config."""
     return (
         Variant(
             name=BASELINE_NAME,
             label="ablate-baseline",
-            change="none (shipping defaults)",
-            apply=lambda cfg: cfg,
+            note="none (the loaded config, unmodified)",
         ),
         Variant(
             name="regime_off",
             label="ablate-regime-off",
-            change="`regime.enabled` True -> False",
-            apply=lambda cfg: _replace_regime(cfg, enabled=False),
+            section="regime",
+            changes=(("enabled", False),),
         ),
         Variant(
             name="adx_off",
             label="ablate-adx-off",
-            change="`strategy.adx_min` 20.0 -> 0.0",
-            apply=lambda cfg: _replace_strategy(cfg, adx_min=0.0),
+            section="strategy",
+            changes=(("adx_min", 0.0),),
+            note="0 disables the filter",
         ),
         Variant(
             name="volume_off",
             label="ablate-volume-off",
-            change="`strategy.volume_mult` 1.3 -> 1.0",
-            apply=lambda cfg: _replace_strategy(cfg, volume_mult=1.0),
+            section="strategy",
+            changes=(("volume_mult", 1.0),),
         ),
         Variant(
             name="skip_off",
             label="ablate-skip-off",
-            change="`strategy.mom_skip_days` 5 -> 0",
-            apply=lambda cfg: _replace_strategy(cfg, mom_skip_days=0),
+            section="strategy",
+            changes=(("mom_skip_days", 0),),
         ),
         Variant(
             name="weights_equal",
             label="ablate-weights-equal",
-            change="`strategy.mom_weight_126`/`mom_weight_63` 0.6/0.4 -> 0.5/0.5",
-            apply=lambda cfg: _replace_strategy(cfg, mom_weight_126=0.5, mom_weight_63=0.5),
+            section="strategy",
+            changes=(("mom_weight_126", 0.5), ("mom_weight_63", 0.5)),
         ),
         Variant(
             name="chandelier_2",
             label="ablate-chandelier-2",
-            change="`strategy.chandelier_mult` 3.0 -> 2.0",
-            apply=lambda cfg: _replace_strategy(cfg, chandelier_mult=2.0),
+            section="strategy",
+            changes=(("chandelier_mult", 2.0),),
         ),
         Variant(
             name="chandelier_4",
             label="ablate-chandelier-4",
-            change="`strategy.chandelier_mult` 3.0 -> 4.0",
-            apply=lambda cfg: _replace_strategy(cfg, chandelier_mult=4.0),
+            section="strategy",
+            changes=(("chandelier_mult", 4.0),),
         ),
         Variant(
             name="time_stop_off",
             label="ablate-time-stop-off",
-            change=(
-                "`strategy.time_stop_days` 40 -> "
-                f"{TIME_STOP_OFF_SENTINEL:,} "
-                "(time stop off; sentinel horizon, never reached)"
-            ),
-            apply=lambda cfg: _replace_strategy(cfg, time_stop_days=TIME_STOP_OFF_SENTINEL),
+            section="strategy",
+            changes=(("time_stop_days", TIME_STOP_OFF_SENTINEL),),
+            note="time stop off; sentinel horizon, never reached",
         ),
         Variant(
             name="rsi2_on",
             label="ablate-rsi2-on",
-            change="`strategy.rsi2_enabled` False -> True",
-            apply=lambda cfg: _replace_strategy(cfg, rsi2_enabled=True),
+            section="strategy",
+            changes=(("rsi2_enabled", True),),
         ),
     )
 
@@ -204,17 +252,35 @@ def build_variants() -> tuple[Variant, ...]:
 
 
 def validate_variants(base_cfg: Any, variants: Sequence[Variant]) -> list[tuple[str, str]]:
-    """Apply every variant transform up front, without running any backtest.
+    """Check every variant up front, without running any backtest.
 
-    ``Config`` and its sections validate in ``__post_init__``, so ``dataclasses.replace`` raises
-    immediately on an out-of-range value. Exercising all transforms before the sweep turns a
-    validation drift into a one-second failure instead of a crash ten minutes into compute.
+    Two things are checked:
+
+    * **The transform.** ``Config`` and its sections validate in ``__post_init__``, so
+      ``dataclasses.replace`` raises immediately on an out-of-range value. Exercising all
+      transforms before the sweep turns a validation drift into a one-second failure instead of
+      a crash ten minutes into compute.
+    * **The label.** Every run label must start with the runner's ablation prefix, because that
+      prefix is the only thing keeping a deliberately crippled variant out of
+      ``reports/backtest/latest.json`` and therefore out of the trading gate. A variant added
+      without it would silently poison the gate, so it fails the sweep before anything runs
+      (audit DEBT-005). ``run_backtest`` separately validates the label as a directory name.
 
     Returns ``(variant_name, message)`` for every variant that failed; empty means all are valid.
     Every variant is attempted, so a single run reports *all* problems rather than just the first.
     """
+    prefix = ablation_prefix()
     failures: list[tuple[str, str]] = []
     for variant in variants:
+        if not variant.label.startswith(prefix):
+            failures.append(
+                (
+                    variant.name,
+                    f"label {variant.label!r} does not start with {prefix!r}, so this run would "
+                    f"overwrite reports/backtest/latest.json and hand the trading gate an "
+                    f"ablation result",
+                )
+            )
         try:
             variant.apply(base_cfg)
         except Exception as exc:
@@ -362,6 +428,9 @@ class RunContext:
     end: date
     quick: bool
     generated_on: date
+    #: The loaded ``Config`` every variant was derived from. The "Change" column reads its
+    #: before-values from this rather than from hardcoded literals (audit DEBT-009).
+    base_cfg: Any
     failures: list[str] = field(default_factory=list)
 
 
@@ -380,7 +449,8 @@ def render_markdown(outcomes: Sequence[RunOutcome], ctx: RunContext) -> str:
             cells = ["FAILED"] * len(METRICS)
         else:
             cells = [_fmt(outcome.metrics.get(key)) for key, _ in METRICS]
-        main_rows.append([f"`{outcome.variant.name}`", outcome.variant.change, *cells])
+        change = outcome.variant.describe(ctx.base_cfg)
+        main_rows.append([f"`{outcome.variant.name}`", change, *cells])
 
     delta_header = ["Variant"] + [f"d {label}" for _, label in DELTA_METRICS]
     delta_rows: list[list[str]] = []
@@ -408,6 +478,8 @@ def render_markdown(outcomes: Sequence[RunOutcome], ctx: RunContext) -> str:
         f"- Window: {window}",
         f"- Mode: {mode}",
         f"- Generated: {ctx.generated_on.isoformat()}",
+        "- The **Change** column shows each knob's value in the config this sweep loaded, "
+        "not an assumed default.",
         "",
         *_identity_rows(outcomes),
         "",
@@ -538,6 +610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         end=end,
         quick=args.quick,
         generated_on=today,
+        base_cfg=cfg,
         failures=[o.variant.name for o in outcomes if o.error is not None],
     )
 
@@ -547,9 +620,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(document)
     print(f"\nwrote {RESULTS_PATH}", file=sys.stderr)
     print(
-        "WARNING: this sweep wrote reports/backtest/latest.json once per variant, so the "
-        "gate now reflects the LAST variant, not the shipping baseline. Re-run the plain "
-        "`swing backtest` before trusting `swing scan`.",
+        f"ablations: every run label started with {ablation_prefix()!r}, so "
+        "reports/backtest/latest.json was left untouched and `swing scan` still gates on your "
+        "last real `swing backtest`.",
         file=sys.stderr,
     )
 

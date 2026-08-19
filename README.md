@@ -67,8 +67,82 @@ universe.py ──► data/ (yfinance → parquet cache)
 ```
 
 Configuration is one TOML file (`config.toml`, gitignored — start from
-`config.example.toml`). Local state is one JSON journal plus a `KILL` file
-under `~/.swing/`.
+`config.example.toml`).
+
+## Configuration notes
+
+- **A relative `paths.reports_dir` is resolved against the directory of the
+  `config.toml` it was read from**, so `swing confirm` run from `~` finds the
+  reports `swing scan` wrote from the project directory. Absolute paths are
+  left alone, and running on example defaults (no config file anywhere) keeps
+  the old working-directory behaviour, with the loud "EXAMPLE DEFAULTS"
+  warning.
+- **`paths.state_dir` is *not* anchored that way** — a relative `state_dir`
+  stays relative to whatever directory you happen to run from, and you will get
+  a different journal per directory. Known limitation; leave it absolute (it
+  defaults to `~/.swing`).
+- **Numbers must not be quoted.** `sma_fast = "50"` and `risk_pct = true` are
+  refused at load time with a sentence naming the setting, rather than dying
+  later inside a comparison.
+- **Lookback windows are capped** so a setting cannot quietly produce a
+  permanently empty scan: see
+  [`docs/strategy-spec.md` §12.2](docs/strategy-spec.md#122-config-bounds-that-exist-to-stop-a-silent-no-op).
+- **`[data]` has three politeness knobs** — `retries` (1–10), `retry_backoff`
+  (seconds, doubling, capped at 8) and `download_batch` (10–500 symbols per
+  request). They tune how hard the tool leans on a free data source; they do
+  not change any result.
+
+## Local state, retention and locking
+
+By default everything lives under `~/.swing/`:
+
+| Path | What it is | Config key |
+| --- | --- | --- |
+| `journal.json` | picks and orders — the record of what was proposed and sent | `paths.state_dir` |
+| `journal.archive.json` | retired picks and orders (see below) | `paths.state_dir` |
+| `KILL` | the kill switch; while it exists nothing is sent | `paths.state_dir` |
+| `logs/` | launchd stdout/stderr for the scheduled scan and confirm | `paths.state_dir` |
+| `cache/` | parquet price history plus small JSON TTL caches | `data.cache_dir` |
+| `schwab_token.json` | the Schwab OAuth token, `chmod 600` | `schwab.token_path` |
+
+What gets cleaned up, and what does not:
+
+- **Journal.** On every write, picks older than 90 days that are `watch` or
+  still `drafted`, and terminal orders older than 90 days, are moved to
+  `journal.archive.json`. Confirmed, ordered and filled picks stay. **The
+  archive is never pruned** — it only grows, on purpose, because it is the
+  audit trail. Delete it yourself if you ever need to.
+- **Scan reports.** `reports/scan-YYYY-MM-DD/` directories older than 90 days
+  are removed at the start of each scan. **Backtest report directories are
+  never removed** — they are evidence.
+- **Price cache.** A symbol normally refreshes incrementally (a short overlap
+  window is re-fetched and compared, so a retroactive split adjustment
+  triggers a full re-download). A symbol whose cache has not been *written* for
+  90 days is re-fetched in full. In daily use that never fires; after a long
+  break, expect the first run back to be a slow one.
+- **Locking.** Concurrent writes to the journal and the price cache are
+  serialised with **advisory `fcntl` locks** on `.lock` sidecar files. Advisory
+  locking is reliable on a local disk and may be a no-op on a network share, so
+  **keep `~/.swing` (and the cache directory) on local storage** — not NFS, not
+  SMB, not a synced folder. Reads take no lock; a lock held too long degrades to
+  a warning and the data already on disk, never to a crash. The `.lock` files
+  are empty and safe to leave in place.
+
+## Scheduling
+
+`swing schedule install` writes two launchd jobs, `com.swing.scan` and
+`com.swing.confirm`, at `schedule.scan_time` and `schedule.confirm_time`.
+
+- They fire **weekdays only** (one calendar entry per day, Monday to Friday).
+  Holidays are not modelled — a scan on a market holiday simply finds no new
+  bars.
+- Times are interpreted in the **machine's local time**, not
+  `schedule.timezone`.
+- `install` verifies with `launchctl` that the job is really loaded before it
+  claims success, and prints what launchd said when it is not.
+- `swing scan` and `swing confirm` exit **2** when every configured
+  notification channel fails. The report is still written; the exit code is
+  there so a scheduled run that reached nobody is not silently green.
 
 ## Safety
 
@@ -76,6 +150,13 @@ under `~/.swing/`.
   config *and* `--live` on the command line.
 - `swing kill` writes `~/.swing/KILL`. While that file exists nothing is sent.
   It is a plain file on purpose — you can create it with `touch` at 3am.
+- A dry-run `swing execute` opens **no** broker connection and fetches no
+  quotes, so the three checks that need one (quote drift, reconciliation,
+  equity match) print `SKIP` rather than a pass. Everything offline still runs.
+- Orders are journalled as `pending` *before* they are sent and flipped to
+  `open` after, so a crash mid-flight leaves a record. If something fails after
+  Schwab accepted an order, the tool says the order **may be live** and tells
+  you to check the app — it never says "not sent" when it does not know.
 - Secrets live only in `config.toml` and the Schwab token file, both gitignored.
 - Every guardrail (quote drift, order caps, trading hours, token age,
   reconciliation) has a test proving it blocks.
@@ -103,7 +184,12 @@ Deeper write-ups live in [`docs/`](docs/):
 - [`docs/backtest-methodology.md`](docs/backtest-methodology.md) — walk-forward
   design, cost model, survivorship-bias haircut
 - [`docs/schwab-setup.md`](docs/schwab-setup.md) — getting a Schwab developer app
-  and a working token
+  and a working token, what execution writes to the journal, and how to unstick
+  an order row
+- [`docs/ablation-results.md`](docs/ablation-results.md) — the current
+  one-change-at-a-time sweep, regenerated by `scripts/ablations.py`
+- [`CODE_AUDIT_REPORT.md`](CODE_AUDIT_REPORT.md) — the full code audit (67
+  findings) that drove the remediation pass, kept as the audit trail
 
 ## Disclaimer
 
