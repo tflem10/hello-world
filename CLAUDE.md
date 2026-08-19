@@ -22,7 +22,7 @@ swing scan --dry-run                    # a pick sheet, nothing sent
 swing journal add|exit|stop|show        # record manual fills, ratchet stops, read the log
 ```
 
-Tests are fast (~20s, 439 of them) and hermetic. Run the full suite after any
+Tests are fast (~20s, 444 of them) and hermetic. Run the full suite after any
 change: it layers `config.example.toml` under its fixtures, so editing that
 file breaks tests far away from it.
 
