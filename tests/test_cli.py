@@ -329,6 +329,60 @@ def test_a_refusal_is_one_sentence_and_exit_2(
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+def test_a_backtest_refusal_is_one_sentence_and_exit_2(
+    cfg_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit BUG-042: a bad `--label` must cost a sentence, not a traceback.
+
+    ``run_backtest`` validates the label before any simulation and refuses with
+    a plain-English ``ValueError`` — its documented channel for an unknown or
+    empty universe and missing price history too.
+    """
+    sentence = (
+        "The run label 'sub/run-1' is not usable as a directory name. A label may contain "
+        "only letters, digits, dots, dashes and underscores — no slashes, spaces or '..' — "
+        "because it names one directory inside reports/backtest and nothing else."
+    )
+
+    def run_backtest(cfg, **kwargs):
+        raise ValueError(sentence)
+
+    runner_module = types.ModuleType("swing.backtest.runner")
+    runner_module.run_backtest = run_backtest  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "swing.backtest.runner", runner_module)
+
+    result = runner.invoke(app, ["--config", str(cfg_file), "backtest", "--label", "sub/run-1"])
+    text = output(result)
+
+    assert result.exit_code == 2
+    assert "not usable as a directory name" in text
+    assert "Traceback" not in text
+    assert "ValueError" not in text
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_a_successful_backtest_still_reports_its_directory(
+    cfg_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict] = []
+
+    def run_backtest(cfg, **kwargs):
+        calls.append(kwargs)
+        return tmp_path / "reports" / "backtest" / "run-1"
+
+    runner_module = types.ModuleType("swing.backtest.runner")
+    runner_module.run_backtest = run_backtest  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "swing.backtest.runner", runner_module)
+
+    result = runner.invoke(app, ["--config", str(cfg_file), "backtest", "--label", "run-1"])
+
+    assert result.exit_code == 0, output(result)
+    assert calls[0]["label"] == "run-1"
+    assert calls[0]["universe"] == "full"
+    assert calls[0]["walkforward"] is True
+    assert "run-1" in result.stdout
+
+
 def test_an_unexpected_error_is_not_swallowed(
     cfg_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

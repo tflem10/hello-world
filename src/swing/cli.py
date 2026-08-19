@@ -13,9 +13,12 @@ not implemented must print one clear sentence rather than a traceback.
 Exit codes, because launchd only ever sees the number: ``0`` success, ``1``
 "the work ran but something it did failed" (a dead notification channel in
 ``notify-test``), ``2`` "swing refused to do the work" — a bad configuration, a
-module that is not there, or a ``ScanError``. Scan and confirm ask the pipeline
-for ``strict_delivery``, so a night where every channel failed is a refusal
-rather than a silent success (audit BUG-021).
+module that is not there, a ``ScanError``, or a backtest that refuses its own
+arguments. Scan and confirm ask the pipeline for ``strict_delivery``, so a night
+where every channel failed is a refusal rather than a silent success (audit
+BUG-021). Each command catches exactly the exception type its entry point
+documents as a refusal — never a bare ``Exception``, so a genuine bug still
+arrives as a traceback instead of being dressed up as a polite no.
 """
 
 from __future__ import annotations
@@ -282,14 +285,21 @@ def backtest(
     start_date = _parse_date(start, "--start")
     end_date = _parse_date(end, "--end")
     run_backtest = _entry("swing.backtest.runner", "run_backtest", "backtest")
-    path = run_backtest(
-        cfg,
-        universe=universe.value,
-        start=start_date,
-        end=end_date,
-        walkforward=walkforward,
-        label=label,
-    )
+    try:
+        path = run_backtest(
+            cfg,
+            universe=universe.value,
+            start=start_date,
+            end=end_date,
+            walkforward=walkforward,
+            label=label,
+        )
+    except ValueError as exc:
+        # ValueError is `run_backtest`'s documented refusal channel: an unknown
+        # or empty universe, no price history, or a `--label` that is not a
+        # usable directory name (audit BUG-042). All four are sentences written
+        # for a human, so they get printed as sentences.
+        raise _refuse(exc) from exc
     typer.echo(f"Backtest report: {path}")
 
 
