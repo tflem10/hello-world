@@ -50,22 +50,41 @@ SMS_MAX_CHARS = 450
 # --------------------------------------------------------------------------
 
 
+#: Template name suffixes that must be HTML-escaped, after any ``.j2`` is
+#: dropped. Matching by suffix rather than substring so a Markdown template
+#: that merely *mentions* html in its name is not escaped (audit DEBT-017).
+_HTML_SUFFIXES = (".html", ".htm")
+
+
 def template_dir() -> Path:
-    """Directory holding the committed report templates."""
+    """Directory holding the committed report templates.
+
+    Only meaningful for a normal (unzipped) install, which is the only way this
+    project ships; rendering itself does not use this path — see
+    :func:`_environment` — so a zipped install still renders, it just cannot
+    hand out a filesystem directory here.
+    """
     return Path(str(resources.files("swing.alerts"))) / "templates"
 
 
 def _autoescape(name: str | None) -> bool:
     """Escape HTML templates, leave Markdown alone."""
-    return bool(name) and ".html" in name
+    if not name:
+        return False
+    stem = name[:-3] if name.endswith(".j2") else name
+    return stem.lower().endswith(_HTML_SUFFIXES)
 
 
 @lru_cache(maxsize=1)
 def _environment() -> Environment:
-    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+    from jinja2 import Environment, PackageLoader, StrictUndefined
 
+    # PackageLoader reads through importlib.resources, so the templates are
+    # found whether the package is installed as a directory or as a zip; the
+    # old FileSystemLoader(str(Traversable)) worked only for the former
+    # (audit DEBT-017).
     env = Environment(
-        loader=FileSystemLoader(str(template_dir())),
+        loader=PackageLoader("swing.alerts", "templates"),
         autoescape=_autoescape,
         trim_blocks=True,
         lstrip_blocks=True,
@@ -126,31 +145,28 @@ def _earnings_label(record: Mapping[str, Any]) -> str:
 
 
 def _row(record: Mapping[str, Any], equity: float) -> dict[str, Any]:
-    """Turn one PickRecord dict into everything the templates want to show."""
+    """Turn one PickRecord dict into everything the templates want to show.
+
+    Exactly that, and nothing more: seven of these keys were computed for no
+    reader at all (``notional_pct`` was computed and used nowhere), which is how
+    a view model starts pretending to be a second copy of the record it renders
+    (audit DEBT-017). The record itself is one JSON file away for anything that
+    needs the rest.
+    """
     entry = _finite(record.get("entry")) or 0.0
     stop = _finite(record.get("stop")) or 0.0
     shares = int(record.get("shares") or 0)
     risk_amount = _finite(record.get("risk_amount")) or 0.0
-    notional = round(entry * shares, 2)
-    risk_pct = round(100.0 * risk_amount / equity, 2) if equity > 0 else None
-    notional_pct = round(100.0 * notional / equity, 2) if equity > 0 else None
     label = _earnings_label(record)
     return {
         "symbol": str(record.get("symbol", "")),
-        "kind": str(record.get("kind", "pick")),
-        "status": str(record.get("status", "")),
         "entry": entry,
         "stop": stop,
         "shares": shares,
         "risk_per_share": round(entry - stop, 2),
         "risk_amount": risk_amount,
-        "risk_pct": risk_pct,
-        "notional": notional,
-        "notional_pct": notional_pct,
-        "score": _finite(record.get("score")),
-        "atr": _finite(record.get("atr")),
-        "earnings_date": record.get("earnings_date"),
-        "earnings_known": bool(record.get("earnings_known")),
+        "risk_pct": round(100.0 * risk_amount / equity, 2) if equity > 0 else None,
+        "notional": round(entry * shares, 2),
         "earnings_label": label,
         "earnings_unknown": label == EARNINGS_UNKNOWN_LABEL,
         "thesis": str(record.get("thesis", "")),
@@ -322,13 +338,22 @@ def _confirm_context(payload: Mapping[str, Any]) -> dict[str, Any]:
                     "reason": str(entry.get("reason", "")),
                 }
             )
+    skipped_raw = payload.get("skipped")
+    skipped: list[dict[str, str]] = []
+    if isinstance(skipped_raw, Mapping):
+        skipped = [
+            {"symbol": str(symbol), "reason": str(skipped_raw[symbol])}
+            for symbol in sorted(skipped_raw)
+        ]
     counts = {
         name: sum(1 for row in rows if row["status"] == name)
         for name in ("confirmed", "invalidated", "unknown")
     }
+    counts["skipped"] = len(skipped)
     return {
         "asof": str(payload.get("asof", "")),
         "rows": rows,
+        "skipped": skipped,
         "counts": counts,
     }
 

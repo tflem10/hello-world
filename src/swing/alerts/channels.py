@@ -18,7 +18,8 @@ from __future__ import annotations
 import logging
 import smtplib
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, Any
@@ -30,12 +31,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "CHANNELS",
+    "SMTP_CHANNELS",
     "Notification",
     "configured_channels",
     "deliver",
     "deliver_confirm",
     "deliver_scan",
     "notify_test",
+    "smtp_session",
 ]
 
 log = logging.getLogger(__name__)
@@ -108,8 +111,16 @@ def _ntfy_url(topic: str) -> str:
 
 
 def _ascii_header(value: str) -> str:
-    """ntfy headers must be latin-1 safe; drop anything that is not."""
-    return value.encode("ascii", "ignore").decode("ascii").strip() or "swing"
+    """Make a string safe to send as an HTTP header value.
+
+    Two rules, both learned the hard way (audit BUG-047): non-ASCII is dropped,
+    because ntfy headers must be latin-1 safe, and *all* whitespace is collapsed
+    to single spaces rather than merely trimmed at the ends — an embedded
+    newline reaches ``requests`` and is rejected outright, so one emoji-free
+    multi-line title used to take the whole push notification down.
+    """
+    ascii_only = value.encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_only.split()) or "swing"
 
 
 def send_ntfy(cfg: Config, note: Notification) -> bool:
@@ -131,8 +142,14 @@ def send_ntfy(cfg: Config, note: Notification) -> bool:
     return True
 
 
-def _smtp_send(cfg: Config, message: EmailMessage) -> bool:
-    """Deliver one message over STARTTLS, logging in only when credentials exist."""
+@contextmanager
+def smtp_session(cfg: Config) -> Iterator[Any]:
+    """Open one authenticated STARTTLS session and close it on the way out.
+
+    Email and SMS are the same protocol to the same server, so a delivery that
+    fires both used to connect, negotiate TLS, authenticate and tear down twice
+    (audit LEAK-005). :func:`deliver` opens one of these and hands it to both.
+    """
     alerts = cfg.alerts
     with smtplib.SMTP(alerts.smtp_host, alerts.smtp_port, timeout=NETWORK_TIMEOUT) as smtp:
         smtp.ehlo()
@@ -140,6 +157,15 @@ def _smtp_send(cfg: Config, message: EmailMessage) -> bool:
         smtp.ehlo()
         if alerts.smtp_user and alerts.smtp_password:
             smtp.login(alerts.smtp_user, alerts.smtp_password)
+        yield smtp
+
+
+def _smtp_send(cfg: Config, message: EmailMessage, connection: Any | None = None) -> bool:
+    """Deliver one message, reusing ``connection`` when the caller opened one."""
+    if connection is not None:
+        connection.send_message(message)
+        return True
+    with smtp_session(cfg) as smtp:
         smtp.send_message(message)
     return True
 
@@ -148,8 +174,15 @@ def _from_address(cfg: Config) -> str:
     return cfg.alerts.smtp_user.strip() or cfg.alerts.email_to.strip() or "swing@localhost"
 
 
-def send_email(cfg: Config, note: Notification) -> bool:
-    """Send the full report by email: text body, HTML alternative, JSON attachments."""
+def send_email(cfg: Config, note: Notification, *, connection: Any | None = None) -> bool:
+    """Send the full report by email: text body, HTML alternative, JSON attachments.
+
+    Args:
+        cfg: the loaded configuration.
+        note: the message to send.
+        connection: an open SMTP session to reuse; ``None`` opens (and closes)
+            one for this message alone.
+    """
     message = EmailMessage()
     message["Subject"] = note.title
     message["From"] = _from_address(cfg)
@@ -164,18 +197,24 @@ def send_email(cfg: Config, note: Notification) -> bool:
             subtype="json",
             filename=filename,
         )
-    return _smtp_send(cfg, message)
+    return _smtp_send(cfg, message, connection)
 
 
-def send_sms(cfg: Config, note: Notification) -> bool:
-    """Send the short line to a carrier email-to-SMS gateway address."""
+def send_sms(cfg: Config, note: Notification, *, connection: Any | None = None) -> bool:
+    """Send the short line to a carrier email-to-SMS gateway address.
+
+    Args:
+        cfg: the loaded configuration.
+        note: the message to send; its ``sms`` field is used, clipped.
+        connection: an open SMTP session to reuse; ``None`` opens its own.
+    """
     body = render.clip(note.sms or note.title)
     message = EmailMessage()
     message["Subject"] = ""
     message["From"] = _from_address(cfg)
     message["To"] = cfg.alerts.sms_gateway_address
     message.set_content(body)
-    return _smtp_send(cfg, message)
+    return _smtp_send(cfg, message, connection)
 
 
 def _applescript_quote(value: str) -> str:
@@ -211,6 +250,9 @@ _SENDERS = {
     "macos": send_macos,
 }
 
+#: The channels that talk SMTP, and can therefore share one connection.
+SMTP_CHANNELS: tuple[str, ...] = ("email", "sms_gateway")
+
 
 # --------------------------------------------------------------------------
 # delivery
@@ -220,6 +262,11 @@ _SENDERS = {
 def deliver(cfg: Config, note: Notification) -> dict[str, bool]:
     """Send ``note`` through every configured channel, isolating each failure.
 
+    When email *and* SMS are both switched on they share a single SMTP session
+    (audit LEAK-005) instead of connecting twice. Isolation survives that: a
+    session that will not open fails those two channels and nothing else, and a
+    message the server rejects fails only its own channel.
+
     Returns:
         ``{channel: succeeded}`` for the configured channels only. Channels that
         are switched off are simply absent, so an empty dict means "nothing is
@@ -227,14 +274,30 @@ def deliver(cfg: Config, note: Notification) -> dict[str, bool]:
     """
     active = configured_channels(cfg)
     results: dict[str, bool] = {}
-    for name in CHANNELS:
-        if not active.get(name):
-            continue
-        try:
-            results[name] = bool(_SENDERS[name](cfg, note))
-        except Exception as exc:  # noqa: BLE001 - one dead channel must not stop the rest
-            log.warning("Alert channel %s failed: %s", name, exc)
-            results[name] = False
+    with ExitStack() as stack:
+        shared: Any | None = None
+        smtp_failure: Exception | None = None
+        if sum(1 for name in SMTP_CHANNELS if active.get(name)) > 1:
+            try:
+                shared = stack.enter_context(smtp_session(cfg))
+            except Exception as exc:  # noqa: BLE001 - reported per channel below
+                log.warning("The shared SMTP connection could not be opened: %s", exc)
+                smtp_failure = exc
+
+        for name in CHANNELS:
+            if not active.get(name):
+                continue
+            if name in SMTP_CHANNELS and smtp_failure is not None:
+                results[name] = False
+                continue
+            try:
+                if name in SMTP_CHANNELS:
+                    results[name] = bool(_SENDERS[name](cfg, note, connection=shared))
+                else:
+                    results[name] = bool(_SENDERS[name](cfg, note))
+            except Exception as exc:  # noqa: BLE001 - one dead channel must not stop the rest
+                log.warning("Alert channel %s failed: %s", name, exc)
+                results[name] = False
     return results
 
 

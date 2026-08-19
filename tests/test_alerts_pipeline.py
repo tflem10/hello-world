@@ -321,11 +321,14 @@ def test_picks_json_matches_contract_nine_exactly(tmp_path: Path, wire, sent) ->
     cfg = build_config(tmp_path, account=RICH_ACCOUNT)
     payload = read_report(pipeline.run_scan(cfg, dry_run=True, asof=ASOF))
 
+    # "dry_run" joined the payload with audit BUG-019: a dry-run report used to
+    # be indistinguishable from a real one, so the morning confirm consumed it.
     assert set(payload) == {
         "generated_at",
         "asof",
         "equity",
         "regime_ok",
+        "dry_run",
         "gate",
         "picks",
         "watch",
@@ -333,6 +336,7 @@ def test_picks_json_matches_contract_nine_exactly(tmp_path: Path, wire, sent) ->
     assert payload["asof"] == "2026-08-18"
     assert payload["equity"] == 50_000.0
     assert payload["regime_ok"] is True
+    assert payload["dry_run"] is True
     assert set(payload["gate"]) == {"passed", "reasons"}
     assert payload["gate"]["passed"] is True
 
@@ -817,7 +821,11 @@ def test_confirm_writes_the_documented_shape(tmp_path: Path, wire, sent) -> None
     assert confirm_path.name == "confirm.json"
     assert confirm_path.parent.name == "scan-2026-08-18"
     payload = json.loads(confirm_path.read_text())
-    assert set(payload) == {"asof", "results"}
+    # "skipped" joined the payload with audit BUG-018/BUG-019: a pick the confirm
+    # deliberately left alone, or could not journal, is now visible instead of
+    # being a swallowed exception in a log file.
+    assert set(payload) == {"asof", "results", "skipped"}
+    assert payload["skipped"] == {}
     assert set(payload["results"]["AAA"]) == {"quote", "status", "reason"}
     assert (confirm_path.parent / "confirm.md").read_text().strip()
 
@@ -850,7 +858,7 @@ def test_confirm_notifies_unless_dry_run(tmp_path: Path, wire, sent) -> None:
 
     pipeline.run_confirm(cfg)
     assert len(sent["confirm"]) == 1
-    assert set(sent["confirm"][0]) == {"asof", "results"}
+    assert set(sent["confirm"][0]) == {"asof", "results", "skipped"}
 
 
 def test_confirm_only_looks_at_drafted_and_confirmed_picks(tmp_path: Path, wire, sent) -> None:
@@ -871,7 +879,7 @@ def test_confirm_uses_the_most_recent_scan(tmp_path: Path, wire, sent) -> None:
         older.mkdir()
         (older / "picks.json").write_text('{"picks": []}')
 
-    assert pipeline.latest_scan_dir(cfg).name == "scan-2026-08-18"
+    assert pipeline.latest_scan_dir(Path(cfg.paths.reports_dir)).name == "scan-2026-08-18"
     world.quotes = {"AAA": 100.0}
     assert pipeline.run_confirm(cfg).parent.name == "scan-2026-08-18"
 
@@ -882,12 +890,13 @@ def test_confirm_without_a_scan_says_so_plainly(tmp_path: Path) -> None:
         pipeline.run_confirm(cfg)
 
 
-def test_confirm_with_an_unreadable_report_says_so_plainly(tmp_path: Path) -> None:
+def test_confirm_skips_an_unreadable_report(tmp_path: Path) -> None:
+    """A report whose picks.json will not parse is a crash artefact (audit DEBT-001)."""
     cfg = build_config(tmp_path)
     scan_dir = tmp_path / "reports" / "scan-2026-08-18"
     scan_dir.mkdir(parents=True)
     (scan_dir / "picks.json").write_text("{not json")
-    with pytest.raises(pipeline.ScanError, match="could not be read"):
+    with pytest.raises(pipeline.ScanError, match="readable picks.json"):
         pipeline.run_confirm(cfg)
 
 
@@ -897,7 +906,7 @@ def test_latest_scan_dir_ignores_junk(tmp_path: Path) -> None:
     (reports / "backtest").mkdir()
     (reports / "scan-nope").mkdir()
     (reports / "scan-2026-08-18").mkdir()  # no picks.json inside
-    assert pipeline.latest_scan_dir(cfg) is None
+    assert pipeline.latest_scan_dir(reports) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1037,7 @@ def test_the_real_modules_fit_the_pipeline_seams(tmp_path: Path, monkeypatch, se
         "asof",
         "equity",
         "regime_ok",
+        "dry_run",  # audit BUG-019
         "gate",
         "picks",
         "watch",
@@ -1087,3 +1097,600 @@ def test_the_real_confirm_path_runs_against_a_real_journal(
 
     journal = {p.symbol: p.status for p in Journal.load(cfg).picks_for(ASOF)}
     assert journal == {"AAA": "confirmed", "BBB": "invalidated"}
+
+
+# ---------------------------------------------------------------------------
+# audit regressions — every test here fails on the pre-remediation behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_a_same_day_rerun_reproduces_the_same_report(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-010: the second run of an evening used to wipe the first one.
+
+    Run 1 journalled its picks; run 2 deduped every one of them away (delta == 0)
+    and overwrote the same directory with "Nothing is tradable tonight", leaving
+    run 1's order drafts orphaned beside it.
+    """
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+
+    first_dir = pipeline.run_scan(cfg, asof=ASOF)
+    first = read_report(first_dir)
+    first_orders = {p.name: p.read_text() for p in sorted((first_dir / "orders").glob("*.json"))}
+
+    second_dir = pipeline.run_scan(cfg, asof=ASOF)
+    second = read_report(second_dir)
+    second_orders = {p.name: p.read_text() for p in sorted((second_dir / "orders").glob("*.json"))}
+
+    assert second_dir == first_dir
+    assert [p["symbol"] for p in second["picks"]] == ["AAA", "BBB", "CCC"]
+    assert second["picks"] == first["picks"]
+    assert second_orders == first_orders != {}
+
+
+def test_a_rerun_clears_order_drafts_from_the_previous_run(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-010: orders/ must never describe a report that no longer exists."""
+    wire(World(symbols=("AAA", "BBB")))
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+    orphan = report_dir / "orders" / "ZZZ.json"
+    orphan.write_text('{"oto_stop": {}}', encoding="utf-8")
+
+    pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert not orphan.exists()
+    assert sorted(p.name for p in (report_dir / "orders").glob("*.json")) == [
+        "AAA.json",
+        "BBB.json",
+    ]
+
+
+def test_a_watch_entry_does_not_suppress_the_symbol_the_next_day(
+    tmp_path: Path, wire, sent
+) -> None:
+    """Audit BUG-011: printing a name on the watch list blocked it for seven days.
+
+    On the configured $100 account every qualifying name is a watch entry, so
+    within a week the watch list — the whole output of a small account — emptied
+    itself.
+    """
+    wire(World())
+    poor = build_config(tmp_path)  # $100: everything sizes to zero shares
+    pipeline.run_scan(poor, asof=ASOF)
+    assert [p.kind for p in Journal.load(poor).picks_for(ASOF)] == ["watch"] * 3
+
+    rich = build_config(tmp_path, account=RICH_ACCOUNT)  # the money arrived on day 2
+    payload = read_report(pipeline.run_scan(rich, dry_run=True, asof=ASOF + timedelta(days=1)))
+    assert [p["symbol"] for p in payload["picks"]] == ["AAA", "BBB", "CCC"]
+
+
+def test_a_real_pick_still_blocks_its_symbol_for_the_week(tmp_path: Path, wire, sent) -> None:
+    """The other half of BUG-011: dedupe still means "we committed capital here"."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    seed_journal(cfg, [picked_record("BBB", ASOF - timedelta(days=2))])
+
+    payload = read_report(pipeline.run_scan(cfg, dry_run=True, asof=ASOF))
+    assert [p["symbol"] for p in payload["picks"]] == ["AAA", "CCC"]
+
+
+def test_dedupe_only_asks_the_journal_about_symbols_it_actually_holds(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit PERF-008/DEBT-017: O(candidates x journal), plus a per-candidate
+    ``inspect.signature`` probe of a method whose signature never changes."""
+    calls: list[tuple[str, dict]] = []
+
+    class CountingJournal(Journal):
+        def recently_picked(self, symbol, within_days, **kwargs):
+            calls.append((symbol, dict(kwargs)))
+            return super().recently_picked(symbol, within_days, **kwargs)
+
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    seed_journal(cfg, [picked_record("BBB", ASOF - timedelta(days=30))])
+    monkeypatch.setattr(pipeline, "Journal", CountingJournal)
+
+    payload = read_report(pipeline.run_scan(cfg, dry_run=True, asof=ASOF))
+
+    assert [p["symbol"] for p in payload["picks"]] == ["AAA", "BBB", "CCC"]
+    assert [symbol for symbol, _kw in calls] == ["BBB"]  # AAA and CCC are not in the journal
+    assert calls[0][1] == {"asof": ASOF}  # passed directly, and kinds stays at its default
+    assert not hasattr(pipeline, "_recently_picked")  # the compat shim is gone
+
+
+def test_a_missing_regime_symbol_is_a_data_failure_not_a_market_reading(
+    tmp_path: Path, wire, sent
+) -> None:
+    """Audit BUG-015: an absent SPY was reported as "the regime gate is OFF"."""
+    world = World()
+    del world.bars["SPY"]
+    wire(world)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+    markdown = (report_dir / "picks.md").read_text()
+
+    assert read_report(report_dir)["regime_ok"] is False
+    assert "No price history came back for SPY" in markdown
+    assert "DATA problem" in markdown
+    assert "is not above its" not in markdown  # the confident market statement is gone
+
+
+def test_a_missing_regime_symbol_is_reported_even_when_the_gate_blocks(
+    tmp_path: Path, wire, sent
+) -> None:
+    """The gate-blocked path fetches only the regime symbol — and must say so too."""
+    world = World()
+    del world.bars["SPY"]
+    wire(world, gate_passed=False)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+    assert "No price history came back for SPY" in (report_dir / "picks.md").read_text()
+
+
+def test_the_regime_off_wording_is_unchanged_when_the_data_is_there(
+    tmp_path: Path, wire, sent
+) -> None:
+    wire(World(regime_ok=False))
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    markdown = (pipeline.run_scan(cfg, dry_run=True, asof=ASOF) / "picks.md").read_text()
+    assert "is not above its" in markdown
+    assert "DATA problem" not in markdown
+
+
+# ---------------------------------------------------------------------------
+# report writing (audit BUG-019, BUG-020, LEAK-002)
+# ---------------------------------------------------------------------------
+
+
+def test_a_real_run_is_stamped_as_not_a_dry_run(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-019: the two kinds of report used to be indistinguishable."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    assert read_report(pipeline.run_scan(cfg, asof=ASOF))["dry_run"] is False
+    assert read_report(pipeline.run_scan(cfg, dry_run=True, asof=ASOF))["dry_run"] is True
+
+
+def test_picks_json_is_written_last(tmp_path: Path, wire, sent, monkeypatch) -> None:
+    """Audit BUG-020: picks.json is the directory's commit point."""
+    written: list[str] = []
+    real_write = pipeline._write
+
+    def recording(path: Path, text: str) -> None:
+        written.append(path.name)
+        real_write(path, text)
+
+    wire(World(symbols=("AAA",)))
+    monkeypatch.setattr(pipeline, "_write", recording)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert written[-1] == "picks.json"
+    assert written.index("AAA.json") < written.index("picks.json")
+    assert written.index("picks.md") < written.index("picks.json")
+
+
+def test_a_crash_mid_report_leaves_no_picks_json_to_trust(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit BUG-020: a half-written report must not become `latest_scan_dir`."""
+    from swing import reports as reports_mod
+
+    real_write = pipeline._write
+
+    def explode(path: Path, text: str) -> None:
+        if path.name == "picks.html":
+            raise OSError("the disk filled up")
+        real_write(path, text)
+
+    wire(World(symbols=("AAA",)))
+    monkeypatch.setattr(pipeline, "_write", explode)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+
+    with pytest.raises(OSError, match="disk filled up"):
+        pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    report_dir = tmp_path / "reports" / "scan-2026-08-18"
+    assert not (report_dir / "picks.json").exists()
+    assert reports_mod.latest_scan_dir(Path(cfg.paths.reports_dir)) is None
+    assert not list(report_dir.glob(".*tmp*"))  # no temp files left behind either
+
+
+def test_report_writes_never_truncate_in_place(tmp_path: Path) -> None:
+    """Audit BUG-020: `write_text` truncates, so a reader can see half a file."""
+    target = tmp_path / "picks.json"
+    pipeline._write(target, '{"picks": []}\n')
+
+    original = Path.write_text
+    try:
+        Path.write_text = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("report files must be written atomically")
+        )
+        pipeline._write(target, '{"picks": [1]}\n')
+    finally:
+        Path.write_text = original  # type: ignore[method-assign]
+
+    assert target.read_text() == '{"picks": [1]}\n'
+    assert not list(tmp_path.glob(".*tmp*"))
+
+
+def test_a_scan_prunes_reports_older_than_the_retention_window(tmp_path: Path, wire, sent) -> None:
+    """Audit LEAK-002: one directory per calendar day, kept forever."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    reports = Path(cfg.paths.reports_dir)
+    ancient = reports / "scan-2025-01-02"
+    ancient.mkdir(parents=True)
+    (ancient / "picks.json").write_text('{"picks": []}', encoding="utf-8")
+    recent = reports / "scan-2026-08-01"
+    recent.mkdir()
+    (recent / "picks.json").write_text('{"picks": []}', encoding="utf-8")
+    (reports / "backtest").mkdir()
+
+    pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert not ancient.exists()
+    assert recent.is_dir()
+    assert (reports / "backtest").is_dir()  # not a scan directory; never touched
+
+
+def test_a_recovered_journal_is_announced_in_the_report(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-024: the reset used to surface only as a UserWarning on stderr."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    (Path(cfg.paths.state_dir) / "journal.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.warns(UserWarning):
+        report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert "Check the broker before acting" in (report_dir / "picks.md").read_text()
+
+
+# ---------------------------------------------------------------------------
+# sizing guards and order validation (audit BUG-030, DEBT-002)
+# ---------------------------------------------------------------------------
+
+
+def test_a_negative_stop_never_reaches_the_sizing_module(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit BUG-030: size_position was the one strategy call left unguarded."""
+    deps = wire(World(symbols=("AAA",)))
+    monkeypatch.setattr(
+        deps.rules, "initial_stop", lambda bars, cfg: bars["close"] * -1.0, raising=False
+    )
+
+    def refuse(**kwargs):
+        raise AssertionError("sizing must not be asked about a negative stop")
+
+    monkeypatch.setattr(deps.sizing, "size_position", refuse, raising=False)
+
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert read_report(report_dir)["picks"] == []
+    assert "not a sane pair of prices" in (report_dir / "picks.md").read_text()
+
+
+def test_a_non_positive_entry_is_dropped_with_a_note(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-030: a zero or negative close is not something to size against."""
+    world = World(symbols=("AAA",))
+    frame = world.bars["AAA"]
+    frame.loc[frame.index[-1], "close"] = -5.0
+    wire(world)
+
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert read_report(report_dir)["picks"] == []
+    assert "not a sane pair of prices" in (report_dir / "picks.md").read_text()
+
+
+def test_a_raising_sizing_module_drops_one_candidate_not_the_scan(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit BUG-030: every other strategy call was already wrapped."""
+    world = World(symbols=("AAA", "BBB"))
+    deps = wire(world)
+    real_size = deps.sizing.size_position
+    doomed = world.close("AAA")
+
+    def explode_for_aaa(*, equity, cash, entry, stop, cfg):
+        if abs(entry - doomed) < 1e-9:
+            raise ZeroDivisionError("risk per share is zero")
+        return real_size(equity=equity, cash=cash, entry=entry, stop=stop, cfg=cfg)
+
+    monkeypatch.setattr(deps.sizing, "size_position", explode_for_aaa, raising=False)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    payload = read_report(report_dir)
+    assert [p["symbol"] for p in payload["picks"]] == ["BBB"]
+    assert "the position size could not be computed" in (report_dir / "picks.md").read_text()
+
+
+@pytest.mark.parametrize(
+    ("capped_by", "expected"),
+    [
+        ("risk_floor", "risk-per-share floor"),
+        ("something_new", "'something_new'"),
+        ("cash", None),
+    ],
+)
+def test_a_zero_share_result_explains_an_unusual_cap(
+    tmp_path: Path, wire, sent, monkeypatch, capped_by, expected
+) -> None:
+    """Audit BUG-030 / contract A6: `capped_by` grows, and the report must cope."""
+    deps = wire(World(symbols=("AAA",)))
+    monkeypatch.setattr(
+        deps.sizing,
+        "size_position",
+        lambda **kwargs: FakeSize(0, 0.0, 0.0, False, capped_by),
+        raising=False,
+    )
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+    markdown = (report_dir / "picks.md").read_text()
+
+    assert [w["symbol"] for w in read_report(report_dir)["watch"]] == ["AAA"]
+    if expected is None:
+        assert "sized to zero shares because" not in markdown
+    else:
+        assert expected in markdown
+
+
+def test_an_order_draft_that_fails_its_own_check_is_not_written(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit DEBT-002: the validator existed but only the tests ever ran it."""
+    from swing.alerts import orders as orders_mod
+
+    wire(World(symbols=("AAA", "BBB")))
+    real_draft = orders_mod.draft_orders
+
+    def bad_draft_for_aaa(pick, cfg):
+        draft = real_draft(pick, cfg)
+        if pick.symbol == "AAA":
+            draft["oto_stop"]["childOrderStrategies"] = []  # an entry with no stop
+        return draft
+
+    monkeypatch.setattr(orders_mod, "draft_orders", bad_draft_for_aaa)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    report_dir = pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+
+    assert sorted(p.name for p in (report_dir / "orders").glob("*.json")) == ["BBB.json"]
+    markdown = (report_dir / "picks.md").read_text()
+    assert "did not pass its own structural check" in markdown
+    assert "AAA" in markdown
+
+
+# ---------------------------------------------------------------------------
+# confirm authority (audit BUG-018, BUG-019, DEBT-006)
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_writes_its_verdict_into_picks_json(tmp_path: Path, wire, sent) -> None:
+    """Contract A7 / audit BUG-018: picks.json was written once, always "drafted"."""
+    cfg, world = prepare_scan(tmp_path, wire)
+    scan_dir = tmp_path / "reports" / "scan-2026-08-18"
+    pick = read_report(scan_dir)["picks"][0]
+    world.quotes = {"AAA": pick["entry"] + 5.0 * pick["atr"]}
+
+    pipeline.run_confirm(cfg)
+
+    assert read_report(scan_dir)["picks"][0]["status"] == "invalidated"
+    assert Journal.load(cfg).picks_for(ASOF)[0].status == "invalidated"
+
+
+def test_confirm_cannot_resurrect_an_invalidated_pick(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-018, reproduced: invalidated -> confirmed when the price came back."""
+    cfg, world = prepare_scan(tmp_path, wire)
+    scan_dir = tmp_path / "reports" / "scan-2026-08-18"
+    pick = read_report(scan_dir)["picks"][0]
+
+    world.quotes = {"AAA": pick["entry"] + 5.0 * pick["atr"]}
+    pipeline.run_confirm(cfg)
+
+    world.quotes = {"AAA": pick["entry"]}  # the price came back
+    results = json.loads(pipeline.run_confirm(cfg).read_text())["results"]
+
+    assert results == {}
+    assert read_report(scan_dir)["picks"][0]["status"] == "invalidated"
+    assert Journal.load(cfg).picks_for(ASOF)[0].status == "invalidated"
+
+
+def test_confirm_leaves_a_pick_the_journal_has_finished_with(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-018: the executor may have ordered it since the scan."""
+    cfg, world = prepare_scan(tmp_path, wire)
+    Journal.load(cfg).update_status("AAA", ASOF, "ordered")
+    world.quotes = {"AAA": 1.0}
+
+    payload = json.loads(pipeline.run_confirm(cfg).read_text())
+
+    assert payload["results"] == {}
+    assert "already records this pick as ordered" in payload["skipped"]["AAA"]
+    assert Journal.load(cfg).picks_for(ASOF)[0].status == "ordered"
+
+
+def test_confirm_refuses_a_dry_run_report(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-019: a dry run wrote a full report and confirm re-quoted it."""
+    world = World(symbols=("AAA",))
+    wire(world)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    pipeline.run_scan(cfg, dry_run=True, asof=ASOF)
+    world.quotes = {"AAA": 100.0}
+
+    with pytest.raises(pipeline.ScanError, match="came from a dry run"):
+        pipeline.run_confirm(cfg)
+    assert sent["confirm"] == []
+
+
+def test_confirm_says_when_a_pick_is_not_in_the_journal(tmp_path: Path, wire, sent) -> None:
+    """Audit BUG-019: the journal miss used to be a swallowed KeyError."""
+    cfg, world = prepare_scan(tmp_path, wire)
+    pick = read_report(tmp_path / "reports" / "scan-2026-08-18")["picks"][0]
+    (Path(cfg.paths.state_dir) / "journal.json").unlink()
+    world.quotes = {"AAA": pick["entry"]}
+
+    payload = json.loads(pipeline.run_confirm(cfg).read_text())
+
+    assert payload["results"]["AAA"]["status"] == "confirmed"
+    assert "not in the journal" in payload["skipped"]["AAA"]
+    # The report still records the verdict, so the executor sees the truth.
+    assert read_report(tmp_path / "reports" / "scan-2026-08-18")["picks"][0]["status"] == (
+        "confirmed"
+    )
+
+
+def test_confirm_reads_its_threshold_from_the_configuration(tmp_path: Path, wire, sent) -> None:
+    """Audit DEBT-006: the same 1xATR rule lived in two places that could drift."""
+    cfg, world = prepare_scan(tmp_path, wire, execution={"max_quote_drift_atr": 0.25})
+    pick = read_report(tmp_path / "reports" / "scan-2026-08-18")["picks"][0]
+    world.quotes = {"AAA": pick["entry"] + 0.5 * pick["atr"]}  # inside 1 ATR, outside 0.25
+
+    result = json.loads(pipeline.run_confirm(cfg).read_text())["results"]["AAA"]
+
+    assert result["status"] == "invalidated"
+    assert "0.25 ATR" in result["reason"]
+
+
+def test_the_confirm_constant_is_only_the_documented_default(tmp_path: Path) -> None:
+    cfg = build_config(tmp_path)
+    assert pipeline._drift_multiple(cfg) == cfg.execution.max_quote_drift_atr
+    assert pipeline.CONFIRM_DRIFT_ATR_MULT == 1.0
+
+
+# ---------------------------------------------------------------------------
+# strict delivery (audit BUG-021, the CLI's exit code)
+# ---------------------------------------------------------------------------
+
+
+def all_channels_fail(monkeypatch) -> None:
+    monkeypatch.setattr(
+        channels, "deliver_scan", lambda cfg, report, **kw: {"ntfy": False, "email": False}
+    )
+    monkeypatch.setattr(channels, "deliver_confirm", lambda cfg, payload: {"ntfy": False})
+
+
+def test_a_scan_nobody_heard_about_is_a_failure(tmp_path: Path, wire, sent, monkeypatch) -> None:
+    """Audit BUG-021: all-channels-failed used to exit 0, exactly like success."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    all_channels_fail(monkeypatch)
+
+    with pytest.raises(pipeline.ScanError, match="every notification channel"):
+        pipeline.run_scan(cfg, asof=ASOF, strict_delivery=True)
+
+    message = str(
+        pytest.raises(
+            pipeline.ScanError, pipeline.run_scan, cfg, asof=ASOF, strict_delivery=True
+        ).value
+    )
+    assert "email, ntfy" in message  # the dead channels are named
+    # The work is not lost: the report is on disk and the picks are journalled.
+    assert read_report(tmp_path / "reports" / "scan-2026-08-18")["picks"]
+    assert Journal.load(cfg).picks_for(ASOF)
+
+
+def test_a_scan_without_strict_delivery_still_returns_its_report(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    all_channels_fail(monkeypatch)
+    assert pipeline.run_scan(cfg, asof=ASOF).name == "scan-2026-08-18"
+
+
+def test_having_no_channels_configured_is_not_a_delivery_failure(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Nothing configured is a choice; every configured channel failing is not."""
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    monkeypatch.setattr(channels, "deliver_scan", lambda cfg, report, **kw: {})
+    assert pipeline.run_scan(cfg, asof=ASOF, strict_delivery=True).is_dir()
+
+
+def test_one_surviving_channel_is_enough(tmp_path: Path, wire, sent, monkeypatch) -> None:
+    wire(World())
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    monkeypatch.setattr(
+        channels, "deliver_scan", lambda cfg, report, **kw: {"ntfy": False, "email": True}
+    )
+    assert pipeline.run_scan(cfg, asof=ASOF, strict_delivery=True).is_dir()
+
+
+def test_a_confirmation_nobody_heard_about_is_a_failure(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit BUG-021, the morning half."""
+    cfg, world = prepare_scan(tmp_path, wire)
+    world.quotes = {
+        "AAA": read_report(tmp_path / "reports" / "scan-2026-08-18")["picks"][0]["entry"]
+    }
+    all_channels_fail(monkeypatch)
+
+    with pytest.raises(pipeline.ScanError, match="every notification channel"):
+        pipeline.run_confirm(cfg, strict_delivery=True)
+
+    # The verdicts were still recorded before the delivery was attempted.
+    assert (tmp_path / "reports" / "scan-2026-08-18" / "confirm.json").is_file()
+    assert Journal.load(cfg).picks_for(ASOF)[0].status == "confirmed"
+
+
+def test_a_confirmation_without_strict_delivery_returns_its_path(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    cfg, world = prepare_scan(tmp_path, wire)
+    world.quotes = {"AAA": 100.0}
+    all_channels_fail(monkeypatch)
+    assert pipeline.run_confirm(cfg).name == "confirm.json"
+
+
+def test_a_dry_run_confirmation_never_fails_on_delivery(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    cfg, world = prepare_scan(tmp_path, wire)
+    world.quotes = {"AAA": 100.0}
+    all_channels_fail(monkeypatch)
+    assert pipeline.run_confirm(cfg, dry_run=True, strict_delivery=True).is_file()
+
+
+def test_the_scanner_computes_atr_once_per_sized_candidate(
+    tmp_path: Path, wire, sent, monkeypatch
+) -> None:
+    """Audit PERF-009, the half that lives in this module.
+
+    The scanner reads one ATR series per sized candidate and uses it for the
+    pick's own ``atr``. The *second* computation PERF-009 names for this loop is
+    inside ``rules.initial_stop``, which takes no series argument — closing that
+    one needs a change in ``swing.strategy.rules``.
+    """
+    calls: list[str] = []
+    deps = wire(World(symbols=("AAA", "BBB", "CCC")))
+    real_atr = deps.indicators.atr
+
+    def counting_atr(bars, n=14):
+        calls.append(str(bars.attrs.get("symbol", "")))
+        return real_atr(bars, n)
+
+    monkeypatch.setattr(deps.indicators, "atr", counting_atr, raising=False)
+    cfg = build_config(tmp_path, account=RICH_ACCOUNT)
+    payload = read_report(pipeline.run_scan(cfg, dry_run=True, asof=ASOF))
+
+    assert len(payload["picks"]) == 3
+    assert sorted(calls) == ["AAA", "BBB", "CCC"]
+
+
+def test_confirm_refuses_a_report_that_is_not_an_object(tmp_path: Path) -> None:
+    """A JSON file that parses but is not a report must refuse, not crash."""
+    cfg = build_config(tmp_path)
+    scan_dir = tmp_path / "reports" / "scan-2026-08-18"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "picks.json").write_text('["AAA"]', encoding="utf-8")
+
+    with pytest.raises(pipeline.ScanError, match="not a scan report"):
+        pipeline.run_confirm(cfg)

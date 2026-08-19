@@ -80,7 +80,9 @@ def test_scan_plist_has_the_structure_launchd_expects(cfg, tmp_path: Path) -> No
     assert plist["Label"] == "com.swing.scan"
     assert plist["ProgramArguments"][1] == "scan"
     assert plist["ProgramArguments"][0].endswith("/swing")
-    assert plist["StartCalendarInterval"] == {"Hour": 17, "Minute": 30}
+    assert plist["StartCalendarInterval"] == [
+        {"Hour": 17, "Minute": 30, "Weekday": day} for day in (1, 2, 3, 4, 5)
+    ]
     assert plist["RunAtLoad"] is False
     assert plist["WorkingDirectory"] == str(launchd.repo_root())
     logs = tmp_path / "state" / "logs"
@@ -92,19 +94,31 @@ def test_confirm_plist_runs_the_confirm_command_in_the_morning(cfg) -> None:
     plist = launchd.build_plist(cfg, launchd.LABEL_CONFIRM)
     assert plist["Label"] == "com.swing.confirm"
     assert plist["ProgramArguments"][1] == "confirm"
-    assert plist["StartCalendarInterval"] == {"Hour": 9, "Minute": 0}
+    assert [entry["Hour"] for entry in plist["StartCalendarInterval"]] == [9] * 5
+    assert [entry["Minute"] for entry in plist["StartCalendarInterval"]] == [0] * 5
+
+
+def test_both_agents_fire_on_weekdays_only(cfg) -> None:
+    """Audit BUG-012: seven-day agents let a Saturday scan shadow Friday's picks.
+
+    launchd's own schema documents each StartCalendarInterval field as a single
+    integer, so Monday-to-Friday is five entries rather than one entry holding a
+    list of weekdays — a plist launchd will not parse is a schedule that never
+    runs at all.
+    """
+    for label in launchd.AGENTS:
+        intervals = launchd.build_plist(cfg, label)["StartCalendarInterval"]
+        assert isinstance(intervals, list)
+        assert [entry["Weekday"] for entry in intervals] == [1, 2, 3, 4, 5]
+        assert all(isinstance(entry["Weekday"], int) for entry in intervals)
 
 
 def test_times_come_from_the_configuration(tmp_path: Path) -> None:
     cfg = build_config(tmp_path, schedule={"scan_time": "16:05", "confirm_time": "08:45"})
-    assert launchd.build_plist(cfg, launchd.LABEL_SCAN)["StartCalendarInterval"] == {
-        "Hour": 16,
-        "Minute": 5,
-    }
-    assert launchd.build_plist(cfg, launchd.LABEL_CONFIRM)["StartCalendarInterval"] == {
-        "Hour": 8,
-        "Minute": 45,
-    }
+    scan = launchd.build_plist(cfg, launchd.LABEL_SCAN)["StartCalendarInterval"]
+    confirm = launchd.build_plist(cfg, launchd.LABEL_CONFIRM)["StartCalendarInterval"]
+    assert {(entry["Hour"], entry["Minute"]) for entry in scan} == {(16, 5)}
+    assert {(entry["Hour"], entry["Minute"]) for entry in confirm} == {(8, 45)}
 
 
 def test_plist_names_an_absolute_executable(cfg) -> None:
@@ -129,7 +143,7 @@ def test_written_plists_round_trip_through_plistlib(cfg, agents_dir: Path) -> No
         with path.open("rb") as handle:
             parsed = plistlib.load(handle)
         assert parsed["Label"] == label
-        assert isinstance(parsed["StartCalendarInterval"]["Hour"], int)
+        assert isinstance(parsed["StartCalendarInterval"][0]["Hour"], int)
         assert parsed["ProgramArguments"][0].endswith("/swing")
 
 
@@ -143,16 +157,27 @@ def test_write_plists_creates_the_log_directory(cfg, agents_dir: Path, tmp_path:
 # ---------------------------------------------------------------------------
 
 
+#: launchctl's answer when the job genuinely is not loaded — what `print` says
+#: after a failed bootstrap.
+NOT_LOADED = {
+    "print": subprocess.CompletedProcess([], 113, stdout="", stderr="Could not find service"),
+    "list": subprocess.CompletedProcess([], 113, stdout="", stderr="Could not find service"),
+}
+
+
 def test_install_bootstraps_both_agents(cfg, agents_dir: Path, capsys) -> None:
     runner = Runner()
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
     domain = f"gui/{os.getuid()}"
-    assert runner.subcommands == ["bootstrap", "bootstrap"]
+    # Every bootstrap is followed by a `print` that verifies it (audit BUG-023).
+    assert runner.subcommands == ["bootstrap", "print", "bootstrap", "print"]
     for call in runner.calls:
         assert call[0] == "launchctl"
+    for call in (runner.calls[0], runner.calls[2]):
         assert call[2] == domain
         assert call[3].endswith(".plist")
+    assert runner.calls[1][2] == f"{domain}/com.swing.scan"
 
     out = capsys.readouterr().out
     assert "Installed com.swing.scan" in out
@@ -168,7 +193,7 @@ def test_install_falls_back_to_load_when_bootstrap_is_unsupported(
     )
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
-    assert runner.subcommands == ["bootstrap", "load", "bootstrap", "load"]
+    assert runner.subcommands == ["bootstrap", "load", "print"] * 2
     assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
@@ -182,7 +207,7 @@ def test_install_is_idempotent_when_already_loaded(cfg, agents_dir: Path, capsys
     )
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
-    assert runner.subcommands == ["bootstrap", "bootstrap"]  # no fallback attempted
+    assert runner.subcommands == ["bootstrap", "print"] * 2  # no fallback attempted
     assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
@@ -191,14 +216,59 @@ def test_install_explains_a_launchd_refusal_without_crashing(cfg, agents_dir: Pa
         {
             "bootstrap": subprocess.CompletedProcess([], 64, stdout="", stderr="Bootstrap failed"),
             "load": subprocess.CompletedProcess([], 1, stdout="", stderr="Load failed: nope"),
+            **NOT_LOADED,
         }
     )
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
     out = capsys.readouterr().out
-    assert "launchd would not load com.swing.scan" in out
+    assert "FAILED to install com.swing.scan" in out
     assert "Load failed: nope" in out
     assert (agents_dir / "com.swing.scan.plist").is_file()  # still written for manual loading
+
+
+def test_install_does_not_claim_success_when_bootstrap_exits_five(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    """Audit BUG-023: exit 5 is EIO, not "already loaded" — macOS uses it for real failures."""
+    runner = Runner(
+        {
+            "bootstrap": subprocess.CompletedProcess(
+                [], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error"
+            ),
+            **NOT_LOADED,
+        }
+    )
+    launchd.install(cfg, runner=runner, target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert "Installed" not in out
+    assert "FAILED to install com.swing.scan" in out
+    assert "FAILED to install com.swing.confirm" in out
+    assert "Input/output error" in out  # launchctl's own words reach the user
+    assert "Nothing was installed" in out
+
+
+def test_install_verifies_with_launchctl_before_claiming_success(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    """A clean exit code is not evidence: launchd is asked whether the job is there."""
+    runner = Runner(dict(NOT_LOADED))  # bootstrap succeeds, the job still is not loaded
+    launchd.install(cfg, runner=runner, target_dir=agents_dir)
+
+    assert runner.subcommands == ["bootstrap", "print", "list"] * 2
+    out = capsys.readouterr().out
+    assert "Installed" not in out
+    assert "Could not find service" in out
+
+
+def test_install_accepts_the_legacy_list_answer(cfg, agents_dir: Path, capsys) -> None:
+    """An older Mac whose `launchctl print` refuses is still verified, via `list`."""
+    runner = Runner({"print": subprocess.CompletedProcess([], 1, stdout="", stderr="Bad request")})
+    launchd.install(cfg, runner=runner, target_dir=agents_dir)
+
+    assert runner.subcommands == ["bootstrap", "print", "list"] * 2
+    assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
 def test_install_warns_when_the_binary_is_missing(
@@ -319,8 +389,8 @@ def test_status_reports_both_agents_with_paths_and_next_fire(
     assert "loaded, idle" in out  # scan is listed with pid "-"
     assert "NOT loaded" in out  # confirm is not in the launchctl output
     assert str(agents_dir / "com.swing.scan.plist") in out
-    assert "every day at 17:30 local machine time" in out
-    assert "every day at 09:00 local machine time" in out
+    assert "Monday to Friday at 17:30 local machine time" in out
+    assert "Monday to Friday at 09:00 local machine time" in out
     assert str(tmp_path / "state" / "logs" / "scan.out.log") in out
     assert str(tmp_path / "state" / "logs" / "confirm.err.log") in out
 

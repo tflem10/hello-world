@@ -30,12 +30,10 @@ with room to spare for holidays and halts.
 
 from __future__ import annotations
 
-import inspect
 import json
 import logging
 import math
-import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -45,15 +43,19 @@ import pandas as pd
 
 from swing.alerts import channels, render
 from swing.alerts import orders as orders_mod
-from swing.state import Journal, PickRecord
+from swing.reports import SCAN_DIR_PREFIX, latest_scan_dir, prune_scan_dirs
+from swing.state import Journal, PickRecord, atomic_write_text, file_lock
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
 __all__ = [
+    "CONFIRMABLE_STATUSES",
     "CONFIRM_DRIFT_ATR_MULT",
     "DEDUPE_WITHIN_DAYS",
+    "SCAN_DIR_PREFIX",
     "SCAN_LOOKBACK_DAYS",
+    "TERMINAL_PICK_STATUSES",
     "ScanError",
     "latest_scan_dir",
     "run_confirm",
@@ -68,15 +70,21 @@ SCAN_LOOKBACK_DAYS = 600
 #: A symbol picked within this many calendar days is skipped. Frozen at 7.
 DEDUPE_WITHIN_DAYS = 7
 
-#: A pick is invalidated when the morning price is more than this many ATRs
-#: above the planned entry — the move happened without us.
+#: The default invalidation threshold: a pick dies when the morning price is
+#: more than this many ATRs above the planned entry — the move happened without
+#: us. The live value is ``execution.max_quote_drift_atr``, which the executor
+#: has always used; having the same rule in two places let a retune desynchronise
+#: the confirm verdict from the execute verdict (audit DEBT-006). This constant
+#: is now only the documented default of that setting.
 CONFIRM_DRIFT_ATR_MULT = 1.0
 
 #: Statuses a pick may still be confirmed from.
 CONFIRMABLE_STATUSES = frozenset({"drafted", "confirmed"})
 
-SCAN_DIR_PREFIX = "scan-"
-_SCAN_DIR_RE = re.compile(r"^scan-\d{4}-\d{2}-\d{2}$")
+#: Journal statuses that end a pick's life. A confirm rerun must not touch one
+#: of these: re-quoting an invalidated pick used to *resurrect* it the moment
+#: the price came back (audit BUG-018).
+TERMINAL_PICK_STATUSES = frozenset({"invalidated", "ordered", "filled", "closed"})
 
 
 class ScanError(RuntimeError):
@@ -216,35 +224,78 @@ def _safe_call(func: Callable[..., Any], *args: Any, default: Any) -> Any:
     return default if result is None else result
 
 
-def _recently_picked(journal: Any, symbol: str, within_days: int, asof: date) -> bool:
-    """Ask the journal about a recent pick, passing ``asof`` when it accepts one."""
-    try:
-        accepts_asof = "asof" in inspect.signature(journal.recently_picked).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables only
-        accepts_asof = False
-    if accepts_asof:
-        return bool(journal.recently_picked(symbol, within_days, asof=asof))
-    return bool(journal.recently_picked(symbol, within_days))
+def _not_recently_picked(
+    journal: Any, symbols: Sequence[str], *, within_days: int, asof: date
+) -> list[str]:
+    """Drop the symbols the journal says we already committed capital to.
+
+    The journal owns the dedupe *rule* (``kinds=("pick",)`` and the ``0 < delta``
+    boundary — audit BUG-010/BUG-011); this owns the *cost*. Asking the journal
+    about every candidate was O(candidates x journal rows) and measurably slow
+    on a journal that only ever grows (audit PERF-008), so the journal's picks
+    are indexed by symbol once per scan and only the candidates that actually
+    appear in it are asked.
+    """
+    if within_days <= 0:
+        return list(symbols)
+    journalled: set[str] = {pick.symbol.strip().upper() for pick in journal.picks}
+    return [
+        symbol
+        for symbol in symbols
+        if symbol.strip().upper() not in journalled
+        or not journal.recently_picked(symbol, within_days, asof=asof)
+    ]
 
 
 def _write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    """Write one report file atomically (audit BUG-020).
+
+    ``write_text`` truncates in place, so a reader — the 07:00 confirm, the
+    executor — could see half a ``picks.json``. Every report file therefore
+    goes through the same temp-file-and-rename helper the journal uses.
+    """
+    atomic_write_text(path, text)
 
 
-def latest_scan_dir(cfg: Config) -> Path | None:
-    """The most recent ``scan-YYYY-MM-DD`` directory holding a ``picks.json``."""
-    reports = Path(cfg.paths.reports_dir).expanduser()
-    if not reports.is_dir():
-        return None
-    candidates = [
-        child
-        for child in reports.iterdir()
-        if child.is_dir() and _SCAN_DIR_RE.match(child.name) and (child / "picks.json").is_file()
-    ]
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda p: p.name)[-1]
+def _report_dir(cfg: Config) -> Path:
+    return Path(cfg.paths.reports_dir).expanduser()
+
+
+def _clear_orders_dir(orders_dir: Path) -> None:
+    """Empty ``orders/`` so it can never describe a report that no longer exists.
+
+    A second scan on the same evening rewrites ``picks.json`` in place; without
+    this, order drafts from the first run survived beside it and the directory
+    disagreed with the report (audit BUG-010).
+    """
+    try:
+        stale = sorted(orders_dir.glob("*.json"))
+    except OSError:  # pragma: no cover - unreadable directory; the write reports it
+        return
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError as exc:  # pragma: no cover - permissions only
+            log.warning("The stale order draft %s could not be removed (%s)", path, exc)
+
+
+def _check_delivery(results: Mapping[str, bool], *, strict: bool, what: str) -> None:
+    """Refuse a run whose every configured notification channel failed (audit BUG-021).
+
+    An empty ``results`` means nothing is configured, which is a choice rather
+    than a failure; the report is still on disk either way. Only a run where at
+    least one channel was switched on and *all* of them failed is an error, and
+    it is one worth an exit code: launchd showing "last exit 0" for a night the
+    user never heard about is indistinguishable from success.
+    """
+    if not strict or not results or any(results.values()):
+        return
+    names = ", ".join(sorted(results))
+    raise ScanError(
+        f"The {what} finished and its report was written, but every notification channel "
+        f"configured for it failed ({names}), so nothing reached you. Run `swing notify-test` "
+        f"with --verbose to see why, then re-send by re-running this command."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -303,9 +354,31 @@ def _thesis(
     )
 
 
+def _regime_bars_missing(bars: Any) -> bool:
+    """True when the regime symbol came back with no history at all."""
+    return bars is None or len(bars) == 0
+
+
+def _regime_missing_note(cfg: Config) -> str:
+    """The note for "we do not know the regime", which is not "the regime is off".
+
+    A data outage used to be reported as the confident market statement "SPY is
+    not above its 200-day average" (audit BUG-015). The two need different
+    words because they need different reactions: one is a bear market, the other
+    is a broken feed.
+    """
+    symbol = cfg.regime.symbol.strip().upper()
+    return (
+        f"No price history came back for {symbol}, the market regime symbol, so this scan "
+        f"could not tell whether the regime is ON or OFF and proposed no new entries. This is "
+        f"a DATA problem, not a market signal: check the data provider and the cache, then "
+        f"re-run `swing scan`."
+    )
+
+
 def _regime_ok(deps: _Deps, cfg: Config, spy_bars: Any, asof: pd.Timestamp) -> bool:
     """Whether the market regime allows new entries as of ``asof``."""
-    if spy_bars is None or len(spy_bars) == 0:
+    if _regime_bars_missing(spy_bars):
         return False
     try:
         allowed = deps.regime.entries_allowed(spy_bars, cfg)
@@ -316,13 +389,20 @@ def _regime_ok(deps: _Deps, cfg: Config, spy_bars: Any, asof: pd.Timestamp) -> b
     return False if position < 0 else _flag_at(allowed, position)
 
 
-def _regime_only(deps: _Deps, cfg: Config, provider: Any, asof: date) -> bool:
-    """Fetch just the regime symbol — used when picks are blocked anyway."""
+def _regime_only(deps: _Deps, cfg: Config, provider: Any, asof: date) -> tuple[bool, list[str]]:
+    """Fetch just the regime symbol — used when picks are blocked anyway.
+
+    Returns ``(regime_ok, notes)``; the notes carry the missing-data case so the
+    report never presents an outage as a market reading (audit BUG-015).
+    """
     symbol = cfg.regime.symbol.strip().upper()
     bars = _safe_call(provider.daily_bars, [symbol], _fetch_start(cfg, asof), asof, default={}).get(
         symbol
     )
-    return _regime_ok(deps, cfg, bars, pd.Timestamp(asof))
+    if _regime_bars_missing(bars):
+        log.warning("No history came back for the regime symbol %s", symbol)
+        return False, [_regime_missing_note(cfg)]
+    return _regime_ok(deps, cfg, bars, pd.Timestamp(asof)), []
 
 
 def _technical_survivors(
@@ -418,6 +498,39 @@ def _apply_fundamentals(
     return eligible
 
 
+#: ``SizeResult.capped_by`` values that mean "there is not enough money", which
+#: the watch list and its one summary note already explain. Anything else is
+#: reported per symbol, including values this module has never heard of — the
+#: sizing module is free to add reasons (``"risk_floor"`` arrived with contract
+#: A6) and a scanner that silently swallowed them would hide the answer to
+#: "why is this name on the watch list?" (audit BUG-030).
+_AFFORDABILITY_CAPS = frozenset({"cash", "unaffordable", "position_cap"})
+
+#: How a non-affordability cap is put into words.
+_CAP_EXPLANATIONS: dict[str, str] = {
+    "risk_floor": (
+        "its stop is too close to the entry to size a position against, so the risk-per-share "
+        "floor refused it"
+    ),
+}
+
+
+def _cap_note(symbol: str, capped_by: Any) -> str | None:
+    """Explain a zero-share result whose cause is not simply "not enough money"."""
+    if capped_by is None:
+        return None
+    reason = str(capped_by).strip().lower()
+    if not reason or reason in _AFFORDABILITY_CAPS:
+        return None
+    explanation = _CAP_EXPLANATIONS.get(reason)
+    if explanation is None:
+        return (
+            f"{symbol} sized to zero shares and the sizing module gave {reason!r} as the reason. "
+            f"It is on the watch list."
+        )
+    return f"{symbol} sized to zero shares because {explanation}. It is on the watch list."
+
+
 def _size_candidates(
     deps: _Deps,
     cfg: Config,
@@ -445,22 +558,54 @@ def _size_candidates(
         entry = round(_value_at(bars["close"], position), 2)
         try:
             stop = round(_value_at(deps.rules.initial_stop(bars, cfg), position), 2)
-            atr_value = _value_at(deps.indicators.atr(bars, cfg.strategy.atr_window), position)
+            # PERF-009: one ATR series per sized candidate, read once. `chosen`
+            # is at most `max_positions` names, so this loop is not the hot one
+            # — the per-universe duplication PERF-009 also names lives in
+            # `scoring.rank_candidates`.
+            atr_series = deps.indicators.atr(bars, cfg.strategy.atr_window)
+            atr_value = _value_at(atr_series, position)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{symbol} was dropped: its stop could not be computed ({exc}).")
             continue
 
-        if not (_finite(entry) and _finite(stop)) or entry - stop <= 0:
+        # Everything sizing needs must be a real, positive, ordered pair of
+        # prices *before* the strategy sees it: `size_position` is the one
+        # strategy call the scanner used to make unguarded (audit BUG-030).
+        if not (_finite(entry) and _finite(stop)):
+            notes.append(
+                f"{symbol} was dropped: its entry or stop could not be computed as a number "
+                f"from the price history."
+            )
+            continue
+        if entry <= 0 or stop < 0:
+            notes.append(
+                f"{symbol} was dropped: the entry (${entry:.2f}) and stop (${stop:.2f}) are not "
+                f"a sane pair of prices — an entry has to be positive and a stop cannot be "
+                f"below zero."
+            )
+            continue
+        if entry - stop <= 0:
             notes.append(
                 f"{symbol} was dropped: the stop (${stop:.2f}) is not below the entry "
                 f"(${entry:.2f}), so the risk per share is not a positive number."
             )
             continue
 
-        size = deps.sizing.size_position(
-            equity=equity, cash=available, entry=entry, stop=stop, cfg=cfg
-        )
-        shares = int(size.shares)
+        try:
+            size = deps.sizing.size_position(
+                equity=equity, cash=available, entry=entry, stop=stop, cfg=cfg
+            )
+        except Exception as exc:  # noqa: BLE001 - one refusal must not end the scan
+            notes.append(f"{symbol} was dropped: the position size could not be computed ({exc}).")
+            continue
+
+        try:
+            shares = int(size.shares)
+        except (TypeError, ValueError) as exc:
+            notes.append(
+                f"{symbol} was dropped: the sizing module returned {size.shares!r} shares ({exc})."
+            )
+            continue
         rank = int(ranking.loc[symbol, "rank"])
         record = PickRecord(
             symbol=symbol,
@@ -486,6 +631,9 @@ def _size_candidates(
             available = max(0.0, available - float(size.notional))
         else:
             watch.append(record)
+            explanation = _cap_note(symbol, getattr(size, "capped_by", None))
+            if explanation is not None:
+                notes.append(explanation)
     return picks, watch, notes
 
 
@@ -518,7 +666,13 @@ def _scan(
         )
         return False, [], [], notes
 
-    regime_ok = _regime_ok(deps, cfg, bars_by_symbol.get(regime_symbol), asof_ts)
+    regime_bars = bars_by_symbol.get(regime_symbol)
+    if _regime_bars_missing(regime_bars):
+        log.warning("No history came back for the regime symbol %s", regime_symbol)
+        notes.append(_regime_missing_note(cfg))
+        return False, [], [], notes
+
+    regime_ok = _regime_ok(deps, cfg, regime_bars, asof_ts)
     if not regime_ok:
         notes.append(
             f"The market regime gate is OFF ({regime_symbol} is not above its "
@@ -553,11 +707,7 @@ def _scan(
         return regime_ok, [], [], notes
 
     eligible = _apply_fundamentals(deps, cfg, ranking, kinds, provider)
-    eligible = [
-        symbol
-        for symbol in eligible
-        if not _recently_picked(journal, symbol, DEDUPE_WITHIN_DAYS, asof)
-    ]
+    eligible = _not_recently_picked(journal, eligible, within_days=DEDUPE_WITHIN_DAYS, asof=asof)
     if not eligible:
         notes.append(
             f"Every ranked candidate was either rejected by the fundamentals screen or already "
@@ -608,28 +758,37 @@ def run_scan(
     dry_run: bool = False,
     force: bool = False,
     asof: date | None = None,
+    strict_delivery: bool = False,
 ) -> Path:
     """Run the nightly scan and write ``<reports_dir>/scan-YYYY-MM-DD/``.
 
     Args:
         cfg: the loaded configuration.
         dry_run: build the report but write nothing to the journal and send no
-            notifications.
+            notifications. The report records that it was a dry run, and
+            :func:`run_confirm` refuses to act on one (audit BUG-019).
         force: emit picks even though the backtest gate has not passed. The
             report says so, loudly, in every format.
         asof: pretend today is this date. Defaults to today in
             ``cfg.schedule.timezone``.
+        strict_delivery: raise when every configured notification channel
+            failed. The CLI passes True: for a system whose entire value is the
+            notification, a night nobody heard about must not exit 0 (audit
+            BUG-021). Having *no* channel configured is not a failure.
 
     Returns:
         The report directory, which always exists by the time this returns —
         even when there is nothing in it but an explanation.
 
     Raises:
-        ScanError: when the scan genuinely cannot run: a missing data layer
-            while picks are allowed, or an unwritable reports directory.
+        ScanError: when the scan genuinely cannot run — a missing data layer
+            while picks are allowed, or an unwritable reports directory — or,
+            under ``strict_delivery``, when the finished report reached nobody.
+            The report directory is complete on disk either way.
     """
     asof_date = asof or _today(cfg)
-    report_dir = Path(cfg.paths.reports_dir).expanduser() / f"{SCAN_DIR_PREFIX}{asof_date}"
+    reports_dir = _report_dir(cfg)
+    report_dir = reports_dir / f"{SCAN_DIR_PREFIX}{asof_date}"
     orders_dir = report_dir / "orders"
     try:
         orders_dir.mkdir(parents=True, exist_ok=True)
@@ -638,6 +797,15 @@ def run_scan(
             f"The report directory {report_dir} could not be created ({exc}). Check "
             f"paths.reports_dir in your config.toml."
         ) from exc
+
+    # Retention (contract A17 / audit LEAK-002): one directory per calendar day
+    # accumulates forever otherwise, and every `latest_scan_dir` walks them all.
+    prune_scan_dirs(reports_dir, asof=asof_date)
+
+    # Audit BUG-010: last night's `orders/` must never outlive the report that
+    # explains it. Re-running a scan rewrites `picks.json`, so the order drafts
+    # beside it are rebuilt from scratch rather than merged with the old set.
+    _clear_orders_dir(orders_dir)
 
     gate = _gate_status(cfg)
     picks_allowed = bool(gate["passed"]) or force
@@ -675,13 +843,22 @@ def run_scan(
             regime_ok, picks, watch, scan_notes = _scan(deps, cfg, provider, journal, asof_date)
             notes.extend(scan_notes)
         else:
-            regime_ok = _regime_only(deps, cfg, provider, asof_date)
+            regime_ok, regime_notes = _regime_only(deps, cfg, provider, asof_date)
+            notes.extend(regime_notes)
+
+    if journal.recovered:
+        notes.append(
+            "The journal could not be read and was reset, so swing currently believes it holds "
+            "no positions and has sent no orders. Check the broker before acting on anything "
+            "below (audit BUG-024)."
+        )
 
     report: dict[str, Any] = {
         "generated_at": _now_iso(cfg),
         "asof": asof_date.isoformat(),
         "equity": float(cfg.account.equity),
         "regime_ok": bool(regime_ok),
+        "dry_run": bool(dry_run),
         "gate": gate,
         "picks": [pick.to_dict() for pick in picks],
         "watch": [entry.to_dict() for entry in watch],
@@ -694,23 +871,45 @@ def run_scan(
         except orders_mod.OrderDraftError as exc:
             notes.append(f"No order could be drafted for {pick.symbol}: {exc}")
             continue
+        # DEBT-002: the validator existed but only tests ever ran it, so the one
+        # artefact a human might hand a broker was never actually checked.
+        problems = orders_mod.validate_order_draft(draft)
+        if problems:
+            notes.append(
+                f"The drafted order for {pick.symbol} did not pass its own structural check and "
+                f"was NOT written: {problems[0]}"
+            )
+            log.warning("Order draft for %s rejected: %s", pick.symbol, "; ".join(problems))
+            continue
         drafts[pick.symbol] = draft
         _write(orders_dir / f"{pick.symbol}.json", json.dumps(draft, indent=2) + "\n")
 
-    _write(report_dir / "picks.json", json.dumps(report, indent=2) + "\n")
+    # picks.json is written LAST, deliberately: `swing.reports.latest_scan_dir`
+    # treats it as this directory's commit point, so a crash mid-report leaves a
+    # directory that is ignored rather than a half-built one that is trusted
+    # (audit BUG-020).
     _write(report_dir / "picks.md", render.render_markdown(report, notes=notes))
     _write(
         report_dir / "picks.html",
         render.render_html(report, notes=notes, orders=drafts),
     )
+    _write(report_dir / "picks.json", json.dumps(report, indent=2) + "\n")
 
     if dry_run:
         log.info("Dry run: journal untouched and no notifications sent (%s)", report_dir)
         return report_dir
 
     if picks or watch:
+        # Journal first, notify second, and that order is deliberate (contract
+        # A15, audit BUG-055): the journal is safety state — the duplicate
+        # guardrail and the position count read it — so a crash between these
+        # two lines must leave the record of what we decided, not lose it. The
+        # accepted residual is that such a crash suppresses those symbols for
+        # the dedupe window without having told anyone; `strict_delivery` below
+        # is the mitigation, because a delivery that fails now fails loudly.
         journal.add_picks([*picks, *watch])
-    channels.deliver_scan(cfg, report, notes=notes, orders=drafts)
+    delivery = channels.deliver_scan(cfg, report, notes=notes, orders=drafts)
+    _check_delivery(delivery, strict=strict_delivery, what=f"scan for {asof_date.isoformat()}")
     return report_dir
 
 
@@ -719,7 +918,22 @@ def run_scan(
 # --------------------------------------------------------------------------
 
 
-def _confirm_result(pick: PickRecord, quote: Any) -> dict[str, Any]:
+def _drift_multiple(cfg: Config) -> float:
+    """How many ATRs of adverse drift invalidate a pick.
+
+    Read from ``execution.max_quote_drift_atr`` so the morning confirm and the
+    executor's own quote-drift guardrail can never disagree about the same pick
+    (audit DEBT-006); :data:`CONFIRM_DRIFT_ATR_MULT` is that setting's
+    documented default and nothing else.
+    """
+    try:
+        value = float(cfg.execution.max_quote_drift_atr)
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - config validates it
+        return CONFIRM_DRIFT_ATR_MULT
+    return value if math.isfinite(value) and value > 0 else CONFIRM_DRIFT_ATR_MULT
+
+
+def _confirm_result(pick: PickRecord, quote: Any, *, mult: float) -> dict[str, Any]:
     """Decide whether one pick survives this morning's price."""
     if quote is None:
         return {
@@ -731,13 +945,13 @@ def _confirm_result(pick: PickRecord, quote: Any) -> dict[str, Any]:
             ),
         }
     price = float(getattr(quote, "price", quote))
-    ceiling = pick.entry + CONFIRM_DRIFT_ATR_MULT * pick.atr
+    ceiling = pick.entry + mult * pick.atr
     if price > ceiling:
         return {
             "quote": price,
             "status": "invalidated",
             "reason": (
-                f"${price:.2f} is more than {CONFIRM_DRIFT_ATR_MULT:g} ATR (${pick.atr:.2f}) "
+                f"${price:.2f} is more than {mult:g} ATR (${pick.atr:.2f}) "
                 f"above the ${pick.entry:.2f} entry, past the ${ceiling:.2f} limit. The move "
                 f"happened without us; chasing it is a different, worse trade."
             ),
@@ -746,32 +960,93 @@ def _confirm_result(pick: PickRecord, quote: Any) -> dict[str, Any]:
         "quote": price,
         "status": "confirmed",
         "reason": (
-            f"${price:.2f} is still within {CONFIRM_DRIFT_ATR_MULT:g} ATR of the ${pick.entry:.2f} "
+            f"${price:.2f} is still within {mult:g} ATR of the ${pick.entry:.2f} "
             f"entry (limit ${ceiling:.2f}), so the plan stands."
         ),
     }
 
 
-def run_confirm(cfg: Config, *, dry_run: bool = False) -> Path:
+def _journal_statuses(journal: Any) -> dict[tuple[str, str], str]:
+    """``{(symbol, date): status}`` for every pick the journal holds."""
+    return {
+        (pick.symbol.strip().upper(), pick.date): pick.status.strip().lower()
+        for pick in journal.picks
+    }
+
+
+def _rewrite_pick_statuses(picks_file: Path, verdicts: Mapping[str, str]) -> int:
+    """Write the confirm verdicts back into ``picks.json`` (contract A7 / audit BUG-018).
+
+    ``picks.json`` used to be written once, always ``"drafted"``, so every
+    downstream reader — the executor's skip-invalidated branch, tomorrow's
+    confirm, the human reading the sheet — trusted a file that the confirm had
+    already contradicted in the journal. Re-quoting an invalidated pick could
+    then *resurrect* it.
+
+    The file is re-read under the same lock it is written with, so a concurrent
+    scan cannot lose the statuses (and this rewrite cannot lose the scan).
+
+    Returns:
+        How many pick records changed status.
+    """
+    if not verdicts:
+        return 0
+    wanted = {symbol.strip().upper(): status for symbol, status in verdicts.items()}
+    with file_lock(picks_file):
+        try:
+            payload = json.loads(picks_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "The confirm verdicts could not be written back into %s (%s); the journal is "
+                "still authoritative.",
+                picks_file,
+                exc,
+            )
+            return 0
+        if not isinstance(payload, dict) or not isinstance(payload.get("picks"), list):
+            return 0
+        changed = 0
+        for raw in payload["picks"]:
+            if not isinstance(raw, dict):
+                continue
+            status = wanted.get(str(raw.get("symbol", "")).strip().upper())
+            if status is not None and raw.get("status") != status:
+                raw["status"] = status
+                changed += 1
+        if changed:
+            atomic_write_text(picks_file, json.dumps(payload, indent=2) + "\n")
+    return changed
+
+
+def run_confirm(cfg: Config, *, dry_run: bool = False, strict_delivery: bool = False) -> Path:
     """Re-check the most recent scan's picks against this morning's prices.
+
+    The verdicts land in three places, and A7 makes them agree: the journal (the
+    safety state), ``picks.json`` itself (what every downstream reader trusts)
+    and ``confirm.json`` (what the human is shown). A pick the journal has
+    already finished with — invalidated, ordered, filled or closed — is left
+    alone, so re-running the confirm can never bring one back to life.
 
     Args:
         cfg: the loaded configuration.
-        dry_run: re-check and write ``confirm.json``, but leave the journal
-            alone and send no notifications.
+        dry_run: re-check and write ``confirm.json``, but change no statuses
+            anywhere and send no notifications.
+        strict_delivery: raise when every configured notification channel
+            failed (audit BUG-021). The CLI passes True.
 
     Returns:
         The path of the ``confirm.json`` written inside the scan directory.
 
     Raises:
-        ScanError: when there is no scan to confirm, or its ``picks.json``
-            cannot be read.
+        ScanError: when there is no scan to confirm, when its ``picks.json``
+            cannot be read, when the latest scan was a dry run (audit BUG-019),
+            or — under ``strict_delivery`` — when the result reached nobody.
     """
-    scan_dir = latest_scan_dir(cfg)
+    scan_dir = latest_scan_dir(_report_dir(cfg))
     if scan_dir is None:
         raise ScanError(
-            f"There is no scan to confirm: no scan-YYYY-MM-DD folder with a picks.json was "
-            f"found in {Path(cfg.paths.reports_dir).expanduser()}. Run `swing scan` first."
+            f"There is no scan to confirm: no scan-YYYY-MM-DD folder with a readable picks.json "
+            f"was found in {_report_dir(cfg)}. Run `swing scan` first."
         )
 
     picks_file = scan_dir / "picks.json"
@@ -782,35 +1057,85 @@ def run_confirm(cfg: Config, *, dry_run: bool = False) -> Path:
             f"The scan report at {picks_file} could not be read ({exc}). Re-run `swing scan`."
         ) from exc
 
-    picks = [PickRecord.from_dict(raw) for raw in payload.get("picks", []) if isinstance(raw, dict)]
-    candidates = sorted(
-        (pick for pick in picks if pick.status in CONFIRMABLE_STATUSES),
-        key=lambda pick: pick.symbol,
-    )
+    if not isinstance(payload, dict):
+        raise ScanError(
+            f"The scan report at {picks_file} is not a scan report — its top level is a "
+            f"{type(payload).__name__} rather than an object. Re-run `swing scan`."
+        )
 
+    if bool(payload.get("dry_run")):
+        raise ScanError(
+            f"The most recent scan report ({scan_dir.name}) came from a dry run, so its picks "
+            f"were never journalled and confirming them would notify you about trades this "
+            f"system never proposed. Run `swing scan` without --dry-run, then confirm."
+        )
+
+    raw_picks = payload.get("picks")
+    picks = [
+        PickRecord.from_dict(raw)
+        for raw in (raw_picks if isinstance(raw_picks, list) else [])
+        if isinstance(raw, dict)
+    ]
+    journal = Journal.load(cfg)
+    journal_status = _journal_statuses(journal)
+
+    candidates: list[PickRecord] = []
+    skipped: dict[str, str] = {}
+    for pick in sorted(picks, key=lambda p: p.symbol):
+        if pick.status not in CONFIRMABLE_STATUSES:
+            continue
+        settled = journal_status.get((pick.symbol.strip().upper(), pick.date))
+        if settled in TERMINAL_PICK_STATUSES:
+            # Audit BUG-018: a rerun must not resurrect a pick the journal has
+            # already finished with, however friendly this morning's price is.
+            skipped[pick.symbol] = (
+                f"The journal already records this pick as {settled}, so it was not re-quoted."
+            )
+            continue
+        candidates.append(pick)
+
+    mult = _drift_multiple(cfg)
     results: dict[str, Any] = {}
+    verdicts: dict[str, tuple[str, str]] = {}  # symbol -> (pick date, new status)
     if candidates:
         deps = _load_deps()
         provider = deps.get_provider(cfg)
         quotes = _safe_call(
             provider.latest_quotes, [pick.symbol for pick in candidates], default={}
         )
-        journal = Journal.load(cfg)
         for pick in candidates:
-            result = _confirm_result(pick, quotes.get(pick.symbol))
+            result = _confirm_result(pick, quotes.get(pick.symbol), mult=mult)
             results[pick.symbol] = result
             if dry_run or result["status"] == "unknown":
                 continue
-            try:
-                journal.update_status(pick.symbol, date.fromisoformat(pick.date), result["status"])
-            except (KeyError, ValueError) as exc:
-                log.warning("Could not update the journal for %s: %s", pick.symbol, exc)
+            verdicts[pick.symbol] = (pick.date, str(result["status"]))
 
-    confirm = {"asof": _today(cfg).isoformat(), "results": results}
+    if verdicts:
+        changes: list[tuple[str, str, str]] = []
+        for symbol, (day, status) in sorted(verdicts.items()):
+            if (symbol.strip().upper(), day) in journal_status:
+                changes.append((symbol, day, status))
+            else:
+                # Audit BUG-019: a verdict the journal cannot record used to be
+                # a swallowed KeyError in a log file nobody reads.
+                skipped[symbol] = (
+                    "This pick is in the report but not in the journal, so only the report was "
+                    "updated. The scan that produced it never journalled it."
+                )
+        if changes:
+            journal.update_statuses(changes)
+        _rewrite_pick_statuses(picks_file, {s: status for s, (_d, status) in verdicts.items()})
+
+    confirm: dict[str, Any] = {
+        "asof": _today(cfg).isoformat(),
+        "results": results,
+        "skipped": dict(sorted(skipped.items())),
+    }
     confirm_path = scan_dir / "confirm.json"
     _write(confirm_path, json.dumps(confirm, indent=2) + "\n")
     _write(scan_dir / "confirm.md", render.render_confirm_markdown(confirm))
 
     if not dry_run:
-        channels.deliver_confirm(cfg, confirm)
+        delivery = channels.deliver_confirm(cfg, confirm)
+        _check_delivery(delivery, strict=strict_delivery, what=f"confirmation of {scan_dir.name}")
     return confirm_path

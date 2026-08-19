@@ -317,3 +317,61 @@ def test_rendering_is_deterministic() -> None:
     payload = report()
     assert render.render_markdown(payload) == render.render_markdown(payload)
     assert render.render_html(payload) == render.render_html(payload)
+
+
+# ---------------------------------------------------------------------------
+# audit regressions
+# ---------------------------------------------------------------------------
+
+
+def test_the_view_model_holds_only_what_a_template_reads() -> None:
+    """Audit DEBT-017: 7 of 18 keys had no reader; `notional_pct` had never had one."""
+    row = render._row(record(), equity=100.0)
+    assert set(row) == {
+        "symbol",
+        "entry",
+        "stop",
+        "shares",
+        "risk_per_share",
+        "risk_amount",
+        "risk_pct",
+        "notional",
+        "earnings_label",
+        "earnings_unknown",
+        "thesis",
+    }
+
+
+def test_autoescaping_is_decided_by_the_suffix_not_a_substring() -> None:
+    """Audit DEBT-017: `".html" in name` also matched a Markdown template."""
+    assert render._autoescape("picks.html.j2") is True
+    assert render._autoescape("picks.html") is True
+    assert render._autoescape("picks.md.j2") is False
+    assert render._autoescape("how-to-read-the-html.md.j2") is False
+    assert render._autoescape(None) is False
+
+
+def test_templates_are_found_through_the_package_not_a_filesystem_path() -> None:
+    """Audit DEBT-017: FileSystemLoader(str(Traversable)) breaks a zipped install."""
+    from jinja2 import PackageLoader
+
+    environment = render._environment()
+    assert isinstance(environment.loader, PackageLoader)
+    assert "picks.md.j2" in set(environment.list_templates())
+    assert render.template_dir().is_dir()  # still true for a normal checkout
+
+
+def test_confirm_markdown_shows_the_picks_it_left_alone() -> None:
+    """Audit BUG-018/BUG-019: skipped picks used to be invisible."""
+    payload = confirm_payload() | {
+        "skipped": {"OLD": "The journal already records this pick as ordered."}
+    }
+    text = render.render_confirm_markdown(payload)
+    assert "## Left alone (1)" in text
+    assert "**OLD**" in text
+    assert "already records this pick as ordered" in text
+
+
+def test_confirm_rendering_ignores_a_missing_skipped_key() -> None:
+    text = render.render_confirm_markdown(confirm_payload())
+    assert "Left alone" not in text

@@ -170,6 +170,29 @@ def _hhmm(value: str) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
+#: Monday to Friday, in launchd's numbering (0 and 7 are both Sunday).
+TRADING_WEEKDAYS: tuple[int, ...] = (1, 2, 3, 4, 5)
+
+
+def _calendar_intervals(hour: int, minute: int) -> list[dict[str, int]]:
+    """When the job fires: this time, Monday to Friday only (audit BUG-012).
+
+    Without a weekday restriction both agents fired seven days a week, and a
+    Saturday scan — which re-derives Friday's candidates and dedupes them all
+    away — wrote an empty report that then shadowed Friday's real picks on
+    Monday morning.
+
+    ``launchd.plist(5)`` documents every ``StartCalendarInterval`` field as a
+    single *integer* and the key itself as "a dictionary of integers **or an
+    array of dictionaries** of integers", so Monday-to-Friday is five entries
+    rather than one entry holding a list. A list inside one dictionary is not
+    something launchd promises to parse, and a plist launchd will not parse is
+    a schedule that silently never runs — the exact failure this fix exists to
+    prevent.
+    """
+    return [{"Hour": hour, "Minute": minute, "Weekday": day} for day in TRADING_WEEKDAYS]
+
+
 def build_plist(
     cfg: Config,
     label: str,
@@ -203,7 +226,7 @@ def build_plist(
         "WorkingDirectory": str(working),
         "StandardOutPath": str(logs / f"{command}.out.log"),
         "StandardErrorPath": str(logs / f"{command}.err.log"),
-        "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+        "StartCalendarInterval": _calendar_intervals(hour, minute),
         "RunAtLoad": False,
         "ProcessType": "Background",
         "EnvironmentVariables": {"PATH": f"{binary.parent}:/usr/bin:/bin:/usr/sbin:/sbin"},
@@ -248,9 +271,42 @@ def _domain() -> str:
 
 
 def _already(result: subprocess.CompletedProcess[str]) -> bool:
-    """True when launchctl refused because the job is already in the state we want."""
+    """True when launchctl refused because the job is already in the state we want.
+
+    Exit code 5 used to be on this list as "already loaded". It is not: macOS
+    returns 5 (``EIO``) for genuine bootstrap failures too — SIP/TCC denial, a
+    malformed plist, a missing binary — so "Installed" was printed over real
+    failures and the user found out days later when no alert ever arrived
+    (audit BUG-023). Only 37 and the word "already" stay; every other refusal
+    is now settled by asking launchd whether the job is actually there.
+    """
     text = f"{result.stdout or ''} {result.stderr or ''}".lower()
-    return "already" in text or result.returncode in (5, 37)
+    return "already" in text or result.returncode == 37
+
+
+def _output(result: subprocess.CompletedProcess[str]) -> str:
+    """Whatever launchctl said, as one line, or a stand-in when it said nothing."""
+    return (f"{result.stderr or ''} {result.stdout or ''}").strip() or "no output"
+
+
+def _is_loaded(runner: Runner, label: str) -> tuple[bool, str]:
+    """Ask launchd whether ``label`` is really loaded (audit BUG-023).
+
+    ``launchctl print`` is the authoritative answer in the modern (``bootstrap``)
+    interface; ``launchctl list <label>`` is the legacy one and is tried second
+    so this still works on a Mac where ``print`` is unavailable or refuses.
+
+    Returns:
+        ``(loaded, explanation)`` — the explanation is launchctl's own output
+        and is empty when the job is loaded.
+    """
+    printed = _launchctl(runner, "print", f"{_domain()}/{label}")
+    if printed.returncode == 0:
+        return True, ""
+    listed = _launchctl(runner, "list", label)
+    if listed.returncode == 0:
+        return True, ""
+    return False, _output(printed)
 
 
 def _emit(text: str) -> None:
@@ -259,6 +315,11 @@ def _emit(text: str) -> None:
 
 def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | None = None) -> None:
     """Write both plists and load them into launchd. Idempotent.
+
+    Nothing is called installed until launchd itself says the job is loaded
+    (audit BUG-023): the exit code of ``bootstrap`` alone was not enough
+    evidence, and a schedule that was never really installed is invisible until
+    the night it fails to fire.
 
     Args:
         cfg: the loaded configuration.
@@ -278,23 +339,39 @@ def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | Non
             f"run `make install`. The plists have been written anyway."
         )
 
+    installed = 0
     for label, path in written.items():
+        attempts: list[str] = []
         result = _launchctl(run, "bootstrap", _domain(), str(path))
         if result.returncode != 0 and not _already(result):
+            attempts.append(f"bootstrap: {_output(result)}")
             fallback = _launchctl(run, "load", "-w", str(path))
             if fallback.returncode != 0 and not _already(fallback):
-                _emit(
-                    f"Warning: launchd would not load {label} "
-                    f"({(fallback.stderr or fallback.stdout or '').strip() or 'no output'}). "
-                    f"The plist is at {path}; try `launchctl bootstrap {_domain()} {path}` by hand."
-                )
-                continue
+                attempts.append(f"load: {_output(fallback)}")
+
+        loaded, why = _is_loaded(run, label)
+        if not loaded:
+            attempts.append(f"print: {why}")
+            _emit(
+                f"FAILED to install {label}. launchd does not have the job loaded and said: "
+                f"{'; '.join(attempts)}. The plist is written at {path}; try "
+                f"`launchctl bootstrap {_domain()} {path}` by hand to see the full error. "
+                f"Until this is fixed the schedule will NOT run."
+            )
+            continue
+        installed += 1
         _emit(f"Installed {label}: {path}")
 
-    _emit(
-        f"Scan runs at {cfg.schedule.scan_time} and confirm at {cfg.schedule.confirm_time}, "
-        f"local machine time. Logs: {logs_dir(cfg)}"
-    )
+    if installed:
+        _emit(
+            f"Scan runs at {cfg.schedule.scan_time} and confirm at {cfg.schedule.confirm_time} "
+            f"on weekdays only, local machine time. Logs: {logs_dir(cfg)}"
+        )
+    else:
+        _emit(
+            f"Nothing was installed, so no scan or confirm will run. Fix the errors above and "
+            f"re-run `swing schedule install`. Logs would go to {logs_dir(cfg)}"
+        )
 
 
 def uninstall(cfg: Config, *, runner: Runner | None = None, target_dir: Path | None = None) -> None:
@@ -348,6 +425,6 @@ def status(cfg: Config, *, runner: Runner | None = None, target_dir: Path | None
         else:
             _emit("  state       : NOT loaded")
         _emit(f"  plist       : {path}{'' if path.is_file() else '  (missing)'}")
-        _emit(f"  next fire   : every day at {when} local machine time")
+        _emit(f"  next fire   : Monday to Friday at {when} local machine time")
         _emit(f"  stdout log  : {logs / f'{command}.out.log'}")
         _emit(f"  stderr log  : {logs / f'{command}.err.log'}")

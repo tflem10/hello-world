@@ -14,6 +14,16 @@
 There were no drafted picks left to re-check.
 {% endif %}
 
+{% if skipped %}
+## Left alone ({{ skipped | length }})
+
+| Symbol | Why |
+| --- | --- |
+{% for row in skipped %}
+| **{{ row.symbol }}** | {{ row.reason }} |
+{% endfor %}
+{% endif %}
+
 A pick is invalidated when this morning's price has already run more than one
 ATR past the planned entry: the move happened without us, and chasing it buys a
 worse trade than the one that was tested.

@@ -96,6 +96,9 @@ class FakeSMTP:
     def send_message(self, message: EmailMessage) -> None:
         self.sent.append(message)
 
+    def quit(self) -> None:  # noqa: A003 - smtplib's own name
+        self.closed = True
+
 
 @pytest.fixture
 def smtp(monkeypatch: pytest.MonkeyPatch) -> type[FakeSMTP]:
@@ -332,7 +335,9 @@ def test_one_failing_channel_never_blocks_the_others(
     results = channels.deliver(cfg, note)
 
     assert results == {"ntfy": False, "email": True, "sms_gateway": True, "macos": True}
-    assert len(smtp.sessions) == 2  # email + sms
+    # One session, not two: email and SMS share the connection (audit LEAK-005).
+    assert len(smtp.sessions) == 1
+    assert len(smtp.sessions[0].sent) == 2
     assert runs  # osascript still ran
 
 
@@ -465,3 +470,95 @@ def test_notify_test_sends_a_recognisable_message(tmp_path: Path, posts) -> None
     channels.notify_test(cfg_with(tmp_path, ntfy_topic="t"))
     assert posts[0]["headers"]["Title"] == "swing: test notification"
     assert b"test" in posts[0]["data"]
+
+
+# ---------------------------------------------------------------------------
+# audit regressions
+# ---------------------------------------------------------------------------
+
+
+def test_email_and_sms_share_one_smtp_connection(tmp_path: Path, smtp, note) -> None:
+    """Audit LEAK-005: two connects, two TLS handshakes, two logins per delivery."""
+    cfg = cfg_with(
+        tmp_path,
+        smtp_host="smtp.example.com",
+        smtp_user="me@example.com",
+        smtp_password="hunter2",
+        email_to="me@example.com",
+        sms_gateway_address="5551234567@txt.example.net",
+    )
+    results = channels.deliver(cfg, note)
+
+    assert results == {"email": True, "sms_gateway": True}
+    (session,) = smtp.sessions
+    assert session.started_tls is True
+    assert session.login_args == ("me@example.com", "hunter2")
+    assert [message["To"] for message in session.sent] == [
+        "me@example.com",
+        "5551234567@txt.example.net",
+    ]
+    assert session.closed is True
+
+
+def test_only_one_smtp_channel_still_opens_its_own_connection(tmp_path: Path, smtp, note) -> None:
+    cfg = cfg_with(tmp_path, smtp_host="smtp.example.com", email_to="me@example.com")
+    assert channels.deliver(cfg, note) == {"email": True}
+    assert len(smtp.sessions) == 1
+
+
+def test_a_dead_smtp_server_fails_both_smtp_channels_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, posts, runs, note
+) -> None:
+    """LEAK-005 must not cost the isolation rule that channels.py exists for."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def refuse(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(smtplib, "SMTP", refuse)
+    cfg = build_config(tmp_path, alerts=ALL_CHANNELS)
+
+    assert channels.deliver(cfg, note) == {
+        "ntfy": True,
+        "email": False,
+        "sms_gateway": False,
+        "macos": True,
+    }
+
+
+def test_a_rejected_email_does_not_stop_the_sms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, smtp, note
+) -> None:
+    def reject_the_first(self, message):
+        if message["To"] == "me@example.com":
+            raise smtplib.SMTPRecipientsRefused({"me@example.com": (550, b"no such user")})
+        self.sent.append(message)
+
+    monkeypatch.setattr(FakeSMTP, "send_message", reject_the_first)
+    cfg = cfg_with(
+        tmp_path,
+        smtp_host="smtp.example.com",
+        email_to="me@example.com",
+        sms_gateway_address="5551234567@txt.example.net",
+    )
+
+    assert channels.deliver(cfg, note) == {"email": False, "sms_gateway": True}
+    assert [message["To"] for message in smtp.sessions[0].sent] == ["5551234567@txt.example.net"]
+
+
+def test_ntfy_titles_collapse_embedded_whitespace(tmp_path: Path, posts) -> None:
+    """Audit BUG-047: an embedded newline reaches requests, which rejects it."""
+    cfg = cfg_with(tmp_path, ntfy_topic="t")
+    hostile = channels.Notification(title="SWING 2026-08-18\n2 picks\r\n\tand a tab", text="body")
+    assert channels.send_ntfy(cfg, hostile) is True
+
+    title = posts[0]["headers"]["Title"]
+    assert title == "SWING 2026-08-18 2 picks and a tab"
+    assert "\n" not in title and "\r" not in title and "\t" not in title
+
+
+def test_an_entirely_unprintable_title_falls_back_to_a_usable_one(tmp_path: Path, posts) -> None:
+    channels.send_ntfy(
+        cfg_with(tmp_path, ntfy_topic="t"), channels.Notification(title="✅\n✅", text="body")
+    )
+    assert posts[0]["headers"]["Title"] == "swing"

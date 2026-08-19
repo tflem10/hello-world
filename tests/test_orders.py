@@ -285,3 +285,87 @@ def test_validator_rejects_a_buying_child(cfg) -> None:
 def test_validator_rejects_nonsense(cfg) -> None:
     assert orders.validate_order_draft("not an order")
     assert orders.validate_order_draft({})
+
+
+# ---------------------------------------------------------------------------
+# audit regressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "phrase"),
+    [
+        ("entry", None, "entry price"),
+        ("entry", "forty-five", "entry price"),
+        ("stop", None, "stop price"),
+        ("stop", object(), "stop price"),
+        ("atr", None, "ATR"),
+        ("atr", "wide", "ATR"),
+        ("atr", float("nan"), "ATR"),
+        ("shares", None, "share count"),
+        ("shares", "twelve", "share count"),
+    ],
+)
+def test_a_malformed_pick_field_is_refused_inside_the_contract(cfg, field, value, phrase) -> None:
+    """Audit BUG-046: these raised a bare TypeError from outside OrderDraftError.
+
+    The drafting loop in `run_scan` catches `OrderDraftError` per pick; anything
+    else ended the whole report, so one hand-edited record cost the night.
+    """
+    pick = make_pick(**{field: value})
+    with pytest.raises(orders.OrderDraftError, match=phrase):
+        orders.draft_orders(pick, cfg)
+
+
+def test_every_refusal_is_the_documented_exception(cfg) -> None:
+    """The contract is `OrderDraftError` or a draft — never anything else."""
+    for pick in (
+        make_pick(entry=None),
+        make_pick(stop="x"),
+        make_pick(atr=None),
+        make_pick(shares=None),
+        make_pick(entry=float("inf")),
+    ):
+        with pytest.raises(orders.OrderDraftError):
+            orders.draft_orders(pick, cfg)
+
+
+def test_sub_dollar_prices_carry_four_decimals(cfg) -> None:
+    """Audit BUG-047: 2dp hard-coded, but Schwab quotes sub-$1 in $0.0001 steps."""
+    pick = make_pick(symbol="CHEAP", entry=0.8642, stop=0.7531, shares=100, atr=0.0455)
+    draft = orders.draft_orders(pick, cfg)
+
+    assert draft["oto_stop"]["price"] == "0.8642"
+    assert draft["oto_stop"]["childOrderStrategies"][0]["stopPrice"] == "0.7531"
+    # 0.7531 * 0.995 == 0.74933..., which two decimals would round to 0.75 — a
+    # limit *above* the trigger, i.e. an exit that cannot fill.
+    limit = draft["oto_stop_limit"]["childOrderStrategies"][0]["price"]
+    assert limit == "0.7493"
+    assert float(limit) < float(draft["oto_stop_limit"]["childOrderStrategies"][0]["stopPrice"])
+    assert orders.validate_order_draft(draft) == []
+
+
+def test_dollar_and_above_prices_still_carry_two_decimals(cfg) -> None:
+    draft = orders.draft_orders(make_pick(entry=1.00, stop=0.90, shares=10, atr=0.05), cfg)
+    assert draft["oto_stop"]["price"] == "1.00"
+    # The stop is below $1, so it takes the finer increment.
+    assert draft["oto_stop"]["childOrderStrategies"][0]["stopPrice"] == "0.9000"
+    assert orders.validate_order_draft(draft) == []
+
+
+def test_a_sub_dollar_trailing_distance_survives_rounding(cfg) -> None:
+    """A 2dp round turned a small ATR trail into $0.00 and refused the draft."""
+    pick = make_pick(symbol="CHEAP", entry=0.9500, stop=0.8000, shares=50, atr=0.0011)
+    child = orders.draft_orders(pick, cfg)["trailing_stop"]["childOrderStrategies"][0]
+    assert child["stopPriceOffset"] == pytest.approx(
+        round(cfg.strategy.chandelier_mult * 0.0011, 4)
+    )
+    assert child["stopPriceOffset"] > 0
+
+
+def test_the_validator_accepts_both_decimal_conventions() -> None:
+    assert orders._PRICE_RE.match("45.10")
+    assert orders._PRICE_RE.match("0.7493")
+    assert not orders._PRICE_RE.match("45.1")
+    assert not orders._PRICE_RE.match("45.100")
+    assert not orders._PRICE_RE.match("45")

@@ -25,7 +25,11 @@ reference (August 2026):
 * ``duration`` is ``GOOD_TILL_CANCEL`` — Schwab does not accept ``"GTC"``.
 * ``price`` and ``stopPrice`` are **strings**: "the Schwab API expects price as
   a string, whereas schwab-py allows setting prices as a floating point number".
-  Two decimal places for anything at or above $1.
+  Two decimal places at or above $1, and **four** below it — sub-dollar
+  instruments quote and trade in $0.0001 increments, and rounding one of those
+  to two places moves the order by up to half a cent (audit BUG-047). Nothing
+  this system picks is that cheap while ``liquidity.min_price`` is $5, which is
+  precisely why the case has to be handled here rather than discovered later.
 * ``stopPriceOffset`` is a **number**, not a string — it is a distance, not a
   price, and both the schwab-py builder and the published order schema treat it
   numerically.
@@ -69,8 +73,11 @@ CHILD_STRATEGY = "SINGLE"
 
 _CHILD_ORDER_TYPES = ("STOP", "STOP_LIMIT", "TRAILING_STOP")
 
-#: Schwab price strings: whole dollars and exactly two decimals.
-_PRICE_RE = re.compile(r"^\d+\.\d{2}$")
+#: Below this price Schwab quotes four decimals rather than two.
+SUB_DOLLAR = 1.0
+
+#: Schwab price strings: whole dollars and either two or four decimals.
+_PRICE_RE = re.compile(r"^\d+\.(\d{2}|\d{4})$")
 
 
 class OrderDraftError(ValueError):
@@ -86,20 +93,57 @@ class OrderDraftError(ValueError):
 # --------------------------------------------------------------------------
 
 
-def _money(value: float, *, symbol: str, what: str) -> str:
-    """Format a dollar price the way Schwab wants it: a two-decimal string."""
+def _as_float(value: Any, *, symbol: str, what: str) -> float:
+    """Read one number off a pick, refusing inside the documented contract.
+
+    Every number this module takes from a ``PickRecord`` comes through here.
+    The three raw ``float(...)`` calls that used to sit in :func:`draft_orders`
+    raised a bare ``TypeError`` from outside the ``OrderDraftError`` contract,
+    so one hand-edited record took down the whole scan's drafting loop rather
+    than its own pick (audit BUG-046).
+    """
     try:
-        price = float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise OrderDraftError(
-            f"Cannot draft an order for {symbol}: the {what} is {value!r}, which is not a price."
+            f"Cannot draft an order for {symbol}: the {what} is {value!r}, which is not a number."
         ) from exc
-    if not math.isfinite(price) or price <= 0:
+    if not math.isfinite(number):
+        raise OrderDraftError(
+            f"Cannot draft an order for {symbol}: the {what} is {number}, which is not a usable "
+            f"number."
+        )
+    return number
+
+
+def _as_shares(value: Any, *, symbol: str) -> int:
+    """Read the share count off a pick, refusing inside the contract (audit BUG-046)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise OrderDraftError(
+            f"Cannot draft an order for {symbol}: the share count is {value!r}, which is not a "
+            f"whole number of shares."
+        ) from exc
+
+
+def _round_price(value: float) -> float:
+    """Round to the increment Schwab quotes at: a cent, or a hundredth of one under $1."""
+    return round(value, 4) if abs(value) < SUB_DOLLAR else round(value, 2)
+
+
+def _money(value: float, *, symbol: str, what: str) -> str:
+    """Format a dollar price the way Schwab wants it: a fixed-decimal string.
+
+    Two decimals at or above $1, four below (audit BUG-047).
+    """
+    price = _as_float(value, symbol=symbol, what=what)
+    if price <= 0:
         raise OrderDraftError(
             f"Cannot draft an order for {symbol}: the {what} is {price}, but a price has to be "
             f"a positive number of dollars."
         )
-    return f"{price:.2f}"
+    return f"{price:.4f}" if price < SUB_DOLLAR else f"{price:.2f}"
 
 
 def _leg(symbol: str, instruction: str, quantity: int) -> dict[str, Any]:
@@ -136,7 +180,7 @@ def _stop_child(symbol: str, shares: int, stop: str) -> dict[str, Any]:
 
 def _stop_limit_child(symbol: str, shares: int, stop: float, stop_str: str) -> dict[str, Any]:
     limit = _money(
-        round(stop * (1.0 - STOP_LIMIT_SLIPPAGE), 2), symbol=symbol, what="stop-limit price"
+        _round_price(stop * (1.0 - STOP_LIMIT_SLIPPAGE)), symbol=symbol, what="stop-limit price"
     )
     return {
         "orderType": "STOP_LIMIT",
@@ -184,15 +228,15 @@ def draft_orders(pick: PickRecord, cfg: Config) -> dict[str, dict[str, Any]]:
     if not symbol:
         raise OrderDraftError("Cannot draft an order: the pick has no ticker symbol.")
 
-    shares = int(pick.shares)
+    shares = _as_shares(pick.shares, symbol=symbol)
     if shares < 1:
         raise OrderDraftError(
             f"Cannot draft an order for {symbol}: the position sized to {shares} shares, so it "
             f"is a watch-list idea rather than a tradable pick."
         )
 
-    entry_price = float(pick.entry)
-    stop_price = float(pick.stop)
+    entry_price = _as_float(pick.entry, symbol=symbol, what="entry price")
+    stop_price = _as_float(pick.stop, symbol=symbol, what="stop price")
     entry = _money(entry_price, symbol=symbol, what="entry price")
     stop = _money(stop_price, symbol=symbol, what="stop price")
     if stop_price >= entry_price:
@@ -201,13 +245,13 @@ def draft_orders(pick: PickRecord, cfg: Config) -> dict[str, dict[str, Any]]:
             f"entry (${entry_price:.2f}), so the order would sell the moment it filled."
         )
 
-    atr_value = float(pick.atr)
-    if not math.isfinite(atr_value) or atr_value <= 0:
+    atr_value = _as_float(pick.atr, symbol=symbol, what="ATR")
+    if atr_value <= 0:
         raise OrderDraftError(
             f"Cannot draft a trailing stop for {symbol}: the ATR is {pick.atr!r}, so there is no "
             f"distance to trail by. Re-run the scan once the price history is complete."
         )
-    offset = round(cfg.strategy.chandelier_mult * atr_value, 2)
+    offset = _round_price(cfg.strategy.chandelier_mult * atr_value)
     if offset <= 0:
         raise OrderDraftError(
             f"Cannot draft a trailing stop for {symbol}: the trailing distance rounds to "
@@ -240,7 +284,8 @@ def _check_price_string(
         return
     if not _PRICE_RE.match(value):
         problems.append(
-            f"{where}: {field} must be a price with exactly two decimals, but it is {value!r}."
+            f"{where}: {field} must be a price with exactly two decimals (or four below $1), "
+            f"but it is {value!r}."
         )
         return
     if positive and float(value) <= 0:
