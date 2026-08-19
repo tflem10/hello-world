@@ -18,9 +18,12 @@ import pandas as pd
 import pytest
 
 from swing.indicators import atr
+from swing.strategy import scoring
 from swing.strategy.scoring import (
+    MIN_ATR_PCT,
     MIN_HISTORY_ROWS,
     RANKING_COLUMNS,
+    SCORE_ATR_WINDOW,
     momentum_score,
     rank_candidates,
 )
@@ -333,4 +336,251 @@ def test_rank_candidates_is_deterministic(cfg_factory) -> None:
     )
     pd.testing.assert_frame_equal(
         rank_candidates(forward, asof, cfg), rank_candidates(forward, asof, cfg)
+    )
+
+
+# ---------------------------------------------------------------------------
+# the ATR% floor and the finiteness filter (audit BUG-003)
+# ---------------------------------------------------------------------------
+
+
+def frozen_quote_bars(
+    n: int = 320, pop_at: int = 200, base: float = 100.0, deal: float = 200.0
+) -> pd.DataFrame:
+    """An uptrend, a takeover pop, then a quote frozen at the deal price.
+
+    This is the shape the audit reproduced: after ``pop_at`` the high, low and
+    close are all the deal price, so every true range is exactly zero and
+    Wilder's ATR decays by 13/14 a bar while the trailing 126-day return stays
+    large. 119 frozen sessions take ATR from ~3.0 to 0.00094 — 0.00047% of
+    price — and the old score climbed to **47,750** against 11.56 for the
+    healthy trend below.
+    """
+    close = base * 1.002 ** np.arange(n, dtype=float)
+    close[pop_at:] = deal
+    high = close * 1.01
+    low = close * 0.99
+    high[pop_at:] = deal
+    low[pop_at:] = deal
+    return pd.DataFrame(
+        {
+            "open": close.copy(),
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=pd.bdate_range(start="2018-01-02", periods=n),
+    )
+
+
+def healthy_trend_bars(n: int = 320, base: float = 100.0) -> pd.DataFrame:
+    """The same uptrend with the band left alive all the way through: ATR ~2% of price."""
+    close = base * 1.002 ** np.arange(n, dtype=float)
+    return pd.DataFrame(
+        {
+            "open": close.copy(),
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=pd.bdate_range(start="2018-01-02", periods=n),
+    )
+
+
+def test_a_frozen_quote_scores_nan_instead_of_a_huge_number(cfg_factory) -> None:
+    """The BUG-003 fixture: ATR% under the floor makes the score undefined."""
+    cfg = cfg_factory()
+    bars = frozen_quote_bars()
+
+    atr_pct = atr(bars, SCORE_ATR_WINDOW).iloc[-1] / bars["close"].iloc[-1] * 100.0
+    assert atr_pct < MIN_ATR_PCT, "fixture no longer reaches the floor"
+
+    assert np.isnan(momentum_score(bars, cfg).iloc[-1])
+
+
+def test_a_frozen_quote_is_excluded_from_the_ranking(cfg_factory) -> None:
+    """It used to rank #1 with a score of 47,750 and consume a real position slot."""
+    cfg = cfg_factory()
+    bars_by_symbol = {"HEALTHY": healthy_trend_bars(), "PINNED": frozen_quote_bars()}
+    asof = bars_by_symbol["PINNED"].index[-1]
+
+    table = rank_candidates(bars_by_symbol, asof, cfg)
+
+    assert list(table.index) == ["HEALTHY"]
+    assert table.loc["HEALTHY", "rank"] == 1
+
+
+def test_the_floor_only_removes_names_that_have_stopped_moving(cfg_factory) -> None:
+    """A merely quiet name — ATR% above the floor — still scores and still ranks.
+
+    Forty frozen sessions are not enough to reach the floor. The rule is a
+    divisor floor, not a ban on low volatility.
+    """
+    cfg = cfg_factory()
+    quiet = frozen_quote_bars(n=300, pop_at=260)
+    asof = quiet.index[-1]
+
+    atr_pct = atr(quiet, SCORE_ATR_WINDOW).iloc[-1] / quiet["close"].iloc[-1] * 100.0
+    assert atr_pct > MIN_ATR_PCT, "fixture is meant to stay above the floor"
+
+    table = rank_candidates({"QUIET": quiet}, asof, cfg)
+
+    assert list(table.index) == ["QUIET"]
+    assert np.isfinite(table.loc["QUIET", "score"])
+
+
+def test_the_floor_is_inclusive_at_exactly_min_atr_pct(cfg_factory, monkeypatch) -> None:
+    """``atr_pct >= MIN_ATR_PCT`` keeps the boundary value and drops the next float down.
+
+    Moving the constant rather than the fixture is what makes this exact: the
+    band fixture's ATR% is a float nobody can write as a literal, so the test
+    compares against that float itself.
+    """
+    cfg = cfg_factory()
+    bars = band_bars(mid_path())
+    atr_pct = float(atr(bars, SCORE_ATR_WINDOW).iloc[-1] / bars["close"].iloc[-1] * 100.0)
+
+    monkeypatch.setattr(scoring, "MIN_ATR_PCT", atr_pct)
+    assert np.isfinite(momentum_score(bars, cfg).iloc[-1])
+
+    monkeypatch.setattr(scoring, "MIN_ATR_PCT", np.nextafter(atr_pct, np.inf))
+    assert np.isnan(momentum_score(bars, cfg).iloc[-1])
+
+
+def test_min_atr_pct_is_the_documented_constant() -> None:
+    """Five basis points of daily range, per the BUG-003 fix and the module docstring."""
+    assert MIN_ATR_PCT == 0.05
+
+
+def stale_zero_close_bars() -> pd.DataFrame:
+    """A vendor zero 131 bars back — ``skip + 126`` — divides the long leg by nothing.
+
+    The 126-day return is then ``+inf``, and so is the score: the exact value
+    ``pd.isna`` says is present and ``np.isfinite`` says is not.
+    """
+    close = step_close(300, 200, after=120.0)
+    close[299 - 131] = 0.0
+    return band_bars(close)
+
+
+def test_an_infinite_score_is_not_a_valid_score(cfg_factory) -> None:
+    """``pd.isna(inf)`` is False, so the old filter let it through — and it sorted first."""
+    cfg = cfg_factory()
+    bars = stale_zero_close_bars()
+
+    score = momentum_score(bars, cfg).iloc[-1]
+    assert np.isposinf(score), "fixture no longer produces an infinite score"
+    assert not pd.isna(score), "this is exactly what the old pd.isna filter missed"
+
+    table = rank_candidates({"STALE": bars, "NORMAL": band_bars(mid_path())}, bars.index[299], cfg)
+
+    assert list(table.index) == ["NORMAL"]
+
+
+def test_scanner_exclusion_agrees_with_the_engine_ordering_on_non_finite_scores(
+    cfg_factory,
+) -> None:
+    """The shared-rules contract: a non-finite score never wins, in either consumer.
+
+    ``rank_candidates`` drops it; the backtest engine keeps the candidate but
+    sorts it last (``swing.backtest.engine._rank_key``: "Non-finite scores sort
+    last", encoded here as the leading ``0 if finite else 1`` key). Before the
+    fix the two disagreed in the worst possible direction — the scanner ranked
+    an infinite score **first** while the engine ranked it last (audit BUG-003).
+    """
+    cfg = cfg_factory()
+    bars_by_symbol = {"STALE": stale_zero_close_bars(), "NORMAL": band_bars(mid_path())}
+    asof = bars_by_symbol["NORMAL"].index[299]
+
+    scores = {
+        symbol: float(momentum_score(bars, cfg).iloc[-1]) for symbol, bars in bars_by_symbol.items()
+    }
+    engine_order = sorted(
+        scores,
+        key=lambda symbol: (
+            0 if np.isfinite(scores[symbol]) else 1,
+            -scores[symbol] if np.isfinite(scores[symbol]) else 0.0,
+            symbol,
+        ),
+    )
+    scanner_order = list(rank_candidates(bars_by_symbol, asof, cfg).index)
+
+    assert engine_order[0] == scanner_order[0] == "NORMAL"
+    assert "STALE" not in scanner_order  # the scanner drops what the engine sorts last
+
+
+# ---------------------------------------------------------------------------
+# ATR is computed once per symbol (audit PERF-009)
+# ---------------------------------------------------------------------------
+
+
+def test_rank_candidates_computes_atr_once_per_symbol(cfg_factory, monkeypatch) -> None:
+    """The score divides by ATR and the table reports it; that is one call, not two."""
+    cfg = cfg_factory()
+    calls: list[int] = []
+    real_atr = scoring.atr
+
+    def counting_atr(bars: pd.DataFrame, n: int) -> pd.Series:
+        calls.append(n)
+        return real_atr(bars, n)
+
+    monkeypatch.setattr(scoring, "atr", counting_atr)
+    table = rank_candidates(
+        {"AAA": band_bars(mid_path()), "BBB": band_bars(high_path())},
+        band_bars(mid_path()).index[299],
+        cfg,
+    )
+
+    assert len(table) == 2
+    assert calls == [SCORE_ATR_WINDOW, SCORE_ATR_WINDOW]
+
+
+def test_a_supplied_atr_series_gives_the_same_score(cfg_factory) -> None:
+    """The optimisation hook must be an optimisation, not a second code path."""
+    cfg = cfg_factory()
+    bars = band_bars(mid_path())
+
+    pd.testing.assert_series_equal(
+        momentum_score(bars, cfg),
+        momentum_score(bars, cfg, atr_series=atr(bars, SCORE_ATR_WINDOW)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# the score's ATR window is a constant, not the config knob (audit DEBT-010)
+# ---------------------------------------------------------------------------
+
+
+def test_the_score_window_constants_are_the_documented_values() -> None:
+    """``docs/strategy-spec.md`` names both numbers; a doc/code drift is what DEBT-010 is."""
+    assert SCORE_ATR_WINDOW == 14
+    assert MIN_HISTORY_ROWS == 260
+
+
+@pytest.mark.parametrize("atr_window", [2, 14, 30, 100])
+def test_the_score_ignores_strategy_atr_window(cfg_factory, atr_window: int) -> None:
+    """``strategy.atr_window`` sizes stops; the ranking uses SCORE_ATR_WINDOW alone.
+
+    A maintainer trusting the spec's old wording would have wired the knob in
+    here and silently rescaled every score in the system.
+    """
+    bars = band_bars(mid_path())
+    baseline = momentum_score(bars, cfg_factory(strategy={"atr_window": 14}))
+
+    pd.testing.assert_series_equal(
+        momentum_score(bars, cfg_factory(strategy={"atr_window": atr_window})), baseline
+    )
+
+
+@pytest.mark.parametrize("atr_window", [2, 30, 100])
+def test_the_ranking_ignores_strategy_atr_window(cfg_factory, atr_window: int) -> None:
+    """Same table, whatever the stop-sizing window is set to — including the atr column."""
+    bars_by_symbol = {"AAA": band_bars(spiked(mid_path())), "BBB": band_bars(high_path())}
+    asof = bars_by_symbol["AAA"].index[299]
+
+    pd.testing.assert_frame_equal(
+        rank_candidates(bars_by_symbol, asof, cfg_factory(strategy={"atr_window": atr_window})),
+        rank_candidates(bars_by_symbol, asof, cfg_factory(strategy={"atr_window": 14})),
     )

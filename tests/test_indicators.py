@@ -910,6 +910,100 @@ def test_indicators_accept_integer_volume_columns() -> None:
 
 
 # ---------------------------------------------------------------------------
+# gaps in the input: a missing bar must be visible (audit BUG-031)
+# ---------------------------------------------------------------------------
+
+
+def gapped_series(n: int = 12, gap_at: int = 7) -> pd.Series:
+    """``1.0 .. n`` with one interior value missing."""
+    values = [float(i + 1) for i in range(n)]
+    values[gap_at] = float("nan")
+    return pd.Series(values)
+
+
+def test_a_gap_inside_the_seed_window_pushes_the_seed_to_a_complete_one() -> None:
+    """The seed must average ``n`` observations, not ``n`` minus the missing ones.
+
+    With a gap at index 2 and a 5-bar span, the first complete window is
+    ``[4, 5, 6, 7, 8]`` at indices 3..7, so the seed is 6.0 on index 7. The old
+    code seeded on index 4 from ``mean([1, 2, NaN, 4, 5]) == 3.0`` — four
+    observations wearing a five-bar label, which is how one bad vendor bar used
+    to rescale ATR for the rest of the series (audit BUG-031).
+    """
+    smoothed = ema(gapped_series(gap_at=2), 5)
+
+    assert smoothed.iloc[:7].isna().all()
+    assert smoothed.iloc[7] == pytest.approx(6.0)
+    # alpha = 2/6: 6.0 + (9 - 6.0)/3 = 7.0
+    assert smoothed.iloc[8] == pytest.approx(7.0)
+
+
+def test_a_gap_after_the_seed_is_masked_rather_than_smoothed_over() -> None:
+    """``ewm`` carries the previous mean across a NaN; the mask puts the hole back.
+
+    Before the fix this series came back with no NaN at all after the seed —
+    a silently rescaled line, which is exactly what moves a stop without anyone
+    noticing (audit BUG-031).
+    """
+    smoothed = ema(gapped_series(gap_at=7), 5)
+
+    assert math.isnan(smoothed.iloc[7])
+    # seed 3.0 on index 4, then alpha = 1/3: 4.0, 5.0 — unchanged by the later gap
+    assert smoothed.iloc[6] == pytest.approx(5.0)
+    assert not math.isnan(smoothed.iloc[8])  # the recursion resumes after the hole
+
+
+def test_a_gap_does_not_disturb_anything_before_it() -> None:
+    """Values ahead of the gap are bit-identical to the ungapped series."""
+    clean = pd.Series([float(i + 1) for i in range(12)])
+    gapped = clean.copy()
+    gapped.iloc[9] = float("nan")
+
+    pd.testing.assert_series_equal(ema(gapped, 5).iloc[:9], ema(clean, 5).iloc[:9])
+
+
+def test_a_partial_nan_bar_leaves_a_nan_in_the_atr() -> None:
+    """The realistic case: a vendor ships one row with a missing close.
+
+    True range on the *next* bar needs that close, so the ATR goes NaN there.
+    The level after the gap does move — smoothing across a hole cannot be
+    undone — but it is no longer a silent move, which is the whole complaint.
+    """
+    clean = fixed_bars()
+    gapped = clean.copy()
+    gapped.loc[gapped.index[25], "close"] = np.nan
+
+    clean_atr = atr(clean, 14)
+    gapped_atr = atr(gapped, 14)
+
+    assert math.isnan(gapped_atr.iloc[26])
+    assert not math.isnan(clean_atr.iloc[26])
+    pd.testing.assert_series_equal(gapped_atr.iloc[:26], clean_atr.iloc[:26])
+    assert gapped_atr.iloc[27] != pytest.approx(clean_atr.iloc[27])
+
+
+@pytest.mark.parametrize(
+    "name,fn",
+    [
+        ("ema", lambda b: ema(b["close"], 14)),
+        ("rsi", lambda b: rsi(b["close"], 14)),
+        ("atr", lambda b: atr(b, 14)),
+        ("adx", lambda b: adx(b, 14)),
+    ],
+)
+def test_every_smoothed_indicator_reports_an_interior_gap(
+    name: str, fn: Callable[[pd.DataFrame], pd.Series]
+) -> None:
+    """No member of the Wilder/EMA family may return a gapless line over gapped data."""
+    bars = make_bars(200)
+    bars.loc[bars.index[120], ["open", "high", "low", "close"]] = np.nan
+
+    result = fn(bars)
+
+    assert result.iloc[100:140].isna().any(), f"{name} smoothed straight over the gap"
+
+
+# ---------------------------------------------------------------------------
 # input validation
 # ---------------------------------------------------------------------------
 

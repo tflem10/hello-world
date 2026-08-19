@@ -20,6 +20,7 @@ Window constants that the config deliberately does not expose:
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,7 +29,7 @@ import pandas as pd
 from swing.indicators import adx, atr, donchian_high, rsi, sma
 
 if TYPE_CHECKING:  # pragma: no cover - imports used only by the type checker
-    import datetime as dt
+    from collections.abc import Sequence
 
     from swing.config import Config
     from swing.data.provider import Fundamentals
@@ -136,7 +137,16 @@ def trend_template(bars: pd.DataFrame, cfg: Config, *, is_etf: bool) -> pd.Serie
     slow_rising = slow > slow.shift(strategy.sma_slow_rising_days)
     above_low = close >= strategy.min_above_low_mult * rolling_low_52w(close)
     near_high = close >= (1.0 - strategy.max_below_high_pct / 100.0) * rolling_high_52w(close)
-    trending = adx(bars, ADX_WINDOW) >= strategy.adx_min
+
+    if strategy.adx_min <= 0.0:
+        # ADX is ~80% of the cost of this function and cannot change its answer
+        # when the floor is at or below zero: `adx >= adx_min` is then only ever
+        # False where ADX is NaN, i.e. bars 0..2*14-2, and those bars are
+        # already False on `above_low`/`near_high`, whose 252-bar warm-up
+        # strictly contains them. So skip it (audit PERF-010).
+        trending = pd.Series(True, index=bars.index, dtype=bool)
+    else:
+        trending = adx(bars, ADX_WINDOW) >= strategy.adx_min
 
     return _as_bool(stacked & slow_rising & above_low & near_high & trending, "trend_template")
 
@@ -167,7 +177,12 @@ def entry_signal(bars: pd.DataFrame, cfg: Config) -> pd.Series:
 
     prior_high = donchian_high(bars, strategy.donchian_window)
     proximity = 1.0 - strategy.breakout_proximity_pct / 100.0
-    breakout = (close > prior_high) | (close >= proximity * prior_high)
+    # One comparison, not two. `close > prior_high` was a disjunct here and is
+    # dead for every legal config: breakout_proximity_pct is capped at 25, so
+    # `proximity` is in [0.75, 1.0], prices are non-negative, and therefore
+    # `proximity * prior_high <= prior_high`. Anything clearing the level
+    # outright clears the band as well (audit DEBT-012).
+    breakout = close >= proximity * prior_high
     average_volume = volume.rolling(
         strategy.volume_avg_window, min_periods=strategy.volume_avg_window
     ).mean()
@@ -207,14 +222,50 @@ def chandelier_stop(bars: pd.DataFrame, cfg: Config) -> pd.Series:
     return stop.astype(float).rename("chandelier_stop")
 
 
-def earnings_blackout(index: pd.DatetimeIndex, earnings: dt.date | None, cfg: Config) -> pd.Series:
-    """True (entries blocked) on each date from ``earnings_blackout_days`` before the
-    earnings date through the earnings date itself; all False when the date is unknown.
+def _announcement_days(earnings: dt.date | Sequence[dt.date] | None) -> list[pd.Timestamp]:
+    """Normalise the ``earnings`` argument to a list of tz-naive midnight Timestamps."""
+    if earnings is None:
+        return []
+    if isinstance(earnings, str):
+        raise ValueError(
+            f"The earnings argument must be a date or a sequence of dates, but it is the "
+            f"string {earnings!r}. A string would be read one character at a time here, so "
+            f"parse it into a datetime.date before calling."
+        )
+    # datetime (and pd.Timestamp) subclass date, so a single announcement of any
+    # of those types is one date, never an iterable of them.
+    announcements: Sequence[dt.date] = [earnings] if isinstance(earnings, dt.date) else earnings
+
+    stamps: list[pd.Timestamp] = []
+    for announcement in announcements:
+        stamp = pd.Timestamp(announcement)
+        if stamp.tz is not None:
+            stamp = stamp.tz_localize(None)
+        stamps.append(stamp.normalize())
+    return stamps
+
+
+def earnings_blackout(
+    index: pd.DatetimeIndex,
+    earnings: dt.date | Sequence[dt.date] | None,
+    cfg: Config,
+) -> pd.Series:
+    """True (entries blocked) on each date from ``earnings_blackout_days`` before an
+    earnings date through that earnings date itself; all False when nothing is known.
+
+    Comparisons happen on tz-naive calendar days. The index is normalised
+    defensively before the subtraction, because a tz-aware index minus a naive
+    timestamp raises — and the scanner catches broadly enough that the raise
+    would have shown up as "no blackout", permitting an entry inside one
+    (audit BUG-045). The returned Series keeps the caller's original index,
+    tz and all.
 
     Args:
         index: the dates to evaluate.
-        earnings: the next scheduled earnings date, or None when unknown. An
-            unknown date blocks nothing here — callers tag the pick as
+        earnings: one announcement date, a sequence of them (past and future —
+            the backtest feeds a whole history), or None when unknown. A day is
+            blocked when it falls in the window of *any* of them. None or an
+            empty sequence blocks nothing here: callers tag the pick as
             "earnings unknown" instead of silently skipping it.
         cfg: the loaded configuration.
 
@@ -222,11 +273,16 @@ def earnings_blackout(index: pd.DatetimeIndex, earnings: dt.date | None, cfg: Co
         Boolean Series aligned to ``index``.
     """
     dates = pd.DatetimeIndex(index)
-    if earnings is None:
-        return pd.Series(False, index=dates, name="earnings_blackout", dtype=bool)
+    announcements = _announcement_days(earnings)
 
-    days_until = np.asarray((pd.Timestamp(earnings).normalize() - dates.normalize()).days)
-    blocked = (days_until >= 0) & (days_until <= cfg.strategy.earnings_blackout_days)
+    calendar = dates.tz_localize(None) if dates.tz is not None else dates
+    calendar = calendar.normalize()
+
+    blocked = np.zeros(len(calendar), dtype=bool)
+    for announcement in announcements:
+        days_until = np.asarray((announcement - calendar).days)
+        blocked |= (days_until >= 0) & (days_until <= cfg.strategy.earnings_blackout_days)
+
     return pd.Series(blocked, index=dates, name="earnings_blackout", dtype=bool)
 
 

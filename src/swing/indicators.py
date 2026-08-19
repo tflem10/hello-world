@@ -24,9 +24,11 @@ simple average of the first ``n`` values — the seeding TA-Lib uses, and the on
 that makes the first published value hand-checkable.
 
 Every function returns a ``float64`` Series aligned to the input index, named
-after the indicator, with ``NaN`` through the warm-up period. Nothing here looks
-at the clock, draws a random number, or loops over rows, so the same input always
-produces bit-identical output.
+after the indicator, with ``NaN`` through the warm-up period — and, for the
+smoothed families, ``NaN`` on any bar whose input was missing, so a gap in the
+data is always visible as a gap in the indicator (audit BUG-031). Nothing here
+looks at the clock, draws a random number, or loops over rows, so the same input
+always produces bit-identical output.
 """
 
 from __future__ import annotations
@@ -95,30 +97,51 @@ def _columns(bars: pd.DataFrame, needed: tuple[str, ...], what: str) -> tuple[pd
     return tuple(_as_float_series(bars[c], f"The {c!r} column") for c in needed)
 
 
+def _first_complete_window(valid: np.ndarray, n: int) -> int | None:
+    """Start index of the first run of ``n`` consecutive true flags, or None.
+
+    Used to place a smoothing seed: a window that straddles a gap would average
+    fewer than ``n`` observations while wearing an ``n``-bar label.
+    """
+    counts = np.concatenate(([0], np.cumsum(valid, dtype=np.int64)))
+    if len(counts) <= n:
+        return None
+    complete = np.flatnonzero(counts[n:] - counts[:-n] == n)
+    return int(complete[0]) if complete.size else None
+
+
 def _seeded_ewm(values: pd.Series, n: int, alpha: float) -> pd.Series:
     """Exponential mean seeded with the simple average of the first ``n`` observations.
 
-    The seed is placed on the bar where the simple average first exists (the
-    ``n``-th observation that is not NaN); everything before it stays NaN, and
-    everything after it is folded in recursively by
+    The seed is placed on the last bar of the first *complete* ``n``-bar window
+    — ``n`` consecutive observations with no gap in them; everything before it
+    stays NaN, and everything after it is folded in recursively by
     ``avg_t = avg_{t-1} + alpha * (x_t - avg_{t-1})``. pandas' ``ewm`` with
     ``adjust=False`` starts its recursion at the first non-NaN value, so handing
     it a series that is NaN up to the seed reproduces the textbook tables exactly
     while staying fully vectorized.
+
+    Two things guard against a missing bar being smoothed away silently (audit
+    BUG-031). The seed window must be complete, because ``mean()`` skips NaN and
+    would otherwise average, say, 13 true ranges and call the answer a 14-bar
+    average. And the output is re-masked wherever the input was missing, because
+    ``ewm`` carries the previous mean forward across a NaN and would otherwise
+    return a rescaled series with no NaN in it at all. A bar after a gap resumes
+    the recursion with pandas' gap-aware weighting; the gap itself is now
+    visible, which is what stops a bad vendor bar from quietly moving stops.
     """
-    valid = values.notna().to_numpy()
-    if not valid.any():
+    numbers = values.astype("float64")
+    valid = numbers.notna().to_numpy()
+
+    start = _first_complete_window(valid, n)
+    if start is None:
         return pd.Series(np.nan, index=values.index, dtype="float64")
 
-    start = int(np.argmax(valid))
     seed_pos = start + n - 1
-    if seed_pos >= len(values):
-        return pd.Series(np.nan, index=values.index, dtype="float64")
-
-    seeded = values.astype("float64").copy()
+    seeded = numbers.copy()
     seeded.iloc[:seed_pos] = np.nan
-    seeded.iloc[seed_pos] = float(values.iloc[start : start + n].mean())
-    return seeded.ewm(alpha=alpha, adjust=False).mean()
+    seeded.iloc[seed_pos] = float(numbers.iloc[start : start + n].mean())
+    return seeded.ewm(alpha=alpha, adjust=False).mean().mask(~valid)
 
 
 def _wilder(values: pd.Series, n: int) -> pd.Series:
@@ -447,6 +470,13 @@ def obv(bars: pd.DataFrame) -> pd.Series:
     original starts from an arbitrary base); only its slope and divergences carry
     information, so a different starting constant would say exactly the same
     thing.
+
+    **This strategy does not trade OBV.** It appears in no gate, no signal, no
+    ranking and no exit, and no config field governs it; it is provided here as
+    a tested primitive for exploratory work and future ablation hypotheses only.
+    See ``docs/indicator-research.md`` §8 for the evidence review behind that
+    decision — reading its presence in this module as an endorsement is a
+    misreading (audit DEBT-011).
 
     Args:
         bars: Contract 3 bars frame with ``close`` and ``volume``.

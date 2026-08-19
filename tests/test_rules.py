@@ -27,8 +27,10 @@ import pandas as pd
 import pytest
 
 from conftest import make_bars
-from swing.indicators import atr
+from swing.indicators import adx, atr
+from swing.strategy import rules
 from swing.strategy.rules import (
+    ADX_WINDOW,
     CHANDELIER_WINDOW,
     RSI2_THRESHOLD,
     chandelier_stop,
@@ -222,8 +224,6 @@ def test_trend_template_enforces_the_adx_floor(cfg_factory) -> None:
     Lifting the floor past that value is the only change, and it is enough to
     reject the bar — proof the ADX term is doing work rather than riding along.
     """
-    from swing.indicators import adx
-
     bars = make_bars(400, trend=0.002)
     first_pass = trend_template(bars, cfg_factory(), is_etf=False).idxmax()
     assert 20.0 < adx(bars, 14)[first_pass] < 21.0
@@ -233,6 +233,49 @@ def test_trend_template_enforces_the_adx_floor(cfg_factory) -> None:
 
     assert bool(lenient[first_pass])
     assert not bool(strict[first_pass])
+
+
+def test_trend_template_does_not_compute_adx_when_the_floor_is_zero(
+    cfg_factory, monkeypatch
+) -> None:
+    """ADX is ~80% of this function's cost and a no-op at ``adx_min=0`` (audit PERF-010).
+
+    Every ``adx_off`` ablation fold used to pay for it. The counter proves the
+    call is gone when the filter is off and still there when it is on.
+    """
+    calls: list[int] = []
+    real_adx = rules.adx
+
+    def counting_adx(bars: pd.DataFrame, n: int) -> pd.Series:
+        calls.append(n)
+        return real_adx(bars, n)
+
+    monkeypatch.setattr(rules, "adx", counting_adx)
+    bars = uptrend_bars(400)
+
+    trend_template(bars, cfg_factory(strategy={"adx_min": 0.0}), is_etf=False)
+    assert calls == []
+
+    trend_template(bars, cfg_factory(strategy={"adx_min": 20.0}), is_etf=False)
+    assert calls == [ADX_WINDOW]
+
+
+@pytest.mark.parametrize("bars_builder", [lambda: uptrend_bars(400), lambda: make_bars(400, 0.002)])
+def test_skipping_adx_at_a_zero_floor_changes_no_bar(cfg_factory, bars_builder) -> None:
+    """The short-circuit is provably equivalent, not merely close (audit PERF-010).
+
+    ``adx >= 0`` is False only where ADX is NaN — bars 0 to 2*14-2 — and those
+    bars are already False on ``above_low``/``near_high``, whose 252-bar warm-up
+    strictly contains them. Re-imposing the dropped conjunct on the result must
+    therefore change nothing, on every bar, warm-up included.
+    """
+    bars = bars_builder()
+    flags = trend_template(bars, cfg_factory(strategy={"adx_min": 0.0}), is_etf=False)
+
+    with_the_conjunct = flags & (adx(bars, ADX_WINDOW) >= 0.0)
+
+    pd.testing.assert_series_equal(flags, with_the_conjunct.rename("trend_template"))
+    assert not flags.iloc[: 2 * ADX_WINDOW - 1].any()  # the only window it could have touched
 
 
 def test_trend_template_rejects_a_flat_series_on_the_moving_average_stack(cfg_factory) -> None:
@@ -411,6 +454,49 @@ def test_breakout_path_is_unaffected_by_the_overlay(cfg_factory) -> None:
     assert (on | off).equals(on)  # the overlay is additive
 
 
+@pytest.mark.parametrize("proximity_pct", [0.0, 0.5, 2.0, 10.0, 25.0])
+@pytest.mark.parametrize(
+    "bars_builder",
+    [lambda: flat_with_event(), lambda: uptrend_bars(200), lambda: make_bars(200, trend=0.001)],
+)
+def test_the_strict_breakout_test_is_subsumed_by_the_proximity_band(
+    cfg_factory, proximity_pct: float, bars_builder
+) -> None:
+    """``close > prior_high`` was a dead disjunct beside the band (audit DEBT-012).
+
+    ``breakout_proximity_pct`` is capped at 25, so ``proximity`` never leaves
+    [0.75, 1.0] and prices are non-negative: ``proximity * prior_high`` is
+    therefore at or below ``prior_high``, and nothing can clear the level
+    outright without also clearing the band. Asserted here on every bar of three
+    fixtures across the full legal range of the knob, which is the proof that
+    deleting the disjunct changed no signal.
+    """
+    from swing.indicators import donchian_high
+
+    cfg = cfg_factory(strategy={"breakout_proximity_pct": proximity_pct})
+    bars = bars_builder()
+
+    prior_high = donchian_high(bars, cfg.strategy.donchian_window)
+    strict = bars["close"] > prior_high
+    within_band = bars["close"] >= (1.0 - proximity_pct / 100.0) * prior_high
+
+    assert not (strict & ~within_band).any()
+
+
+def test_a_strict_breakout_still_fires_with_the_proximity_band_at_zero(cfg_factory) -> None:
+    """The disjunct is gone; the case it read as carrying still signals.
+
+    At ``breakout_proximity_pct = 0`` the band collapses onto the level itself,
+    so the surviving comparison is ``close >= prior_high`` — which is what the
+    old two-disjunct expression already evaluated to.
+    """
+    cfg = cfg_factory(strategy={"breakout_proximity_pct": 0.0})
+    entries = entry_signal(flat_with_event(event_close=105.0), cfg)
+
+    assert bool(entries.iloc[60])
+    assert entries.sum() == 1
+
+
 # ---------------------------------------------------------------------------
 # stops
 # ---------------------------------------------------------------------------
@@ -536,6 +622,108 @@ def test_earnings_blackout_works_on_a_trading_day_index(cfg_factory) -> None:
     assert bool(blocked[pd.Timestamp("2021-01-11")])  # Monday inside the window
     assert not bool(blocked[pd.Timestamp("2021-01-08")])  # Friday, 12 days before
     pd.testing.assert_index_equal(blocked.index, trading_days)
+
+
+def test_earnings_blackout_survives_a_tz_aware_index(cfg_factory) -> None:
+    """A tz-aware index used to raise, and the scanner's broad except then failed *open*.
+
+    Subtracting a naive announcement stamp from a tz-aware index is a TypeError;
+    the scanner caught it and carried on with "no blackout", permitting an entry
+    inside one. Normalising the index here fails closed instead (audit BUG-045).
+    """
+    aware = pd.date_range("2021-01-01", periods=40, freq="D", tz="America/New_York")
+    cfg = cfg_factory()
+
+    blocked = earnings_blackout(aware, EARNINGS, cfg)
+
+    assert blocked.sum() == 11
+    assert bool(blocked.iloc[19])  # 2021-01-20, the earnings day itself
+    pd.testing.assert_index_equal(blocked.index, aware)
+    # Identical verdicts to the naive calendar, day for day.
+    assert blocked.to_numpy().tolist() == earnings_blackout(CALENDAR, EARNINGS, cfg).tolist()
+
+
+def test_earnings_blackout_accepts_a_tz_aware_announcement(cfg_factory) -> None:
+    """Providers hand back tz-aware announcement stamps; the calendar day is what matters."""
+    aware_stamp = pd.Timestamp("2021-01-20 16:05", tz="America/New_York")
+
+    blocked = earnings_blackout(CALENDAR, aware_stamp, cfg_factory())
+
+    assert blocked.sum() == 11
+    assert bool(blocked[pd.Timestamp("2021-01-20")])
+
+
+def test_earnings_blackout_blocks_the_window_of_any_date_in_a_sequence(cfg_factory) -> None:
+    """Contract amendment A12: a whole announcement history, not just the next one.
+
+    Two announcements 60 days apart give two disjoint 11-day windows; a day
+    outside both is clear.
+    """
+    calendar = pd.date_range("2021-01-01", periods=120, freq="D")
+    history = [dt.date(2021, 1, 20), dt.date(2021, 3, 21)]
+
+    blocked = earnings_blackout(calendar, history, cfg_factory())
+
+    assert blocked.sum() == 22
+    assert bool(blocked[pd.Timestamp("2021-01-20")])
+    assert bool(blocked[pd.Timestamp("2021-03-11")])  # exactly 10 days before the second
+    assert not bool(blocked[pd.Timestamp("2021-03-10")])
+    assert not bool(blocked[pd.Timestamp("2021-02-15")])  # between the two windows
+
+
+def test_earnings_blackout_overlapping_dates_do_not_double_count(cfg_factory) -> None:
+    """Windows are a union, not a sum — a duplicated date changes nothing."""
+    cfg = cfg_factory()
+    once = earnings_blackout(CALENDAR, EARNINGS, cfg)
+
+    for repeated in ([EARNINGS, EARNINGS], [EARNINGS, dt.date(2021, 1, 22)]):
+        blocked = earnings_blackout(CALENDAR, repeated, cfg)
+        assert blocked.sum() >= once.sum()
+        assert (blocked | once).equals(blocked)
+
+
+def test_earnings_blackout_single_date_and_one_element_sequence_agree(cfg_factory) -> None:
+    """Backward compatibility: the widened signature must not move the old answer."""
+    cfg = cfg_factory()
+
+    pd.testing.assert_series_equal(
+        earnings_blackout(CALENDAR, EARNINGS, cfg),
+        earnings_blackout(CALENDAR, [EARNINGS], cfg),
+    )
+
+
+def test_earnings_blackout_an_empty_sequence_blocks_nothing(cfg_factory) -> None:
+    """An empty history is "unknown", exactly like None."""
+    cfg = cfg_factory()
+
+    for nothing in ([], (), None):
+        blocked = earnings_blackout(CALENDAR, nothing, cfg)
+        assert not blocked.any()
+        assert blocked.dtype == bool
+        pd.testing.assert_index_equal(blocked.index, CALENDAR)
+
+
+def test_earnings_blackout_accepts_a_datetime_as_one_announcement(cfg_factory) -> None:
+    """``datetime`` subclasses ``date``, so it is one announcement, not an iterable."""
+    blocked = earnings_blackout(CALENDAR, dt.datetime(2021, 1, 20, 16, 5), cfg_factory())
+
+    assert blocked.sum() == 11
+
+
+def test_earnings_blackout_rejects_a_date_string(cfg_factory) -> None:
+    """A string is a sequence of characters; silently blacking out nothing is worse."""
+    with pytest.raises(ValueError, match="parse it into a datetime.date"):
+        earnings_blackout(CALENDAR, "2021-01-20", cfg_factory())  # type: ignore[arg-type]
+
+
+def test_earnings_blackout_on_an_empty_index(cfg_factory) -> None:
+    """A symbol with no bars must not blow up the sequence path."""
+    empty = pd.DatetimeIndex([])
+
+    blocked = earnings_blackout(empty, [EARNINGS], cfg_factory())
+
+    assert len(blocked) == 0
+    assert blocked.dtype == bool
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,14 @@ bolted on top:
 3. **Cash cap.** You cannot spend money you do not have. This system is
    cash-only by design; no margin is ever assumed.
 
+Ahead of all three sits a floor on the *divisor*. Risk-first sizing divides by
+``entry - stop``, and on a pegged instrument — a halted stock, a merger target
+sitting on the deal price — that distance shrinks toward zero while the arithmetic
+happily returns thousands of shares against a few dollars of "risk". A stop a
+fraction of a cent below the entry is not a real stop, it is a rounding artefact,
+so anything under ``max(MIN_RISK_PER_SHARE_ABS, MIN_RISK_PER_SHARE_FRAC * entry)``
+returns zero shares with ``capped_by="risk_floor"`` (audit BUG-054).
+
 The caps are applied in that order and the smallest survivor wins. On a small
 account most candidates come back with zero shares — that is the honest answer,
 not a bug, and the scanner is expected to show those names as *watch* ideas
@@ -30,16 +38,39 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - import only needed for type checking
     from swing.config import Config
 
-__all__ = ["CAPPED_BY_VALUES", "SizeResult", "size_position"]
+__all__ = [
+    "CAPPED_BY_VALUES",
+    "MIN_RISK_PER_SHARE_ABS",
+    "MIN_RISK_PER_SHARE_FRAC",
+    "SizeResult",
+    "size_position",
+]
 
 #: Every value ``SizeResult.capped_by`` is allowed to take (Contract 6).
 #:
 #: ``"risk"`` is part of the frozen contract's enum but is never emitted: when
 #: plain risk sizing is what binds, ``capped_by`` is ``None``. It is listed here
 #: so a consumer that switches on the enum stays exhaustive.
+#:
+#: ``"risk_floor"`` was added by audit BUG-054 (spec amendment A6): the stop is
+#: too close to the entry for the risk arithmetic to mean anything.
 CAPPED_BY_VALUES: frozenset[str | None] = frozenset(
-    {None, "risk", "position_cap", "cash", "unaffordable"}
+    {None, "risk", "position_cap", "cash", "unaffordable", "risk_floor"}
 )
+
+#: Smallest absolute per-share risk that counts as a real stop, in dollars.
+#:
+#: One cent is the tick size of every instrument this system trades, so a stop
+#: closer than that to the entry cannot be filled where it claims to be.
+MIN_RISK_PER_SHARE_ABS = 0.01
+
+#: Smallest per-share risk as a fraction of the entry price — 0.1%.
+#:
+#: The absolute floor alone is too permissive on an expensive name: a 1-cent
+#: stop on a $600 ETF still divides a real risk budget by almost nothing. The
+#: two floors are combined with ``max``, so the binding one is whichever is
+#: larger at that price (the fraction, above $10).
+MIN_RISK_PER_SHARE_FRAC = 0.001
 
 #: Relative tolerance used when rounding a share count down.
 #:
@@ -49,6 +80,17 @@ CAPPED_BY_VALUES: frozenset[str | None] = frozenset(
 #: this tolerance of a whole number is treated as that whole number before the
 #: floor is taken. It is far too small to change a genuine fractional result.
 _FLOOR_TOLERANCE = 1e-9
+
+#: Relative tolerance used when comparing the risk per share against its floor.
+#:
+#: Same class of problem as ``_FLOOR_TOLERANCE``, same remedy. ``10.00 - 9.99``
+#: is ``0.009999999999999787`` in binary floating point — two parts in 10^16
+#: below a one-cent floor — so a stop exactly one tick away from a sub-$10 entry
+#: would be refused by a strict ``<`` even though A6's intent is that a stop *at*
+#: the floor is fine and only a tighter one is refused. Anything within this
+#: relative distance of the floor counts as being at it, which is far too small
+#: a band to admit a genuinely tighter stop (audit BUG-054 / A6, QA follow-up).
+_RISK_FLOOR_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -62,9 +104,10 @@ class SizeResult:
         affordable: ``True`` exactly when ``shares >= 1``.
         capped_by: which rule decided the final size — ``None`` when the risk
             budget alone did, ``"position_cap"`` when the per-position notional
-            ceiling bit, ``"cash"`` when available cash bit, and
-            ``"unaffordable"`` whenever the answer is zero shares, whichever
-            stage got it there.
+            ceiling bit, ``"cash"`` when available cash bit, ``"risk_floor"``
+            when the stop was too close to the entry to size against at all,
+            and ``"unaffordable"`` whenever the answer is zero shares for any
+            other reason, whichever stage got it there.
     """
 
     shares: int
@@ -77,6 +120,11 @@ class SizeResult:
 #: The single result returned for every trade that cannot be taken.
 _UNAFFORDABLE = SizeResult(
     shares=0, risk_amount=0.0, notional=0.0, affordable=False, capped_by="unaffordable"
+)
+
+#: The result returned when ``entry - stop`` is below the risk-per-share floor.
+_RISK_FLOOR = SizeResult(
+    shares=0, risk_amount=0.0, notional=0.0, affordable=False, capped_by="risk_floor"
 )
 
 
@@ -118,6 +166,12 @@ def size_position(
 
     The calculation, in order:
 
+    0. Risk floor: ``entry - stop`` must be at least
+       ``max(MIN_RISK_PER_SHARE_ABS, MIN_RISK_PER_SHARE_FRAC * entry)``,
+       otherwise there is no meaningful distance to size against and the answer
+       is zero shares with ``capped_by="risk_floor"``. A distance exactly on the
+       floor passes; the comparison forgives binary dust the same way the share
+       floor does, so a one-tick stop is never lost to it.
     1. ``risk_shares = floor(equity * risk_pct/100 / (entry - stop))``.
        If that is less than one share the trade is unaffordable and everything
        returns zero — no cap is even consulted.
@@ -145,7 +199,10 @@ def size_position(
 
     Returns:
         A :class:`SizeResult`. ``shares`` is always a whole number and
-        ``affordable`` is always ``shares >= 1``.
+        ``affordable`` is always ``shares >= 1``. A stop closer to the entry
+        than the risk floor comes back as zero shares with
+        ``capped_by="risk_floor"`` rather than a five-figure position sized
+        against fictional risk (audit BUG-054).
 
     Raises:
         ValueError: if ``entry`` is not above 0, if ``stop`` is negative, if
@@ -180,6 +237,14 @@ def size_position(
     cash = max(cash, 0.0)
 
     risk_per_share = entry - stop
+    risk_floor = max(MIN_RISK_PER_SHARE_ABS, MIN_RISK_PER_SHARE_FRAC * entry)
+    if risk_per_share < risk_floor * (1.0 - _RISK_FLOOR_TOLERANCE):
+        # Sub-tick "risk" is a rounding artefact, not a stop: dividing the risk
+        # budget by it sizes a position that the stop cannot actually protect
+        # (audit BUG-054). The tolerance keeps a stop that is exactly one tick
+        # away — binary dust and all — on the allowed side of the comparison.
+        return _RISK_FLOOR
+
     risk_budget = equity * (cfg.account.risk_pct / 100.0)
     risk_shares = _floor_shares(risk_budget / risk_per_share)
 

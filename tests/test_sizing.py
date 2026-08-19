@@ -17,7 +17,13 @@ from typing import Any
 import pytest
 
 from swing.config import Config
-from swing.strategy.sizing import CAPPED_BY_VALUES, SizeResult, size_position
+from swing.strategy.sizing import (
+    CAPPED_BY_VALUES,
+    MIN_RISK_PER_SHARE_ABS,
+    MIN_RISK_PER_SHARE_FRAC,
+    SizeResult,
+    size_position,
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -279,6 +285,121 @@ def test_a_penny_stock_with_a_penny_stop(cfg_factory: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# the risk-per-share floor (audit BUG-054, spec amendment A6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_pegged_stock_is_refused_instead_of_sized_against_fictional_risk(
+    cfg_factory: Any,
+) -> None:
+    """The audit's measured case: a near-flat ATR sized to the notional cap.
+
+    A pinned $100.04 quote with ATR 0.002 puts the 2xATR stop 4.4 cents away.
+    Before the floor, that divided a $2,500 risk budget into 56,818 shares, the
+    notional cap cut it to **249 shares** — $24,910 of capital held against
+    $10.96 of nominal risk, a number nobody could actually lose because the
+    "stop" is inside the spread. The honest answer is no trade (audit BUG-054).
+    """
+    cfg = account_cfg(cfg_factory, equity=100_000.0, risk_pct=2.5, max_position_pct=25.0)
+
+    result = size_position(equity=100_000.0, cash=100_000.0, entry=100.04, stop=99.996, cfg=cfg)
+
+    assert result.shares == 0
+    assert result.capped_by == "risk_floor"
+    assert result.affordable is False
+    assert result.risk_amount == 0.0
+    assert result.notional == 0.0
+
+
+def test_a_normal_two_atr_stop_is_untouched_by_the_floor(cfg_factory: Any) -> None:
+    """Same account, a real $2 ATR: 4% of price away, so nothing changes."""
+    cfg = account_cfg(cfg_factory, equity=100_000.0, risk_pct=2.5, max_position_pct=25.0)
+
+    result = size_position(equity=100_000.0, cash=100_000.0, entry=100.0, stop=96.0, cfg=cfg)
+
+    # risk: $2,500 / $4 = 625 shares; notional cap: $25,000 / $100 = 250 shares
+    assert result.shares == 250
+    assert result.capped_by == "position_cap"
+    assert result.risk_amount == pytest.approx(1_000.0)
+
+
+@pytest.mark.parametrize(
+    ("entry", "stop", "expected_shares"),
+    [
+        (100.0, 99.875, 1_000),  # 12.5c risk clears the 10c fractional floor
+        (100.0, 99.9375, 0),  # 6.25c risk is under it
+        (5.0, 4.984375, 20_000),  # 1.5625c risk clears the 1c absolute floor
+        (5.0, 4.9921875, 0),  # 0.78c risk is under it
+        (10.0, 9.9899, 10_000),  # 1.01c risk, a hair over the 1c floor
+        (10.0, 9.9901, 0),  # 0.99c risk, a hair under it
+    ],
+)
+def test_the_floor_is_a_greater_than_or_equal_boundary(
+    cfg_factory: Any, entry: float, stop: float, expected_shares: int
+) -> None:
+    """Distances are exact binary fractions, so the boundary is not float dust.
+
+    Both floors are exercised: at $100 the 0.1% fraction binds (10 cents), at $5
+    the one-cent absolute does. On the two allowed rows the risk budget is
+    enormous by construction, so the $100,000 notional cap is what settles the
+    share count — the point of the row is that a trade happens at all.
+    """
+    cfg = account_cfg(cfg_factory, equity=100_000.0, risk_pct=2.5, max_position_pct=100.0)
+
+    result = size_position(equity=100_000.0, cash=1e9, entry=entry, stop=stop, cfg=cfg)
+
+    assert result.shares == expected_shares
+    assert result.capped_by == ("risk_floor" if expected_shares == 0 else "position_cap")
+
+
+@pytest.mark.parametrize(
+    ("entry", "stop"),
+    [(5.0, 4.99), (8.0, 7.99), (7.5, 7.49), (9.99, 9.98), (10.0, 9.99)],
+)
+def test_a_one_tick_stop_at_the_floor_is_not_lost_to_binary_dust(
+    cfg_factory: Any, entry: float, stop: float
+) -> None:
+    """A penny stop on a sub-$10 name sits *at* the one-cent floor, so it trades.
+
+    Every one of these subtractions comes out as 0.009999999999999787 in binary
+    — two parts in 10^16 below the floor — and a strict ``<`` refused all five,
+    turning A6's "below the floor is refused" into "at the floor is refused
+    too". Same dust, same forgiveness as the share floor (audit BUG-054, QA
+    follow-up).
+    """
+    cfg = account_cfg(cfg_factory, equity=100_000.0, risk_pct=2.5, max_position_pct=100.0)
+    assert entry - stop < MIN_RISK_PER_SHARE_ABS, "case no longer exercises binary dust"
+
+    result = size_position(equity=100_000.0, cash=1e9, entry=entry, stop=stop, cfg=cfg)
+
+    assert result.shares >= 1
+    assert result.affordable is True
+    assert result.capped_by != "risk_floor"
+
+
+def test_the_fractional_floor_binds_on_an_expensive_name(cfg_factory: Any) -> None:
+    """Five cents clears the absolute floor but is 0.008% of a $600 ETF — refused."""
+    cfg = account_cfg(cfg_factory, equity=100_000.0, risk_pct=2.5, max_position_pct=100.0)
+
+    result = size_position(equity=100_000.0, cash=1e9, entry=600.0, stop=599.95, cfg=cfg)
+
+    assert result.shares == 0
+    assert result.capped_by == "risk_floor"
+
+
+def test_the_floor_constants_are_the_documented_amendment_values() -> None:
+    """Spec amendment A6 fixes both numbers; the caps read them, nothing else."""
+    assert MIN_RISK_PER_SHARE_ABS == 0.01
+    assert MIN_RISK_PER_SHARE_FRAC == 0.001
+
+
+def test_the_floor_is_checked_after_the_stop_ordering_rule(cfg: Config) -> None:
+    """A stop *above* the entry stays an error; it is not silently a risk_floor."""
+    with pytest.raises(ValueError, match="must be above the stop price"):
+        size_position(equity=100.0, cash=100.0, entry=20.0, stop=20.0, cfg=cfg)
+
+
+# ---------------------------------------------------------------------------
 # errors — every message a plain-English sentence
 # ---------------------------------------------------------------------------
 
@@ -361,12 +482,14 @@ def test_invariants_hold_across_the_grid(
     assert result.notional == pytest.approx(result.shares * entry)
 
     if result.shares == 0:
-        assert result.capped_by == "unaffordable"
+        # No grid case is inside the risk floor (the tightest is 50 cents on a
+        # $100 entry), but a zero is only ever one of these two (audit BUG-054).
+        assert result.capped_by in {"unaffordable", "risk_floor"}
         assert result.risk_amount == 0.0
         assert result.notional == 0.0
         return
 
-    assert result.capped_by != "unaffordable"
+    assert result.capped_by not in {"unaffordable", "risk_floor"}
     assert result.risk_amount <= equity * (risk_pct / 100.0) * (1 + 1e-6)
     assert result.notional <= equity * (cap_pct / 100.0) * (1 + 1e-6)
     assert result.notional <= cash * (1 + 1e-6)
@@ -427,5 +550,16 @@ def test_size_result_is_frozen(cfg: Config) -> None:
 
 
 def test_capped_by_enum_matches_the_frozen_contract() -> None:
-    """Contract 6 froze this enum; a consumer switching on it must stay exhaustive."""
-    assert set(CAPPED_BY_VALUES) == {None, "risk", "position_cap", "cash", "unaffordable"}
+    """Contract 6 froze this enum; a consumer switching on it must stay exhaustive.
+
+    ``"risk_floor"`` is the one additive value since the freeze — spec amendment
+    A6, for audit BUG-054.
+    """
+    assert set(CAPPED_BY_VALUES) == {
+        None,
+        "risk",
+        "position_cap",
+        "cash",
+        "unaffordable",
+        "risk_floor",
+    }
