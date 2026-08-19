@@ -75,6 +75,12 @@ def cmd_auth(args: argparse.Namespace, cfg: Config) -> int:
     return run_auth(cfg, check=args.check, force=args.force)
 
 
+def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
+    from .doctor import run_doctor
+
+    return run_doctor(cfg, offline=args.offline)
+
+
 def cmd_notify_test(args: argparse.Namespace, cfg: Config) -> int:
     from .alerts.dispatch import notify_test
 

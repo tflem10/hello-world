@@ -250,7 +250,7 @@ docs/
   indicator-research.md     every default traced to evidence or an ablation
   schwab-setup.md           developer account → first live quote
   runbook.md                daily/weekly operation and failure recovery
-tests/                      455 tests, no network
+tests/                      471 tests, no network
 ```
 
 ---
@@ -258,6 +258,7 @@ tests/                      455 tests, no network
 ## Commands
 
 ```
+swing doctor [--offline]               can this machine actually run the system?
 swing universe [--refresh] [--fetch]   inspect / rebuild the tradable universe
 swing data --backfill | --update | --status
 swing backtest [--walk-forward] [--full] [--etf-only] [--ablations] [--sensitivity]

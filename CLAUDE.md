@@ -16,13 +16,13 @@ number lives in `config.toml` and is justified in `docs/indicator-research.md`.
 make install                            # ./install.sh — uv venv, deps, config.toml
 make test                               # or: .venv/bin/pytest -q -p no:warnings
 .venv/bin/ruff check src tests          # or: make lint
-swing universe|data|backtest|scan|confirm|execute|auth|journal|positions|kill|schedule
+swing doctor|universe|data|backtest|scan|confirm|execute|auth|journal|positions|kill|schedule
 swing backtest --walk-forward           # THE gate; also --etf-only --ablations --sensitivity
 swing scan --dry-run                    # a pick sheet, nothing sent
 swing journal add|exit|stop|show        # record manual fills, ratchet stops, read the log
 ```
 
-Tests are fast (~20s, 455 of them) and hermetic. Run the full suite after any
+Tests are fast (~20s, 471 of them) and hermetic. Run the full suite after any
 change: it layers `config.example.toml` under its fixtures, so editing that
 file breaks tests far away from it.
 

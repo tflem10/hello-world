@@ -18,6 +18,7 @@ log = get_logger("swing.cli")
 
 EPILOG = """\
 typical flow:
+  swing doctor                    is this machine able to run the system?
   swing universe --refresh        rebuild the tradable universe from the CSVs
   swing data --backfill           populate the local price cache
   swing backtest --walk-forward   REQUIRED before any live picks
@@ -88,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("auth", help="Schwab OAuth login / token status")
     sp.add_argument("--check", action="store_true", help="verify token, print account + a quote")
     sp.add_argument("--force", action="store_true", help="discard the existing token and re-login")
+
+    # -- doctor -------------------------------------------------------------
+    sp = sub.add_parser("doctor", help="check this install can actually do its job")
+    sp.add_argument("--offline", action="store_true",
+                    help="skip the network probes")
 
     # -- notify-test --------------------------------------------------------
     sub.add_parser("notify-test", help="send a test message down every alert channel")
@@ -191,6 +197,10 @@ def _dispatch(command: str, args: argparse.Namespace, cfg) -> int:
         from .commands import cmd_auth
 
         return cmd_auth(args, cfg)
+    if command == "doctor":
+        from .commands import cmd_doctor
+
+        return cmd_doctor(args, cfg)
     if command == "notify-test":
         from .commands import cmd_notify_test
 

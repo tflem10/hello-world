@@ -13,7 +13,13 @@ Work through this once, in order. Each step has a check you can actually see.
 source .venv/bin/activate
 swing --version                      # 1. the CLI runs
 make test                            # 2. the suite is green
+swing doctor                         # 3. can this machine reach a data provider?
 ```
+
+`swing doctor` probes rather than assumes — it asks the provider for a few
+bars of SPY instead of reading the config and hoping. Run it first on any new
+machine, and again whenever something behaves oddly; every failure it reports
+carries the command that fixes it. `--offline` skips the network probes.
 
 ```bash
 swing universe --show 10             # 3. ~1,000 symbols across the enabled indices
