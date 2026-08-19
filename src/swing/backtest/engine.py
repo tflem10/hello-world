@@ -243,6 +243,21 @@ class Backtester:
         this is all-``False`` unless a calendar was supplied. That is a real
         difference between backtest and live and it is recorded as a warning
         rather than papered over.
+
+        The warning below is deliberately **all-or-nothing**: it fires only
+        when no calendar at all was supplied. It says nothing about how much of
+        the universe a supplied calendar actually covers, and a calendar
+        covering three symbols out of a thousand silences it for the whole run.
+        Coverage accounting lives one level up, in
+        :func:`swing.backtest.runner.load_earnings`, because that is where the
+        universe being traded is known alongside the file it came from — every
+        path reached through ``swing backtest`` therefore gets a second warning
+        naming the covered-of-universe counts.
+
+        The consequence worth knowing: calling :func:`run_backtest` directly
+        with a hand-built ``earnings`` dict bypasses the runner, and so gets
+        this all-or-nothing warning and no coverage check. If you drive the
+        engine yourself, check coverage yourself.
         """
         blocked = np.zeros((len(dates), len(symbols)), dtype=bool)
         if not self.earnings:
