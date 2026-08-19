@@ -88,6 +88,12 @@ Adopted, with adaptations, and with expectations set low.
   1–8 weeks. We should expect a fraction of the documented effect, dominated by idiosyncratic noise.
   The ranking's job here is *candidate ordering when slots are contested*, not alpha generation.
 
+**Measured (ETF, 2010–2026):** both parameters were weakly supported. Removing the skip
+(`mom_skip_days = 0`) cost 0.06 PF and pushed the system below breakeven (0.96 vs 1.02); flattening
+the blend to 0.5/0.5 cost 0.02 PF. Both differences are inside the noise band and neither is
+evidence on its own — but both moved in the direction Jegadeesh & Titman (1993) and Novy-Marx (2012)
+predict. Consistent-with, not confirmation-of.
+
 ### Where it appears in config
 
 `strategy.mom_weight_126 = 0.6`, `strategy.mom_weight_63 = 0.4`, `strategy.mom_skip_days = 5`,
@@ -214,6 +220,11 @@ Costs of this rule, stated plainly: it will keep us flat through the first leg o
 recovery, and it whipsaws around the 200-day line. We accept both. The ablation (`regime_off`)
 quantifies exactly what we pay for it.
 
+**Measured (ETF, 2010–2026):** disabling the gate *improved* the sample — PF 1.24 vs 1.02, max
+drawdown 21.3% vs 28.6%. The default stays `True`. This window contains no extended bear market, so
+it prices the premium without ever paying the claim; see
+[Ablation plan → Interpretation](#three-removals-improved-this-sample--and-the-defaults-are-kept-anyway).
+
 Default reference symbol is SPY rather than a broader index because SPY is the most liquid, longest,
 cleanest free-data series available and correlates ~0.95+ with any reasonable alternative.
 
@@ -261,10 +272,14 @@ There is also a structural mismatch. Connors' rules are 2–5 day holds. Ours ar
    this is decisive.
 
 It remains *implemented and configurable* rather than deleted, because it is a legitimate hypothesis
-worth measuring on our own data with our own costs. The `rsi2_on` ablation exists to test it. If a
-walk-forward OOS run with `rsi2_enabled=True` beats baseline on profit factor *and* max drawdown
-across multiple folds, that is evidence worth acting on — and it will have been generated
-out-of-sample rather than read from a 2008 book.
+worth measuring on our own data with our own costs. The `rsi2_on` ablation exists to test it, against
+a criterion registered before the run: enable it only if a walk-forward OOS run with
+`rsi2_enabled=True` beats baseline on profit factor **and** max drawdown.
+
+**Measured (ETF, 2010–2026): it did neither.** PF 0.99 vs 1.02, max drawdown 32.5% vs 28.6%, 553
+trades vs 332, average hold 11.7 days vs 16.5 — more trades, shorter holds, no profit-factor gain,
+worse drawdown. Exactly the predicted signature. `rsi2_enabled` stays `False`, and that decision now
+rests on an out-of-sample result from our own data rather than on inference from a 2008 book.
 
 ### Where it appears in config
 
@@ -318,6 +333,12 @@ The threshold is deliberately at the low end. A higher `adx_min` would look bett
 (`adx_min=0.0`) tests whether this filter earns its place at all; we should be prepared to find that
 it does not.
 
+**Measured (ETF, 2010–2026): it did not.** Disabling ADX improved the sample slightly — PF 1.09 vs
+1.02 — while adding 127 trades (459 vs 332) and lifting exposure from 41.6% to 53.5%. The +0.07 PF
+is well inside the noise band on 332 trades, so the filter is retained as a turnover and
+chop-avoidance control rather than as a demonstrated edge. This is the weakest-supported gate in the
+system after the fundamentals filter, and a reasonable person could disable it.
+
 ### Where it appears in config
 
 `strategy.adx_min = 20.0`, `strategy.atr_window = 14` (ADX shares Wilder's 14-period smoothing).
@@ -369,9 +390,15 @@ Adopted, with the entry deliberately **not** load-bearing:
 - **Design intent: the trend template and the ranking carry most of the weight; the breakout is a
   timing device.** By the time a candidate has passed the trend template (§3), the regime gate (§4)
   and the liquidity filter (§10), and then ranked in the top four by risk-adjusted momentum (§1),
-  the breakout is mainly answering "is today a reasonable day to start the position?" If the
-  ablations show `volume_off` and a wider/narrower Donchian window barely move OOS metrics, that is
-  a *confirmation* of the design, not a failure of it.
+  the breakout is mainly answering "is today a reasonable day to start the position?"
+- **The ablation could not test this, and we should not pretend otherwise.** `volume_off` returned
+  metrics identical to baseline because `volume_mult` is grid-tuned and the tuner overwrites the
+  config default per fold — a structural no-op, not a finding (see
+  [Ablation plan → Structural](#structural--three-000-rows-are-an-artefact-of-the-tuner-not-evidence-of-inert-components)).
+  What the in-sample tuning *does* show is that folds split between `volume_mult` 1.6 and 1.0 with no
+  stable preference, and settled on `donchian_window` 15 rather than the default 20 — i.e. the tuner
+  wants a shorter channel and has no firm opinion on volume confirmation. That is weak evidence for
+  the design intent above, not the confirmation originally anticipated here.
 - `donchian_window = 20` is Turtle System 1, retained for horizon fit (20 trading days ≈ 4 weeks,
   the middle of our 1–8 week hold) rather than for its pedigree. `volume_avg_window = 50` matches
   `sma_fast` so the same 50-day window governs both the trend and volume baselines — one fewer free
@@ -473,6 +500,12 @@ notably the part that makes no prediction at all.
   horizon. This is a *definitional* parameter, not an empirical one: a position that has neither
   stopped out nor trended after 8 weeks is not the trade we intended to take, and it is occupying
   one of four slots. Capital turnover matters disproportionately on a four-slot book.
+  **Measured (ETF, 2010–2026):** removing it improved the sample (PF 1.16 vs 1.02, maxDD 24.7% vs
+  28.6%, average hold 18.0 days vs 16.5). The default is kept regardless — +0.13 PF is inside the
+  noise band on 332 trades, and because the parameter is definitional, abandoning it would mean
+  abandoning the 1–8 week horizon that the rest of this document is built around, not merely
+  retuning a knob. The chandelier stop is what should capture an extended winner, not the absence
+  of a horizon bound.
 - **Risk sizing**: `shares = floor(equity × risk_pct/100 / (entry − stop))` with `risk_pct = 2.5`.
   2.5% is aggressive by institutional standards and appropriate only because the absolute stake is
   tiny ($2.50 on a $100 account) and because a smaller fraction would round to zero shares on
@@ -652,18 +685,138 @@ Run by `scripts/ablations.py`, which loads the config, applies **one change at a
 All runs are walk-forward, so the reported metrics are **out-of-sample** (3-year IS / 1-year OOS
 stepped annually, concatenated OOS equity).
 
-| # | Component | Research section | Config flag / param varied | Baseline → variant | OOS result |
-|---|-----------|------------------|----------------------------|--------------------|------------|
-| 0 | *Baseline (all components on)* | — | *none* | — | TBD — filled by `scripts/ablations.py` during integration |
-| 1 | Market regime gate | [§4](#4-regime-filter-index-above-its-200-day-sma) | `regime.enabled` | `True` → `False` | TBD — filled by `scripts/ablations.py` during integration |
-| 2 | ADX trend-strength filter | [§6](#6-macd-and-adx) | `strategy.adx_min` | `20.0` → `0.0` | TBD — filled by `scripts/ablations.py` during integration |
-| 3 | Breakout volume confirmation | [§7](#7-donchian-channel-breakouts-and-volume-confirmation) | `strategy.volume_mult` | `1.3` → `1.0` | TBD — filled by `scripts/ablations.py` during integration |
-| 4 | Momentum skip-recent window | [§1](#1-intermediate-horizon-momentum-and-the-skip-effect) | `strategy.mom_skip_days` | `5` → `0` | TBD — filled by `scripts/ablations.py` during integration |
-| 5 | Momentum horizon weighting | [§1](#1-intermediate-horizon-momentum-and-the-skip-effect) | `strategy.mom_weight_126` / `mom_weight_63` | `0.6/0.4` → `0.5/0.5` | TBD — filled by `scripts/ablations.py` during integration |
-| 6 | Trailing stop width (tighter) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `2.0` | TBD — filled by `scripts/ablations.py` during integration |
-| 7 | Trailing stop width (wider) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `4.0` | TBD — filled by `scripts/ablations.py` during integration |
-| 8 | Time stop | [§9](#9-atr-stops-and-position-sizing) | `strategy.time_stop_days` | `40` → `10_000` (sentinel = off; `0` is invalid and would mean "exit immediately") | TBD — filled by `scripts/ablations.py` during integration |
-| 9 | RSI(2) mean-reversion overlay | [§5](#5-rsi2-short-horizon-mean-reversion) | `strategy.rsi2_enabled` | `False` → `True` | TBD — filled by `scripts/ablations.py` during integration |
+### Results — ETF universe, 2010-01-01 to 2026-08-18
+
+Executed 2026-08-18. Full metrics, per-variant detail and the reproducibility triple
+(`config_hash` / `code_ref` / `data_hash`) are in [`ablation-results.md`](ablation-results.md).
+
+**Baseline: PF 1.02, CAGR 0.06%, max drawdown 28.56%, 332 OOS trades, 41.6% exposure.** That is a
+system scraping breakeven on this universe, and every delta below should be read against that
+near-zero reference rather than against a healthy baseline.
+
+| # | Component | Research section | Config flag / param varied | Baseline → variant | OOS result vs baseline |
+|---|-----------|------------------|----------------------------|--------------------|------------------------|
+| 0 | *Baseline (all components on)* | — | *none* | — | PF 1.02, CAGR 0.06%, maxDD 28.56%, 332 trades |
+| 1 | Market regime gate | [§4](#4-regime-filter-index-above-its-200-day-sma) | `regime.enabled` | `True` → `False` | **PF +0.21** (1.24), CAGR +1.93pp, maxDD **−7.26pp** (21.30), 332 trades — *improved; default kept, see below* |
+| 2 | ADX trend-strength filter | [§6](#6-macd-and-adx) | `strategy.adx_min` | `20.0` → `0.0` | PF +0.07 (1.09), CAGR +1.03pp, maxDD −4.37pp, **+127 trades** (459), exposure 53.5% — *improved; default kept* |
+| 3 | Breakout volume confirmation | [§7](#7-donchian-channel-breakouts-and-volume-confirmation) | `strategy.volume_mult` | `1.3` → `1.0` | **±0.00 on every metric — grid-tuned, see "Structural" below.** Not evidence of inertness |
+| 4 | Momentum skip-recent window | [§1](#1-intermediate-horizon-momentum-and-the-skip-effect) | `strategy.mom_skip_days` | `5` → `0` | PF −0.06 (0.96, below breakeven), CAGR −0.68pp, maxDD +1.13pp — *mildly supports the default* |
+| 5 | Momentum horizon weighting | [§1](#1-intermediate-horizon-momentum-and-the-skip-effect) | `strategy.mom_weight_126` / `mom_weight_63` | `0.6/0.4` → `0.5/0.5` | PF −0.02 (1.00), CAGR −0.19pp, maxDD +1.17pp — *mildly supports the default* |
+| 6 | Trailing stop width (tighter) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `2.0` | **±0.00 on every metric — grid-tuned, see "Structural" below** |
+| 7 | Trailing stop width (wider) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `4.0` | **±0.00 on every metric — grid-tuned, see "Structural" below** |
+| 8 | Time stop | [§9](#9-atr-stops-and-position-sizing) | `strategy.time_stop_days` | `40` → `10_000` (sentinel = off; `0` is invalid and would mean "exit immediately") | PF +0.13 (1.16), CAGR +1.24pp, maxDD −3.84pp, −18 trades, hold 18.0d — *improved; default kept* |
+| 9 | RSI(2) mean-reversion overlay | [§5](#5-rsi2-short-horizon-mean-reversion) | `strategy.rsi2_enabled` | `False` → `True` | PF −0.03 (0.99), maxDD **+3.90pp** (32.46), **+221 trades** (553), hold 11.7d — *supports shipping OFF* |
+
+### Interpretation
+
+**Outcome in one line: all shipping defaults are retained. None were changed by this sweep.**
+
+#### Structural — three `±0.00` rows are an artefact of the tuner, not evidence of inert components
+
+`volume_off`, `chandelier_2` and `chandelier_4` returned results identical to baseline **to the last
+decimal on every metric**. This is by construction. `strategy.volume_mult` and
+`strategy.chandelier_mult` are both members of the walk-forward in-sample tuning grid
+(`backtest-methodology.md` §5); the tuner re-selects them from that grid on every fold, so the
+config default these variants edit is **overwritten before a single out-of-sample bar is traded**.
+The ablation changed an input that the walk-forward machinery does not read.
+
+Evidence for those two components must therefore come from **which values the folds actually chose**
+during in-sample tuning, not from the OOS delta:
+
+| Grid parameter | What the folds selected | Reading |
+|----------------|-------------------------|---------|
+| `volume_mult` | split between 1.6 and 1.0 across folds | no stable preference — volume confirmation is neither consistently earning its keep nor consistently harmful |
+| `donchian_window` | 15 dominant across folds (default is 20) | the tuner prefers a **shorter** channel than the Turtle-inherited default of §7 |
+
+`donchian_window` has no ablation row at all for the same reason — it is grid-tuned, so an ablation
+of it would also have returned `±0.00`.
+
+**Do not read the `+0.00` rows as "this component does nothing."** They say only that the tuner, not
+the config file, is in charge of those two knobs. Anyone extending this table should first check
+whether the parameter they intend to vary is in the tuning grid; if it is, the variant is a no-op.
+
+#### Three removals *improved* this sample — and the defaults are kept anyway
+
+`regime_off` (+0.21 PF, −7.3pp maxDD), `adx_off` (+0.07 PF) and `time_stop_off` (+0.13 PF) all beat
+baseline. The shipping configuration nonetheless keeps all three enabled, for four reasons:
+
+1. **The differences are inside the noise band.** 332 OOS trades; the entire table spans PF
+   0.96–1.24 around a baseline of 1.02. Per §13 and `backtest-methodology.md` §5, PF differences
+   below roughly 0.2 on this sample size are not distinguishable from noise. `regime_off` sits right
+   at that boundary; the other two are well inside it.
+2. **All three are risk-policy components, and this window under-samples the states they exist
+   for.** 2010–2026 contains no extended bear market of the 2000–2002 or 2007–2009 kind. The regime
+   gate and the time stop are insurance premiums, and a sample without a fire shows insurance as
+   pure cost. Daniel & Moskowitz (2016) is specifically about momentum's behaviour in panic states —
+   the states this window barely visits.
+3. **The ETF universe is the strategy's weakest habitat**, and its documented lower bound
+   (`backtest-methodology.md` §7): ~40 correlated, diversified baskets give a cross-sectional
+   ranking very little dispersion to exploit. Re-specifying risk policy from the weakest-habitat run
+   would be backwards.
+4. **Selecting the three best rows is the exact failure mode §13 exists to prevent** — post-hoc
+   selection over 10 trials on a near-breakeven, noise-dominated sample (Sullivan, Timmermann &
+   White 1999).
+
+A user who wants the higher-PF configuration can flip these — they are supported config keys, not
+hidden switches. What they would be giving up:
+
+| Flip | Gains on this sample | Gives up |
+|------|----------------------|----------|
+| `regime.enabled = false` | +0.21 PF, +1.93pp CAGR, −7.3pp maxDD | the only rule that moves the book to cash in a sustained downtrend — fully exposed through the next 2008-style regime, which this sample does not contain |
+| `strategy.adx_min = 0.0` | +0.07 PF, +1.03pp CAGR | 38% more trades (459 vs 332) at 53.5% exposure vs 41.6% — more turnover, more cost, and no screen against non-trending chop |
+| `strategy.time_stop_days = 10_000` | +0.13 PF, +1.24pp CAGR | the 8-week horizon bound itself — slots occupied indefinitely, average hold stretching to 18.0 days, and the system ceasing to be the 1–8 week strategy this spec describes |
+
+#### Two removals mildly degraded — weak support for the momentum specification
+
+`skip_off` (−0.06 PF, dropping the system below breakeven at 0.96) and `weights_equal` (−0.02 PF).
+Both are inside the noise band, and neither is evidence on its own. What they do is **fail to
+contradict the prior**: the 5-day skip and the 0.6/0.4 tilt toward the ~6-month leg each moved the
+result in the direction Jegadeesh & Titman (1993) and Novy-Marx (2012) predict — recent-window
+contamination hurts, weighting the intermediate horizon helps. Consistent-with, not confirmation-of.
+
+#### RSI(2) is empirically rejected on the terms set in advance
+
+`rsi2_on`: PF 0.99 (−0.03), max drawdown 32.46% (+3.90pp), 553 trades (+221), average hold 11.7 days
+versus 16.5. That is precisely the signature §5 anticipated — many more, much shorter trades, no
+profit-factor improvement, and a worse drawdown.
+
+§5 committed in advance to a falsifiable condition: enable the overlay only if a walk-forward OOS run
+beats baseline on profit factor **and** max drawdown. It did neither. `strategy.rsi2_enabled = False`
+stands, and it now rests on an out-of-sample result from our own data and our own cost model rather
+than on an inference from the post-2010 decay literature (Chordia, Subrahmanyam & Tong 2014).
+
+#### Scope — ETF universe only, deliberately
+
+This sweep is ETF-only. Stock-universe ablations were **not** run: at roughly two hours per
+walk-forward run, ten variants is ~20 hours of compute to resolve differences the ETF sweep already
+shows are noise-dominated. The stock universe gets the headline walk-forward validation and the
+survivorship haircut instead (`backtest-methodology.md` §7–§8), which is where the deployment
+decision is actually made.
+
+Two consequences worth stating plainly:
+
+- These ETF results are **survivorship-free** and take no haircut, but they are also the strategy's
+  documented *lower bound*, not its expected performance.
+- Baseline PF 1.02 clears deployment-rule condition 3 (`backtest-methodology.md` §8: ETF-only
+  `PF_oos ≥ 1.0`) by the thinnest possible margin. That is a floor being scraped, not a good result,
+  and it should temper any reading of the stock-universe headline.
+
+#### Why `regime_off` has an identical trade count — verified, not a glitch
+
+`regime_off` reports **exactly** the same trade count (332) and exposure (41.58%) as baseline while
+win rate, average win and profit factor all move. This was checked directly against the two runs'
+`trades.csv` and is benign: the lists share 261 `(symbol, entry_date)` pairs and differ by exactly
+**71 swapped entries each way**, with total P&L of $292.92 (baseline) versus $2,910.77
+(`regime_off`). The swaps cluster precisely where a SPY-above-200-SMA gate binds — `regime_off`
+enters ARKK on 2020-04-28, mid V-bottom with SPY still below its 200-day, where baseline waits until
+2020-06-02 after the reclaim; `regime_off` also takes five 2022 bear-market entries and several
+2015/2021-correction entries that baseline has none of (baseline contributes zero differing 2022
+entries). The identical count is **slot saturation**: with four slots effectively always full,
+turnover is exit-driven, so a 71-for-71 entry swap preserves the count, and near-identical exposure
+follows for the same reason. The regime gate is wired correctly; it is changing *which* names occupy
+slots, not how many slot-days are filled.
+
+### Components deliberately not ablated
 
 Components deliberately **not** ablated, and why:
 
@@ -675,13 +828,23 @@ Components deliberately **not** ablated, and why:
 | Fundamentals soft filter (`fundamentals_filter`) | Data quality on the free provider is too poor for a measured difference to be interpretable. Can be run manually. |
 | Earnings blackout (`earnings_blackout_days`) | Same data-coverage problem; the unknown-date fail-open path (§12) means the measured effect would be diluted by missing dates. |
 | MACD / OBV | Not implemented in any rule (§6, §8). Nothing to ablate. |
+| `donchian_window` (and any other grid member) | In the walk-forward tuning grid, so the tuner overwrites the config default per fold and the variant is a guaranteed no-op — see "Structural" above. `volume_mult` and `chandelier_mult` have rows only because their no-op status was discovered by running them. |
 
 **How to read the results.** Look for components whose removal *degrades* OOS profit factor or
 materially *worsens* max drawdown — those are earning their keep. A component whose removal barely
-moves anything is a candidate for deletion on parsimony grounds (fewer parameters ⇒ lower PBO per
-Bailey et al.). A component whose removal *improves* results should be scrutinised, not immediately
-deleted: with ~30–100 OOS trades, most differences here will be inside the noise band. Per §13,
+moves anything *is* a candidate for deletion on parsimony grounds (fewer parameters ⇒ lower PBO per
+Bailey et al.) — **unless** it is grid-tuned, in which case a flat row says nothing at all. A
+component whose removal *improves* results should be scrutinised, not deleted: at 332 OOS trades on
+a near-breakeven baseline, most differences in this table are inside the noise band. Per §13,
 **do not select the best-scoring variant as the shipping configuration.**
+
+**What this sweep actually decided.** Nothing was changed. Three components (regime gate, ADX
+filter, time stop) scored better switched off on this sample and were kept on anyway, for the
+reasons set out above; two momentum parameters were weakly supported; one optional overlay was
+rejected on a pre-registered criterion; three rows carried no information at all. An ablation sweep
+is a diagnostic that can *fail* to move the defaults, and on a noise-dominated sample that is the
+expected result rather than a disappointing one. The honest summary is **"defaults retained, and
+here is why"** — not "defaults updated."
 
 ---
 
