@@ -68,9 +68,70 @@ class NetworkAccessAttempted(RuntimeError):
     """Raised when a test tries to open a network connection."""
 
 
+def _refuse(kind: str, target: Any) -> NetworkAccessAttempted:
+    """The one sentence every blocked mechanism raises."""
+    return NetworkAccessAttempted(
+        f"This test tried to open a {kind} connection to {target!r}. Tests must run "
+        f"offline: mock the provider, or use the committed fixtures. If a test genuinely "
+        f"needs the network, mark it with @pytest.mark.network_ok."
+    )
+
+
+def _block_curl_cffi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block curl_cffi, which reaches the network without ever touching a Python socket.
+
+    Patching ``socket.socket.connect`` blocks anything built on Python's socket
+    module — ``urllib``, ``requests``, ``httpx``. It does **not** block
+    curl_cffi: that hands the URL to libcurl in C, which opens its own socket
+    with no Python object involved. yfinance 1.6 moved to curl_cffi, so the
+    suite's offline guarantee had a hole wide enough for a live AAPL quote to
+    come back through it mid-run.
+
+    Two seams, because one is not enough. ``Session.request`` is where every
+    documented entry point ends up (the module-level ``get``/``post`` helpers
+    build a ``Session`` and call it), and ``Curl.perform`` is the backstop for
+    anything that skips the requests layer or subclasses ``Session``.
+
+    curl_cffi is imported defensively so this fixture stays dependency-agnostic:
+    a checkout without it is simply a checkout with one fewer way out.
+    """
+    try:
+        import curl_cffi
+        from curl_cffi import requests as curl_requests
+    except ImportError:  # pragma: no cover - curl_cffi ships as a yfinance dependency
+        return
+
+    def _url_of(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """`request(self, method, url, ...)` — however the caller spelled it."""
+        if "url" in kwargs:
+            return kwargs["url"]
+        return args[1] if len(args) > 1 else "an unnamed URL"
+
+    def guard_request(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _refuse("curl_cffi", _url_of(args, kwargs))
+
+    def guard_perform(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _refuse("curl_cffi", "the URL set on this curl handle")
+
+    for owner, name in (
+        (getattr(curl_requests, "Session", None), "request"),
+        (getattr(curl_requests, "AsyncSession", None), "request"),
+    ):
+        if owner is not None and hasattr(owner, name):
+            monkeypatch.setattr(owner, name, guard_request)
+
+    curl_class = getattr(curl_cffi, "Curl", None)
+    if curl_class is not None and hasattr(curl_class, "perform"):
+        monkeypatch.setattr(curl_class, "perform", guard_perform)
+
+
 @pytest.fixture(autouse=True)
 def _block_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every outbound network connection fail loudly.
+
+    Two mechanisms are covered: Python sockets, and curl_cffi's C-level libcurl
+    path (see :func:`_block_curl_cffi`). ``@pytest.mark.network_ok`` lifts both
+    at once — the marker check happens before either is installed.
 
     Unix-domain sockets are left alone: they are local IPC, not the network,
     and blocking them breaks unrelated machinery.
@@ -80,13 +141,6 @@ def _block_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
 
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
-
-    def _refuse(kind: str, target: Any) -> NetworkAccessAttempted:
-        return NetworkAccessAttempted(
-            f"This test tried to open a {kind} connection to {target!r}. Tests must run "
-            f"offline: mock the provider, or use the committed fixtures. If a test genuinely "
-            f"needs the network, mark it with @pytest.mark.network_ok."
-        )
 
     def guard_connect(self: socket.socket, address: Any) -> None:
         if self.family == socket.AF_UNIX:
@@ -105,6 +159,7 @@ def _block_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(socket.socket, "connect", guard_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guard_connect_ex)
     monkeypatch.setattr(socket, "create_connection", guard_create_connection)
+    _block_curl_cffi(monkeypatch)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ block, so those helpers get their own coverage.
 
 from __future__ import annotations
 
+import inspect
 import socket
 import urllib.request
 from pathlib import Path
@@ -121,3 +122,51 @@ def test_http_requests_are_blocked() -> None:
     with pytest.raises(Exception) as excinfo:  # noqa: B017 - urllib wraps our error
         urllib.request.urlopen("http://example.com", timeout=1)  # noqa: S310
     assert "offline" in str(excinfo.value) or isinstance(excinfo.value, NetworkAccessAttempted)
+
+
+# --- the curl_cffi hole ------------------------------------------------------
+#
+# yfinance 1.6 issues HTTP through curl_cffi, which hands the URL to libcurl in
+# C: no Python socket is ever constructed, so the socket patches above see
+# nothing. An un-seamed test fetched a live quote straight through this gap.
+
+
+def test_curl_cffi_module_level_get_is_blocked() -> None:
+    curl_requests = pytest.importorskip("curl_cffi.requests")
+    with pytest.raises(NetworkAccessAttempted) as excinfo:
+        curl_requests.get("https://query1.finance.yahoo.com/v8/finance/chart/AAPL", timeout=1)
+    message = str(excinfo.value)
+    assert "curl_cffi" in message
+    assert "network_ok" in message  # it says how to opt out
+
+
+def test_curl_cffi_session_request_is_blocked() -> None:
+    curl_requests = pytest.importorskip("curl_cffi.requests")
+    session = curl_requests.Session()
+    with pytest.raises(NetworkAccessAttempted):
+        session.request("GET", "https://example.com", timeout=1)
+    with pytest.raises(NetworkAccessAttempted) as excinfo:
+        session.request(method="GET", url="https://example.com", timeout=1)
+    assert "https://example.com" in str(excinfo.value)  # the refusal names the URL
+
+
+def test_curl_cffi_perform_is_blocked_as_the_backstop() -> None:
+    """Anything that skips the requests layer still cannot reach libcurl."""
+    curl_cffi = pytest.importorskip("curl_cffi")
+    if not hasattr(curl_cffi, "Curl"):  # pragma: no cover - depends on the release
+        pytest.skip("this curl_cffi has no Curl handle to guard")
+    handle = curl_cffi.Curl()
+    with pytest.raises(NetworkAccessAttempted):
+        handle.perform()
+
+
+@pytest.mark.network_ok
+def test_the_marker_lifts_the_curl_cffi_block_too() -> None:
+    """The escape hatch has to cover both mechanisms, or it covers neither.
+
+    This asserts the guard is *absent*, not that the network works — the test
+    stays offline and fast.
+    """
+    curl_requests = pytest.importorskip("curl_cffi.requests")
+    source = inspect.getsource(curl_requests.Session.request)
+    assert "NetworkAccessAttempted" not in source
