@@ -9,6 +9,13 @@ The lazy imports are not an optimisation, they are the integration seam: the
 package is built work-package by work-package, so ``swing --help`` must keep
 working while half the modules do not exist yet, and invoking a command that is
 not implemented must print one clear sentence rather than a traceback.
+
+Exit codes, because launchd only ever sees the number: ``0`` success, ``1``
+"the work ran but something it did failed" (a dead notification channel in
+``notify-test``), ``2`` "swing refused to do the work" — a bad configuration, a
+module that is not there, or a ``ScanError``. Scan and confirm ask the pipeline
+for ``strict_delivery``, so a night where every channel failed is a refusal
+rather than a silent success (audit BUG-021).
 """
 
 from __future__ import annotations
@@ -104,6 +111,37 @@ def _entry(module: str, func: str, command: str) -> Any:
         raise typer.Exit(code=2) from exc
 
 
+class _Unreachable(Exception):
+    """A placeholder exception class that nothing ever raises."""
+
+
+def _scan_error() -> type[Exception]:
+    """The pipeline's own refusal exception, imported at the moment it is needed.
+
+    Imported lazily and by name for the same reason the entry points are: the
+    CLI must keep working when ``swing.alerts.pipeline`` is not in the
+    checkout. When it genuinely is not, nothing can raise ``ScanError`` either,
+    so an unmatchable placeholder is exactly right.
+    """
+    try:
+        from swing.alerts.pipeline import ScanError
+    except (ImportError, AttributeError):  # pragma: no cover - pipeline always ships
+        return _Unreachable
+    return ScanError
+
+
+def _refuse(exc: Exception) -> typer.Exit:
+    """Print a refusal as the sentence it already is, and exit 2 (audit BUG-021).
+
+    ``ScanError`` messages are written to be read by a human at a terminal.
+    Letting one escape printed a traceback around the sentence and — worse for
+    a system whose whole value is the notification — left the exit code at 0,
+    so ``launchctl`` reported the failed nightly run as a success.
+    """
+    _echo_error(str(exc))
+    return typer.Exit(code=2)
+
+
 def _parse_date(value: str | None, option: str) -> _dt.date | None:
     """Parse a YYYY-MM-DD option value, or explain why it could not be parsed."""
     if value is None:
@@ -192,7 +230,10 @@ def scan(
     cfg = _load_cfg(ctx)
     day = _parse_date(asof, "--asof")
     run_scan = _entry("swing.alerts.pipeline", "run_scan", "scan")
-    path = run_scan(cfg, dry_run=dry_run, force=force, asof=day)
+    try:
+        path = run_scan(cfg, dry_run=dry_run, force=force, asof=day, strict_delivery=True)
+    except _scan_error() as exc:
+        raise _refuse(exc) from exc
     typer.echo(f"Scan report: {path}")
 
 
@@ -206,7 +247,10 @@ def confirm(
     """Re-check last night's picks against this morning's prices."""
     cfg = _load_cfg(ctx)
     run_confirm = _entry("swing.alerts.pipeline", "run_confirm", "confirm")
-    path = run_confirm(cfg, dry_run=dry_run)
+    try:
+        path = run_confirm(cfg, dry_run=dry_run, strict_delivery=True)
+    except _scan_error() as exc:
+        raise _refuse(exc) from exc
     typer.echo(f"Confirmation report: {path}")
 
 

@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import dataclasses
 import tomllib
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
 from swing.config import (
+    MAX_LOOKBACK_BARS,
+    MAX_MOMENTUM_LOOKBACK_BARS,
     AccountCfg,
     AlertsCfg,
     BacktestCfg,
@@ -75,7 +77,16 @@ def test_config_has_exactly_the_twelve_contract_sections() -> None:
             "universe",
             {"sp500": True, "sp400": True, "sp600": True, "etfs": True, "extra_symbols": ()},
         ),
-        ("data", {"provider": "yfinance", "start_date": date(2010, 1, 1)}),
+        (
+            "data",
+            {
+                "provider": "yfinance",
+                "start_date": date(2010, 1, 1),
+                "retries": 3,
+                "retry_backoff": 0.5,
+                "download_batch": 200,
+            },
+        ),
         (
             "strategy",
             {
@@ -464,9 +475,16 @@ def test_example_config_mirrors_every_key_and_default() -> None:
             assert f"# {name} =" in text, f"{section_name}.{name} is missing from the example"
         assert not set(values) - field_names
 
-    # and the documented values are the real defaults
+    # and the documented values are the real defaults. The one difference is
+    # deliberate: loading from a file anchors a relative reports_dir to that
+    # file's directory (audit BUG-022), which the bare dataclass cannot do.
     example_cfg = load_config(EXAMPLE)
-    assert example_cfg == defaults
+    assert example_cfg.paths.reports_dir == EXAMPLE.parent / "reports"
+    unanchored = dataclasses.replace(
+        example_cfg,
+        paths=dataclasses.replace(example_cfg.paths, reports_dir=Path("reports")),
+    )
+    assert unanchored == defaults
 
 
 def test_example_config_contains_no_secrets() -> None:
@@ -482,3 +500,226 @@ def test_execution_is_off_by_default_in_the_example() -> None:
     cfg = load_config(EXAMPLE)
     assert cfg.execution.enabled is False
     assert cfg.execution.autopilot is False
+
+
+# ---------------------------------------------------------------------------
+# network manners (contract amendment A5)
+# ---------------------------------------------------------------------------
+
+
+def test_data_network_knobs_load_from_a_file(tmp_path: Path) -> None:
+    cfg = load_config(
+        _write(
+            tmp_path / "c.toml",
+            "[data]\nretries = 5\nretry_backoff = 2\ndownload_batch = 50\n",
+        )
+    )
+    assert cfg.data.retries == 5
+    assert cfg.data.retry_backoff == 2.0
+    assert isinstance(cfg.data.retry_backoff, float)
+    assert cfg.data.download_batch == 50
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"retries": 0}, "data.retries"),
+        ({"retries": 11}, "data.retries"),
+        ({"retry_backoff": 0.0}, "data.retry_backoff"),
+        ({"retry_backoff": 10.5}, "data.retry_backoff"),
+        ({"download_batch": 9}, "data.download_batch"),
+        ({"download_batch": 501}, "data.download_batch"),
+    ],
+)
+def test_data_network_knobs_have_sane_bounds(kwargs: dict, needle: str) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        DataCfg(**kwargs)
+    assert needle in str(excinfo.value)
+
+
+def test_data_network_knobs_accept_their_boundaries() -> None:
+    assert DataCfg(retries=1).retries == 1
+    assert DataCfg(retries=10).retries == 10
+    assert DataCfg(retry_backoff=10.0).retry_backoff == 10.0
+    assert DataCfg(download_batch=10).download_batch == 10
+    assert DataCfg(download_batch=500).download_batch == 500
+
+
+# ---------------------------------------------------------------------------
+# BUG-022 / amendment A14 — reports_dir is anchored to the config file
+# ---------------------------------------------------------------------------
+
+
+def test_a_relative_reports_dir_is_anchored_to_the_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit BUG-022: `swing confirm` from ~ must find what `swing scan` wrote.
+
+    ``state_dir`` was absolute and ``reports_dir`` was CWD-relative, so the two
+    halves of one run pointed at different places the moment the working
+    directory changed.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    path = _write(project / "config.toml", '[paths]\nreports_dir = "reports"\n')
+
+    monkeypatch.chdir(elsewhere)
+    cfg = load_config(path)
+
+    assert cfg.paths.reports_dir == project / "reports"
+    assert cfg.paths.reports_dir.is_absolute()
+
+
+def test_anchoring_also_applies_to_a_discovered_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / ".swing").mkdir(parents=True)
+    _write(home / ".swing" / "config.toml", '[paths]\nreports_dir = "reports"\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    assert load_config().paths.reports_dir == home / ".swing" / "reports"
+
+
+def test_a_relative_config_path_anchors_to_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(project / "config.toml", '[paths]\nreports_dir = "reports"\n')
+    monkeypatch.chdir(project)
+
+    assert load_config(Path("config.toml")).paths.reports_dir == project / "reports"
+
+
+def test_an_absolute_reports_dir_is_left_exactly_as_written(tmp_path: Path) -> None:
+    target = tmp_path / "somewhere" / "else"
+    path = _write(tmp_path / "config.toml", f'[paths]\nreports_dir = "{target}"\n')
+    assert load_config(path).paths.reports_dir == target
+
+
+def test_a_home_relative_reports_dir_is_expanded_not_anchored(tmp_path: Path) -> None:
+    path = _write(tmp_path / "config.toml", '[paths]\nreports_dir = "~/swing-reports"\n')
+    assert load_config(path).paths.reports_dir == Path.home() / "swing-reports"
+
+
+def test_example_defaults_stay_relative_to_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no config file there is nothing to anchor to, and the loud warning covers it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "nohome"))
+
+    with pytest.warns(UserWarning, match="EXAMPLE DEFAULTS"):
+        cfg = load_config()
+
+    assert cfg.paths.reports_dir == Path("reports")
+
+
+# ---------------------------------------------------------------------------
+# BUG-029/032 / amendment A16 — settings that validate and then disable the
+# strategy, silently and permanently
+# ---------------------------------------------------------------------------
+
+
+def test_breakout_proximity_stops_well_before_the_cliff() -> None:
+    """Audit BUG-029: at 100 the breakout test is `close >= 0.0` — always true."""
+    with pytest.raises(ConfigError) as excinfo:
+        StrategyCfg(breakout_proximity_pct=100.0)
+    message = str(excinfo.value)
+    assert "strategy.breakout_proximity_pct" in message
+    assert "at most 25" in message
+
+    assert StrategyCfg(breakout_proximity_pct=25.0).breakout_proximity_pct == 25.0
+    assert StrategyCfg(breakout_proximity_pct=0.0).breakout_proximity_pct == 0.0  # strict breakout
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"sma_slow": 450}, "strategy.sma_slow"),
+        ({"sma_slow": 370, "sma_slow_rising_days": 21}, "strategy.sma_slow"),
+        ({"volume_avg_window": 5000}, "strategy.volume_avg_window"),
+        ({"donchian_window": 400}, "strategy.donchian_window"),
+        ({"atr_window": 500}, "strategy.atr_window"),
+        ({"mom_skip_days": 5000}, "strategy.mom_skip_days"),
+        ({"mom_skip_days": 125}, "strategy.mom_skip_days"),
+    ],
+)
+def test_lookbacks_longer_than_the_fetched_history_are_refused(kwargs: dict, needle: str) -> None:
+    """Audit BUG-032: these all loaded fine and produced a permanently empty scan."""
+    base = {"sma_fast": 50, "sma_mid": 150, "sma_slow": 200}
+    with pytest.raises(ConfigError) as excinfo:
+        StrategyCfg(**{**base, **kwargs})
+    message = str(excinfo.value)
+    assert needle in message
+    assert "empty" in message or "ranked" in message  # it says what would go wrong
+    assert message.endswith(".")
+
+
+def test_the_lookback_caps_leave_the_shipped_defaults_and_ablations_room() -> None:
+    defaults = StrategyCfg()
+    assert defaults.sma_slow + defaults.sma_slow_rising_days <= MAX_LOOKBACK_BARS
+    assert defaults.mom_skip_days + 126 <= MAX_MOMENTUM_LOOKBACK_BARS
+    # the time-stop ablation runs a 10,000-day sentinel and must stay legal
+    assert StrategyCfg(time_stop_days=10_000).time_stop_days == 10_000
+    assert StrategyCfg(mom_skip_days=0).mom_skip_days == 0
+    assert StrategyCfg(adx_min=0.0).adx_min == 0.0
+    assert StrategyCfg(volume_mult=1.0).volume_mult == 1.0
+
+
+def test_a_backtest_start_in_the_future_is_refused_even_without_an_end() -> None:
+    """Audit BUG-032: `start` was only ever checked against `end`."""
+    future = date.today() + timedelta(days=1)
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(start=future)
+    message = str(excinfo.value)
+    assert "backtest.start" in message
+    assert "empty" in message
+
+    assert BacktestCfg(start=date.today() - timedelta(days=1)).end is None
+
+
+# ---------------------------------------------------------------------------
+# BUG-033 — the wrong kind of value is a sentence, not a TypeError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "needle"),
+    [
+        ('[strategy]\nsma_fast = "50"\n', "strategy.sma_fast"),
+        ('[account]\nequity = "25000"\n', "account.equity"),
+        ('[account]\nrisk_pct = "2.5"\n', "account.risk_pct"),
+        ("[strategy]\nsma_fast = true\n", "strategy.sma_fast"),
+        ("[regime]\nsymbol = 5\n", "regime.symbol"),
+    ],
+)
+def test_a_value_of_the_wrong_kind_is_explained_not_raised(
+    tmp_path: Path, body: str, needle: str
+) -> None:
+    """Audit BUG-033: a quoted number is the commonest TOML mistake there is."""
+    path = _write(tmp_path / "c.toml", body)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+    message = str(excinfo.value)
+    assert needle in message
+    assert "config.toml" in message
+    assert message.endswith(".")
+    assert "not supported between instances" not in message  # the old raw TypeError
+
+
+def test_a_quoted_number_says_how_to_write_it(tmp_path: Path) -> None:
+    path = _write(tmp_path / "c.toml", '[strategy]\nsma_fast = "50"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+    assert "without quotes" in str(excinfo.value)
+
+
+def test_a_bare_number_is_still_perfectly_fine(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path / "c.toml", "[strategy]\nsma_fast = 40\nadx_min = 15\n"))
+    assert cfg.strategy.sma_fast == 40
+    assert cfg.strategy.adx_min == 15.0

@@ -12,6 +12,15 @@ Search order used by :func:`load_config`:
 2. ``./config.toml`` (project-local)
 3. ``~/.swing/config.toml`` (per-user)
 4. the committed ``config.example.toml`` defaults, with a loud warning
+
+A relative ``paths.reports_dir`` is resolved against the directory of the file
+it was read from (audit BUG-022), so ``swing confirm`` run from ``~`` finds the
+same reports ``swing scan`` wrote from the project directory.
+
+Ranges are not only about absurd values. Several knobs have a *cliff* — a
+setting that validates cleanly and then silently disables the strategy, which
+looks exactly like a quiet market. Those are capped against the history the
+system actually fetches; see :data:`MAX_LOOKBACK_BARS` (audit BUG-029/032).
 """
 
 from __future__ import annotations
@@ -20,11 +29,13 @@ import datetime as _dt
 import logging
 import tomllib
 import warnings
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
 __all__ = [
+    "MAX_LOOKBACK_BARS",
+    "MAX_MOMENTUM_LOOKBACK_BARS",
     "AccountCfg",
     "AlertsCfg",
     "BacktestCfg",
@@ -47,6 +58,24 @@ log = logging.getLogger(__name__)
 
 EXAMPLE_FILENAME = "config.example.toml"
 CONFIG_FILENAME = "config.toml"
+
+#: The longest lookback any single indicator window may ask for.
+#:
+#: The scan fetches ``asof - 600 calendar days`` (``SCAN_LOOKBACK_DAYS``), which
+#: is roughly 413 trading bars. A window longer than that can never produce a
+#: value, so the whole scan comes back empty with no error — indistinguishable
+#: from a quiet market (audit BUG-032). 380 leaves ~30 bars of margin for
+#: holidays and a short warm-up.
+MAX_LOOKBACK_BARS = 380
+
+#: The longest *momentum* lookback, which is stricter: ranking additionally
+#: requires ``MIN_HISTORY_ROWS`` (260) rows of history, and the 126-day return
+#: is measured ``mom_skip_days`` before the last bar. ``mom_skip_days + 126``
+#: past 250 leaves no room inside that floor and ranks nothing, ever.
+MAX_MOMENTUM_LOOKBACK_BARS = 250
+
+#: The momentum window the ranking blend reaches furthest back for.
+_MOMENTUM_LOOKBACK_BARS = 126
 
 
 class ConfigError(ValueError):
@@ -159,10 +188,30 @@ def _optional_inner(ann: Any) -> Any:
     return ann
 
 
+def _type_error(cls_name: str, key: str, value: Any, wanted: str) -> ConfigError:
+    """A plain-English "wrong kind of value" sentence naming the setting."""
+    section = _SECTION_OF.get(cls_name, cls_name)
+    return ConfigError(
+        f"{section}.{key} must be {wanted}, but it is {value!r}. {_where(section, key)}"
+    )
+
+
 def _coerce_value(value: Any, ann: Any, cls_name: str, key: str) -> Any:
     if value is None:
         return None
     inner = _optional_inner(ann)
+    if inner in (int, float):
+        # A quoted number is the most common TOML mistake there is, and a bare
+        # `true` for a number the second; both used to reach the comparison
+        # operators and die as a raw TypeError (audit BUG-033).
+        if isinstance(value, bool):
+            raise _type_error(cls_name, key, value, "a number, not true or false")
+        if isinstance(value, str):
+            raise _type_error(
+                cls_name, key, value, "a number written without quotes, such as 50 or 2.5"
+            )
+        if not isinstance(value, int | float):
+            raise _type_error(cls_name, key, value, "a number")
     if inner is float and isinstance(value, int) and not isinstance(value, bool):
         return float(value)
     if inner is Path and isinstance(value, str):
@@ -183,6 +232,8 @@ def _coerce_value(value: Any, ann: Any, cls_name: str, key: str) -> Any:
         return value
     if get_origin(inner) is tuple and isinstance(value, list | tuple):
         return tuple(str(v).strip().upper() for v in value)
+    if inner is str and not isinstance(value, str):
+        raise _type_error(cls_name, key, value, "text in quotes")
     if inner is bool and not isinstance(value, bool):
         raise ConfigError(
             f"{_SECTION_OF.get(cls_name, cls_name)}.{key} must be true or false, "
@@ -261,11 +312,19 @@ class UniverseCfg:
 
 @dataclass(frozen=True)
 class DataCfg:
-    """Where price history comes from and where it is cached."""
+    """Where price history comes from, where it is cached, and how hard to try.
+
+    The network knobs exist because a rate-limited user's only remedy used to
+    be editing the source (audit DEBT-013). They are deliberately narrow: they
+    tune politeness, not correctness.
+    """
 
     provider: str = "yfinance"
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".swing" / "cache")
     start_date: _dt.date = _dt.date(2010, 1, 1)
+    retries: int = 3
+    retry_backoff: float = 0.5
+    download_batch: int = 200
 
     def __post_init__(self) -> None:
         _coerce(self)
@@ -275,6 +334,32 @@ class DataCfg:
             f"data.start_date must be 1970-01-01 or later, but it is {self.start_date}.",
             "data",
             "start_date",
+        )
+        _in_range(
+            self.retries,
+            1,
+            10,
+            "data",
+            "retries",
+            "how many times a failed download is attempted, including the first try",
+            low_inclusive=True,
+        )
+        _in_range(
+            self.retry_backoff,
+            0.0,
+            10.0,
+            "data",
+            "retry_backoff",
+            "seconds to wait before the first retry, doubling each time",
+        )
+        _in_range(
+            self.download_batch,
+            10,
+            500,
+            "data",
+            "download_batch",
+            "how many symbols are requested in one download",
+            low_inclusive=True,
         )
 
 
@@ -359,10 +444,11 @@ class StrategyCfg:
         _in_range(
             self.breakout_proximity_pct,
             0.0,
-            100.0,
+            25.0,
             "strategy",
             "breakout_proximity_pct",
-            "how close to the breakout level still counts, in percent",
+            "how close to the breakout level still counts, in percent; 0 requires a strict "
+            "breakout, and above 25 the test stops discriminating at all",
             low_inclusive=True,
         )
         _positive(
@@ -405,6 +491,46 @@ class StrategyCfg:
             "strategy",
             "mom_skip_days",
             "recent days skipped when measuring momentum",
+        )
+        self._check_lookbacks()
+
+    def _check_lookbacks(self) -> None:
+        """Refuse windows longer than the history the system ever holds (BUG-032).
+
+        Each of these validates fine on its own and then produces a scan that
+        is permanently, silently empty — the failure mode that looks exactly
+        like a quiet market. The bound is :data:`MAX_LOOKBACK_BARS`, derived
+        once from the fetch window rather than restated per knob.
+        """
+        for key in ("donchian_window", "volume_avg_window", "atr_window"):
+            value = getattr(self, key)
+            _require(
+                value <= MAX_LOOKBACK_BARS,
+                f"strategy.{key} (a lookback window in bars) must be at most "
+                f"{MAX_LOOKBACK_BARS}, but it is {value}. Longer than that and the window never "
+                f"fills from the history swing fetches, so every scan would come back empty.",
+                "strategy",
+                key,
+            )
+        trend_bars = self.sma_slow + self.sma_slow_rising_days
+        _require(
+            trend_bars <= MAX_LOOKBACK_BARS,
+            f"strategy.sma_slow ({self.sma_slow}) plus strategy.sma_slow_rising_days "
+            f"({self.sma_slow_rising_days}) needs {trend_bars} bars of history, which is more "
+            f"than the {MAX_LOOKBACK_BARS} swing fetches, so the trend test could never pass "
+            f"and every scan would come back empty.",
+            "strategy",
+            "sma_slow",
+        )
+        momentum_bars = self.mom_skip_days + _MOMENTUM_LOOKBACK_BARS
+        _require(
+            momentum_bars <= MAX_MOMENTUM_LOOKBACK_BARS,
+            f"strategy.mom_skip_days ({self.mom_skip_days}) plus the {_MOMENTUM_LOOKBACK_BARS}-day "
+            f"momentum window needs {momentum_bars} bars, which is more than the "
+            f"{MAX_MOMENTUM_LOOKBACK_BARS} the ranking has room for, so nothing would ever be "
+            f"ranked.",
+            "strategy",
+            "mom_skip_days",
         )
 
 
@@ -449,6 +575,18 @@ class BacktestCfg:
             _require(
                 self.start < self.end,
                 f"backtest.start ({self.start}) must be earlier than backtest.end ({self.end}).",
+                "backtest",
+                "start",
+            )
+        else:
+            # With no end date the run goes to the latest available bar, so the
+            # only thing that can make the window empty is a start in the
+            # future — which used to load quite happily (audit BUG-032).
+            today = _dt.date.today()
+            _require(
+                self.start < today,
+                f"backtest.start ({self.start}) must be in the past, but today is {today} and "
+                f"backtest.end is not set, so the backtest window would be empty.",
                 "backtest",
                 "start",
             )
@@ -766,7 +904,34 @@ def _build_section(name: str, cls: type, raw: Any, source: Path | None) -> Any:
     return cls(**raw)
 
 
-def _build_config(data: dict[str, Any], source: Path | None) -> Config:
+def _anchor_reports_dir(cfg: Config, anchor: Path | None) -> Config:
+    """Resolve a relative ``paths.reports_dir`` against the config file's directory.
+
+    ``state_dir`` defaults to an absolute ``~/.swing`` while ``reports_dir``
+    defaulted to the relative ``reports``, so the two halves of one run
+    disagreed the moment the working directory changed: ``swing scan`` from the
+    project wrote a report tree that ``swing confirm`` from ``~`` could not find
+    (audit BUG-022). Anchoring to the file the setting was read from makes the
+    path mean the same thing from anywhere.
+
+    Running on example defaults (no config file at all) keeps the historical
+    CWD-relative behaviour: there is no file to anchor to, and the loud
+    "EXAMPLE DEFAULTS" warning already tells the user they are in a temporary
+    situation.
+    """
+    if anchor is None:
+        return cfg
+    reports_dir = Path(cfg.paths.reports_dir)
+    if reports_dir.is_absolute():
+        return cfg
+    resolved = Path(anchor) / reports_dir
+    log.info("paths.reports_dir %s resolved against %s -> %s", reports_dir, anchor, resolved)
+    return replace(cfg, paths=replace(cfg.paths, reports_dir=resolved))
+
+
+def _build_config(
+    data: dict[str, Any], source: Path | None, *, anchor: Path | None = None
+) -> Config:
     unknown = sorted(set(data) - set(_SECTIONS))
     if unknown:
         raise ConfigError(
@@ -778,7 +943,7 @@ def _build_config(data: dict[str, Any], source: Path | None) -> Config:
     for name, cls in _SECTIONS.items():
         if name in data:
             kwargs[name] = _build_section(name, cls, data[name], source)
-    return Config(**kwargs)
+    return _anchor_reports_dir(Config(**kwargs), anchor)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -787,6 +952,11 @@ def load_config(path: Path | None = None) -> Config:
     When nothing is found the committed example values (i.e. the dataclass
     defaults) are used and a loud warning is emitted, because running on
     defaults means running with a $100 paper account and no alert channels.
+
+    A relative ``paths.reports_dir`` is resolved against the directory of the
+    file it came from — see :func:`_anchor_reports_dir`. The example-defaults
+    fallback is not a file the user chose, so it anchors nothing and the path
+    stays relative to the working directory as before.
 
     Raises:
         ConfigError: if the file is missing, malformed, or holds a value that
@@ -799,13 +969,11 @@ def load_config(path: Path | None = None) -> Config:
                 f"No configuration file at {candidate}. Copy config.example.toml to that path "
                 f"(or drop the --config flag to use ./config.toml)."
             )
-        log.info("Loading configuration from %s", candidate)
-        return _build_config(_read_toml(candidate), candidate)
+        return _load_from(candidate)
 
     for candidate in config_search_paths():
         if candidate.is_file():
-            log.info("Loading configuration from %s", candidate)
-            return _build_config(_read_toml(candidate), candidate)
+            return _load_from(candidate)
 
     example = find_example_config()
     warnings.warn(
@@ -817,8 +985,18 @@ def load_config(path: Path | None = None) -> Config:
         stacklevel=2,
     )
     if example is not None:
+        log.info("Loading example defaults from %s", example)
         return _build_config(_read_toml(example), example)
     return Config()
+
+
+def _load_from(candidate: Path) -> Config:
+    """Read one config file and anchor its relative paths to that file's directory."""
+    log.info("Loading configuration from %s", candidate)
+    # `.absolute()` rather than `.resolve()`: a `--config config.toml` must
+    # anchor to the working directory, but symlinks are left as the user wrote
+    # them.
+    return _build_config(_read_toml(candidate), candidate, anchor=candidate.absolute().parent)
 
 
 def describe_defaults() -> dict[str, dict[str, Any]]:

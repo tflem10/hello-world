@@ -6,21 +6,26 @@ they assert on the real files that ship with the package, offline.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import dataclasses
+import inspect
 import re
 from pathlib import Path
 
 import pytest
 
+from swing import universe as universe_mod
 from swing.config import Config, UniverseCfg
 from swing.universe import (
     INDEX_SOURCES,
     Instrument,
+    UniverseError,
     asset_dir,
     load,
     load_csv,
     symbols,
+    to_schwab_symbol,
     to_yahoo_symbol,
 )
 
@@ -196,8 +201,33 @@ def test_to_yahoo_symbol(raw: str, expected: str) -> None:
     assert to_yahoo_symbol(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("yahoo", "schwab"),
+    [
+        ("BRK-B", "BRK/B"),
+        ("BF-B", "BF/B"),
+        ("brk.b", "BRK/B"),  # normalised on the way through
+        ("CWEN-A", "CWEN/A"),
+        ("AAPL", "AAPL"),
+        ("SPY", "SPY"),
+        ("ABC-DE", "ABC-DE"),  # not a single-letter class: left alone
+        ("", ""),
+    ],
+)
+def test_to_schwab_symbol(yahoo: str, schwab: str) -> None:
+    """Audit BUG-039: Yahoo-form class shares sent verbatim simply return nothing."""
+    assert to_schwab_symbol(yahoo) == schwab
+
+
+def test_every_dual_class_name_in_the_universe_translates() -> None:
+    dashed = [sym for sym, _ in load_csv("sp500") if "-" in sym]
+    assert dashed  # the snapshot really does contain some
+    for symbol in dashed:
+        assert to_schwab_symbol(symbol) == symbol.replace("-", "/")
+
+
 def test_load_csv_reports_a_missing_snapshot_clearly() -> None:
-    with pytest.raises(RuntimeError, match="missing"):
+    with pytest.raises(UniverseError, match="missing"):
         load_csv("sp999")
 
 
@@ -206,3 +236,83 @@ def test_asset_dir_is_inside_the_installed_package() -> None:
     assert isinstance(directory, Path)
     assert directory.is_dir()
     assert directory.name == "universe"
+    assert (directory / "sp500.csv").is_file()
+
+
+# ---------------------------------------------------------------------------
+# packaging and parsing details (audit DEBT-014, PERF-011)
+# ---------------------------------------------------------------------------
+
+
+def test_all_names_the_whole_public_surface() -> None:
+    """Audit DEBT-014: `UniverseError` and `symbols` were missing from __all__."""
+    exported = set(universe_mod.__all__)
+    assert {"UniverseError", "symbols", "to_schwab_symbol", "to_yahoo_symbol"} <= exported
+    for name in exported:
+        assert hasattr(universe_mod, name), name
+
+
+def test_a_byte_order_mark_does_not_hide_the_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit DEBT-014: a BOM landed inside the first header name.
+
+    Under plain utf-8 the header parses as '﻿symbol', so the file is
+    reported as having no 'symbol' column — a misleading error for a file that
+    is perfectly fine, and the exact thing a spreadsheet round-trip produces.
+    """
+    snapshot = tmp_path / "bommed.csv"
+    snapshot.write_text("symbol,name\nAAPL,Apple Inc.\n", encoding="utf-8-sig")
+    assert snapshot.read_bytes().startswith(b"\xef\xbb\xbf")
+
+    @contextlib.contextmanager
+    def fake_snapshot_path(stem: str):
+        yield snapshot
+
+    monkeypatch.setattr(universe_mod, "_snapshot_path", fake_snapshot_path)
+    universe_mod._read_snapshot.cache_clear()
+    try:
+        assert load_csv("bommed") == [("AAPL", "Apple Inc.")]
+    finally:
+        universe_mod._read_snapshot.cache_clear()
+
+
+def test_snapshots_are_read_through_importlib_resources() -> None:
+    """`as_file` rather than `str(files(...))`, so a zipped install still works."""
+    source = inspect.getsource(universe_mod)
+    assert "resources.as_file" in source
+    assert "Path(str(resources.files" not in source
+
+
+def test_a_snapshot_is_parsed_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit PERF-011: the CSVs were re-parsed on every call, etfs.csv twice per load()."""
+    universe_mod._read_snapshot.cache_clear()
+    universe_mod._etf_symbols.cache_clear()
+    opened: list[str] = []
+
+    real = universe_mod._snapshot_path
+
+    @contextlib.contextmanager
+    def counting(stem: str):
+        opened.append(stem)
+        with real(stem) as path:
+            yield path
+
+    monkeypatch.setattr(universe_mod, "_snapshot_path", counting)
+    try:
+        cfg = _cfg(sp400=False, sp600=False, extra_symbols=("qqq",))
+        load(cfg)
+        load(cfg)
+        load_csv("sp500")
+        assert sorted(opened) == ["etfs", "sp500"]
+    finally:
+        universe_mod._read_snapshot.cache_clear()
+        universe_mod._etf_symbols.cache_clear()
+
+
+def test_load_csv_hands_back_a_list_the_caller_may_mutate() -> None:
+    """The cache is internal: mutating a result must not corrupt the next read."""
+    rows = load_csv("etfs")
+    length = len(rows)
+    rows.append(("TAMPERED", "nope"))
+    assert len(load_csv("etfs")) == length

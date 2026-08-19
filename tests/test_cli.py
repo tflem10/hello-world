@@ -227,18 +227,35 @@ def test_a_module_missing_its_entry_point_also_fails_cleanly(
     assert "Traceback" not in text
 
 
+class FakeScanError(Exception):
+    """Stands in for ``swing.alerts.pipeline.ScanError`` in these tests."""
+
+
+def fake_pipeline(monkeypatch: pytest.MonkeyPatch, **entries) -> types.ModuleType:
+    """Install a stand-in ``swing.alerts.pipeline`` carrying its own ``ScanError``.
+
+    The CLI imports ``ScanError`` from the pipeline lazily, so a fake module has
+    to supply one — which keeps these tests decoupled from whatever the alerts
+    package is doing to the real one.
+    """
+    pipeline = types.ModuleType("swing.alerts.pipeline")
+    pipeline.ScanError = FakeScanError  # type: ignore[attr-defined]
+    for name, func in entries.items():
+        setattr(pipeline, name, func)
+    monkeypatch.setitem(sys.modules, "swing.alerts.pipeline", pipeline)
+    return pipeline
+
+
 def test_an_implemented_command_is_called_with_the_contract_signature(
     cfg_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[dict] = []
-    pipeline = types.ModuleType("swing.alerts.pipeline")
 
-    def run_scan(cfg, *, dry_run=False, force=False, asof=None):
-        calls.append({"cfg": cfg, "dry_run": dry_run, "force": force, "asof": asof})
+    def run_scan(cfg, **kwargs):
+        calls.append({"cfg": cfg, **kwargs})
         return tmp_path / "reports" / "scan-2026-08-18"
 
-    pipeline.run_scan = run_scan  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "swing.alerts.pipeline", pipeline)
+    fake_pipeline(monkeypatch, run_scan=run_scan)
 
     result = runner.invoke(
         app, ["--config", str(cfg_file), "scan", "--dry-run", "--force", "--asof", "2026-08-18"]
@@ -251,6 +268,80 @@ def test_an_implemented_command_is_called_with_the_contract_signature(
     assert calls[0]["asof"].isoformat() == "2026-08-18"
     assert calls[0]["cfg"].paths.state_dir == tmp_path / "state"
     assert "scan-2026-08-18" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# BUG-021 — a failed nightly run must look failed
+# ---------------------------------------------------------------------------
+
+
+def test_scan_asks_the_pipeline_to_be_strict_about_delivery(
+    cfg_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole value of this system is the notification arriving."""
+    calls: list[dict] = []
+
+    def run_scan(cfg, **kwargs):
+        calls.append(kwargs)
+        return tmp_path / "reports" / "scan-2026-08-18"
+
+    fake_pipeline(monkeypatch, run_scan=run_scan)
+    result = runner.invoke(app, ["--config", str(cfg_file), "scan"])
+
+    assert result.exit_code == 0, output(result)
+    assert calls[0]["strict_delivery"] is True
+
+
+def test_confirm_asks_the_pipeline_to_be_strict_about_delivery(
+    cfg_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict] = []
+
+    def run_confirm(cfg, **kwargs):
+        calls.append(kwargs)
+        return tmp_path / "reports" / "scan-2026-08-18" / "confirm.json"
+
+    fake_pipeline(monkeypatch, run_confirm=run_confirm)
+    result = runner.invoke(app, ["--config", str(cfg_file), "confirm"])
+
+    assert result.exit_code == 0, output(result)
+    assert calls[0] == {"dry_run": False, "strict_delivery": True}
+
+
+@pytest.mark.parametrize("command", ["scan", "confirm"])
+def test_a_refusal_is_one_sentence_and_exit_2(
+    command: str, cfg_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit BUG-021: a ScanError used to arrive as a traceback, with exit code 0."""
+    sentence = "Every notification channel failed (ntfy, email), so nobody was told."
+
+    def boom(cfg, **kwargs):
+        raise FakeScanError(sentence)
+
+    fake_pipeline(monkeypatch, run_scan=boom, run_confirm=boom)
+    result = runner.invoke(app, ["--config", str(cfg_file), command])
+    text = output(result)
+
+    assert result.exit_code == 2
+    assert sentence in text
+    assert "Traceback" not in text
+    assert "FakeScanError" not in text
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_an_unexpected_error_is_not_swallowed(
+    cfg_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only refusals are turned into sentences; a real bug still surfaces as one."""
+
+    def boom(cfg, **kwargs):
+        raise ValueError("a genuine bug")
+
+    fake_pipeline(monkeypatch, run_scan=boom)
+    result = runner.invoke(app, ["--config", str(cfg_file), "scan"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
 
 
 # ---------------------------------------------------------------------------
