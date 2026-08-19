@@ -51,11 +51,13 @@ max_symbols = 0                    # 0 = no cap; useful to speed up experiments
 #              limit that comes back as a 200 with "exceeded the daily hits
 #              limit" in the body — the run warns once and the remaining
 #              symbols simply have no fresh bars.
-# CAVEAT, and it bites silently: the bar cache does NOT record which provider
-# wrote each parquet file. Switching providers with an existing cache splices
-# two different adjustment bases into one series for the same symbol, which
-# looks like a price jump the strategy will happily trade. Delete data/cache/
-# and re-backfill whenever you change this key.
+# Switching this key on an existing cache is REFUSED, not merely discouraged:
+# providers adjust prices differently (yfinance adjusts for dividends, Stooq
+# does not), so mixing them would splice two adjustment bases into one series
+# and produce a price jump the strategy would happily trade. The cache records
+# which provider wrote it, and `swing data` stops before fetching anything if
+# the two disagree, telling you what to delete. To change providers:
+#   rm -rf data/cache && swing data --backfill
 provider = "yfinance"
 cache_dir = "data/cache"
 history_start = "2005-01-01"       # cache backfill start (backtest starts later)

@@ -22,7 +22,7 @@ swing scan --dry-run                    # a pick sheet, nothing sent
 swing journal add|exit|stop|show        # record manual fills, ratchet stops, read the log
 ```
 
-Tests are fast (~20s, 444 of them) and hermetic. Run the full suite after any
+Tests are fast (~20s, 455 of them) and hermetic. Run the full suite after any
 change: it layers `config.example.toml` under its fixtures, so editing that
 file breaks tests far away from it.
 
@@ -34,7 +34,9 @@ file breaks tests far away from it.
 - `src/swing/data/provider.py` — the `DataProvider` seam (`get_provider`);
   `yfinance_provider.py`, `schwab_provider.py`, `stooq_provider.py` implement
   it. `cache.py` is a parquet bar store that does **not** record which provider
-  wrote a file — switching providers requires deleting `data/cache/`.
+  wrote a file, and `ensure_provider` REFUSES to write into a cache stamped
+  with a different one — switching providers means deleting `data/cache/` and
+  re-backfilling.
 - `src/swing/backtest/` — `engine` (bar-by-bar, next-open fills), `walkforward`,
   `metrics`, `bootstrap` (block-bootstrap CIs), `report`, `gate`.
 - `src/swing/execution/` — append-only `journal.jsonl`, `guardrails.py`,

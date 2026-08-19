@@ -90,8 +90,9 @@ quietly stops existing in production.
 Data comes from yfinance by default, Schwab once your app is approved, or
 **stooq** as a free fallback when Yahoo breaks — stooq bars are split-adjusted
 but *not* dividend-adjusted, so long-horizon numbers drift, and because the
-cache does not record who wrote it you must delete `data/cache/` when switching
-providers.
+cache is stamped with the provider that wrote it, switching providers is
+refused until you delete `data/cache/` and re-backfill — mixing adjustment
+bases is the kind of corruption that never looks wrong.
 
 ---
 
@@ -249,7 +250,7 @@ docs/
   indicator-research.md     every default traced to evidence or an ablation
   schwab-setup.md           developer account → first live quote
   runbook.md                daily/weekly operation and failure recovery
-tests/                      444 tests, no network
+tests/                      455 tests, no network
 ```
 
 ---
