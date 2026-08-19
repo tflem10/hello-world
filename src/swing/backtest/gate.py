@@ -29,7 +29,9 @@ can produce, so it is parsed defensively rather than believed:
 * ``Infinity`` / ``-Infinity`` / ``NaN`` are rejected at parse time (they are
   JSON extensions, not JSON), and every number is re-checked for finiteness
   after parsing so a plain ``1e400`` cannot slip through as ``inf`` either.
-* An unusable number always falls back to the *worst* possible reading.
+* An unusable number always falls back to the *worst* possible reading, and a
+  profit factor flagged ``profit_factor_capped`` is a sentinel standing in for
+  infinity rather than a measurement, so it refuses instead of sailing through.
 
 Every failure is a plain-English sentence, because it is printed to a human who
 is about to be told they may not trade today and deserves to know why.
@@ -214,6 +216,18 @@ def check(cfg: Config) -> GateResult:
     max_drawdown = _as_float(oos.get("max_drawdown_pct"), default=100.0)
     trades = _as_int(oos.get("trades"), default=0)
 
+    # Plain truthiness here, and `is True` for `walkforward` above — the
+    # asymmetry is deliberate, because the two flags point opposite ways.
+    # Truthiness on `walkforward` would OPEN the gate on the string "false";
+    # truthiness on this flag only ever CLOSES it, so every ambiguous value
+    # (True, "true", 1) lands on the safe side. A missing key means "not
+    # capped", which keeps reports written before the flag existed valid.
+    if oos.get("profit_factor_capped"):
+        reasons.append(
+            "The out-of-sample window recorded zero losing trades, so its profit factor is a "
+            "sentinel rather than a measurement — which is too good to trust. Investigate the "
+            "data or configuration before trading."
+        )
     if profit_factor < gates.min_profit_factor:
         reasons.append(
             f"Out-of-sample profit factor is {profit_factor:.2f}, below the required "

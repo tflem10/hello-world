@@ -22,6 +22,7 @@ from swing.backtest.gate import (
     load_latest,
     read_latest,
 )
+from swing.backtest.metrics import PROFIT_FACTOR_CAP
 
 
 def passing_summary(**overrides):
@@ -418,3 +419,58 @@ def test_read_latest_separates_absence_from_corruption(tmp_path):
     summary, problem = read_latest(cfg)
     assert summary is None
     assert problem is not None and "valid JSON" in problem
+
+
+# ---------------------------------------------------------------------------
+# the no-losses sentinel is not a pass
+# ---------------------------------------------------------------------------
+
+
+def test_zero_out_of_sample_losses_refuses_instead_of_acing_the_gate(tmp_path):
+    """A 9999.0 profit factor clears any threshold on its face, and must not.
+
+    Thirty-plus out-of-sample trades with not one loser is a degeneracy signal
+    — a broken cost model, a universe of one, a window that never saw a down
+    market — not a holy grail. The gate's whole posture is to refuse anything
+    it cannot trust.
+    """
+    cfg = build_config(tmp_path)
+    write_latest(
+        cfg,
+        passing_summary(
+            oos={"profit_factor": PROFIT_FACTOR_CAP, "profit_factor_capped": True},
+        ),
+    )
+    verdict = check(cfg)
+    assert verdict.passed is False
+    reason = next(r for r in verdict.reasons if "zero losing trades" in r)
+    assert "too good to trust" in reason
+
+
+@pytest.mark.parametrize("capped", [True, "true", "false", 1, [0]])
+def test_any_truthy_capped_flag_closes_the_gate(tmp_path, capped):
+    """Opposite polarity to ``walkforward``: here truthiness only ever REFUSES.
+
+    ``walkforward`` needs ``is True`` because a stray truthy value would open
+    the gate; this flag needs plain truthiness because a stray truthy value
+    should close it. Both rules point the same way — fail closed.
+    """
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(oos={"profit_factor_capped": capped}))
+    assert check(cfg).passed is False
+
+
+@pytest.mark.parametrize("capped", [False, "", 0, None, []])
+def test_a_falsy_capped_flag_leaves_a_good_report_alone(tmp_path, capped):
+    cfg = build_config(tmp_path)
+    write_latest(cfg, passing_summary(oos={"profit_factor_capped": capped}))
+    assert check(cfg).passed is True
+
+
+def test_a_summary_written_before_the_flag_existed_is_still_valid(tmp_path):
+    """Missing key means "not capped" — older reports keep working."""
+    cfg = build_config(tmp_path)
+    summary = passing_summary()
+    assert "profit_factor_capped" not in summary["oos"]
+    write_latest(cfg, summary)
+    assert check(cfg).passed is True
