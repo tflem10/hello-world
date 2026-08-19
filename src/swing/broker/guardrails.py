@@ -31,6 +31,7 @@ import logging
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from math import isfinite
 from typing import TYPE_CHECKING, Any
 
 from swing import state as _state
@@ -45,6 +46,7 @@ __all__ = [
     "GuardrailResult",
     "MARKET_CLOSE",
     "MARKET_OPEN",
+    "WORKING_ORDER_STATUSES",
     "all_clear",
     "duplicate",
     "equity_mismatch",
@@ -57,12 +59,14 @@ __all__ = [
     "quote_drift",
     "reconciliation",
     "refusals",
+    "remaining_order_budget",
     "run_guardrails",
     "run_order_guardrails",
     "skipped",
     "stale_scan",
     "token_age",
     "trading_hours",
+    "working_order_symbols",
 ]
 
 log = logging.getLogger(__name__)
@@ -80,6 +84,29 @@ DEFAULT_DEDUPE_DAYS = 5
 
 #: Order types this system will never send, at any depth of an order structure.
 _MARKET_ORDER_TYPES = frozenset({"MARKET", "MARKET_ON_CLOSE"})
+
+#: Journal order statuses that mean "this order may still be alive at Schwab".
+#: ``pending`` is a row written just before the network call and ``unknown`` one
+#: whose fate was never established (audit BUG-002); both are counted as working
+#: because assuming an order is gone when it might not be is the unsafe half of
+#: the guess.
+WORKING_ORDER_STATUSES: frozenset[str] = frozenset({"open", "pending", "unknown"})
+
+
+def _as_float(value: Any) -> float | None:
+    """Coerce a JSON scalar to a float, or ``None`` when it is not a number.
+
+    Report fields arrive from a file a human can edit, so ``"n/a"``, ``None``
+    and ``True`` all have to become "no number" rather than a traceback
+    (audit BUG-044).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
 
 
 @dataclass(frozen=True)
@@ -164,32 +191,26 @@ def kill_switch(cfg: Config) -> GuardrailResult:
 def token_age(cfg: Config, *, age_days: float | None) -> GuardrailResult:
     """Refuse on a token Schwab will no longer renew; warn on its last day.
 
+    The seven-day ladder itself lives in :func:`swing.broker.auth.describe_token_age`
+    and is *not* re-implemented here: having the same enforcement rule in two
+    places is how a warning threshold silently drifts away from the refusal
+    threshold it is supposed to precede (audit DEBT-007). This function stays a
+    pure verdict-maker — it maps that description onto PASS/WARN/STOP and never
+    reads the clock.
+
     Args:
         cfg: the loaded configuration (used only for the token path in messages).
         age_days: the age of the token, from ``swing.broker.auth.token_age_days``.
-            ``None`` means there is no token at all, which is also a refusal.
+            ``None`` means either that there is no token or that its age could
+            not be established, and both are refusals (audit BUG-028).
     """
-    from swing.broker.auth import REAUTH_WARN_DAYS, REFRESH_TOKEN_LIFETIME_DAYS, token_path
+    from swing.broker.auth import describe_token_age, token_path
 
-    if age_days is None:
-        return _refuse(
-            "token_age",
-            f"There is no Schwab token at {token_path(cfg)}, so no order can be sent: run "
-            f"`swing auth` to log in.",
-        )
-    if age_days >= REFRESH_TOKEN_LIFETIME_DAYS:
-        return _refuse(
-            "token_age",
-            f"The Schwab token is {age_days:.1f} days old and refresh tokens die after "
-            f"{REFRESH_TOKEN_LIFETIME_DAYS:.0f} days, so it can no longer be renewed: run "
-            f"`swing auth` to log in again.",
-        )
-    if age_days >= REAUTH_WARN_DAYS:
-        return _warn(
-            "token_age",
-            f"The Schwab token is {age_days:.1f} days old — re-auth soon: run `swing auth` "
-            f"before it hits {REFRESH_TOKEN_LIFETIME_DAYS:.0f} days and stops working.",
-        )
+    status = describe_token_age(token_path(cfg), age_days)
+    if status.state in {"missing", "unknown", "expired"}:
+        return _refuse("token_age", status.message)
+    if status.state == "warn":
+        return _warn("token_age", status.message)
     return _ok("token_age", f"The Schwab token is {age_days:.1f} days old.")
 
 
@@ -198,7 +219,7 @@ def token_age(cfg: Config, *, age_days: float | None) -> GuardrailResult:
 # --------------------------------------------------------------------------
 
 
-def _to_eastern(moment: datetime) -> datetime:
+def to_eastern(moment: datetime) -> datetime:
     """Interpret ``moment`` in Eastern time; naive datetimes are taken as ET."""
     if moment.tzinfo is None:
         return moment
@@ -218,7 +239,7 @@ def trading_hours(now: datetime) -> GuardrailResult:
     unfilled, whereas placing at 3am is a genuine mistake. Pass ``now``
     explicitly — this module never reads the clock itself.
     """
-    eastern = _to_eastern(now)
+    eastern = to_eastern(now)
     if eastern.weekday() >= 5:
         return _refuse(
             "trading_hours",
@@ -288,24 +309,45 @@ def gate_passed(cfg: Config) -> GuardrailResult:
 # --------------------------------------------------------------------------
 
 
-def quote_drift(pick: Mapping[str, Any], quote: float | None, cfg: Config) -> GuardrailResult:
+def quote_drift(
+    pick: Mapping[str, Any],
+    quote: float | None,
+    cfg: Config,
+    *,
+    quote_error: str | None = None,
+) -> GuardrailResult:
     """Refuse when the market has moved away from the price the scan planned on.
 
     Args:
         pick: the pick record from ``picks.json``; ``entry`` and ``atr`` are read.
+            Both are coerced defensively: the file is editable, and a hand-typed
+            ``"n/a"`` has to become a refusal rather than a traceback (BUG-044).
         quote: the current price, already fetched by the caller. ``None`` means
             no quote could be had, which is itself a refusal.
         cfg: supplies ``execution.max_quote_drift_atr`` and ``max_quote_drift_pct``.
+        quote_error: what went wrong while fetching quotes, when the caller
+            knows. It is quoted verbatim in the refusal so the operator is told
+            *why* the price is missing instead of being sent to look for it
+            (audit DEBT-004).
     """
     symbol = str(pick.get("symbol", "?")).upper()
-    entry = float(pick.get("entry", 0.0) or 0.0)
-    atr = float(pick.get("atr", 0.0) or 0.0)
+    entry = _as_float(pick.get("entry"))
+    atr = _as_float(pick.get("atr")) or 0.0
 
     if quote is None:
+        detail = f" The last attempt failed with: {quote_error}." if quote_error else ""
         return _refuse(
             "quote_drift",
             f"No live quote for {symbol} could be fetched, so the scan's entry price cannot be "
-            f"checked against the market: fix the data provider, or place this order by hand.",
+            f"checked against the market: fix the data provider, or place this order by "
+            f"hand.{detail}",
+        )
+    if entry is None:
+        return _refuse(
+            "quote_drift",
+            f"The scan recorded {pick.get('entry')!r} as the entry price for {symbol}, which is "
+            f"not a number, so drift cannot be measured: re-run `swing scan` and execute against "
+            f"a fresh report.",
         )
     if entry <= 0:
         return _refuse(
@@ -359,6 +401,21 @@ def orders_placed_on(journal: Journal, day: date) -> list[dict[str, Any]]:
     return [o for o in journal.orders if _order_day(o) == target]
 
 
+def remaining_order_budget(journal: Journal, cfg: Config, *, today: date) -> int:
+    """How many more orders ``execution.max_orders_per_day`` allows today.
+
+    The one place the day's budget is worked out. It used to be computed here
+    *and* again in the executor's placement loop, which is exactly the kind of
+    duplicated enforcement rule that drifts apart under maintenance and lets
+    one more order out than the config allows (audit DEBT-007).
+
+    Returns:
+        The remaining allowance, never negative.
+    """
+    limit = int(cfg.execution.max_orders_per_day)
+    return max(0, limit - len(orders_placed_on(journal, today)))
+
+
 def orders_today(journal: Journal, cfg: Config, *, today: date) -> GuardrailResult:
     """Refuse once the day's order budget is spent."""
     limit = int(cfg.execution.max_orders_per_day)
@@ -369,7 +426,7 @@ def orders_today(journal: Journal, cfg: Config, *, today: date) -> GuardrailResu
             "execution.max_orders_per_day is 0, so no order may be sent today: raise it in the "
             "[execution] section of your config.toml if you meant to trade.",
         )
-    if already >= limit:
+    if remaining_order_budget(journal, cfg, today=today) <= 0:
         return _refuse(
             "orders_today",
             f"{already} order(s) have already been sent today and execution.max_orders_per_day "
@@ -476,18 +533,54 @@ def limit_only(order: Mapping[str, Any]) -> GuardrailResult:
 # --------------------------------------------------------------------------
 
 
+def _picked_recently_elsewhere(
+    journal: Journal,
+    symbol: str,
+    within_days: int,
+    *,
+    asof: date,
+    scan_date: date | None,
+) -> bool:
+    """``Journal.recently_picked``, minus the picks of the scan being executed.
+
+    The cooling-off window and the kind filter are *not* re-implemented here:
+    the journal's own copy of them is called, on a throwaway journal that holds
+    every pick except the ones dated ``scan_date``. That is the whole of the
+    BUG-006 fix — exemption by identity ("this is my own pick") instead of the
+    old ``asof - 1 day`` arithmetic, which assumed a scan and its execution
+    happened on the same calendar day and therefore refused every single pick in
+    the designed scan-tonight/execute-tomorrow flow.
+    """
+    if scan_date is None:
+        return journal.recently_picked(symbol, within_days, asof=asof)
+    stamp = scan_date.isoformat()
+    others = [p for p in journal.picks if str(p.date)[:10] != stamp]
+    view = _state.Journal(journal.path, picks=others)
+    return view.recently_picked(symbol, within_days, asof=asof)
+
+
 def duplicate(
     journal: Journal,
     symbol: str,
     *,
     asof: date,
     within_days: int = DEFAULT_DEDUPE_DAYS,
+    scan_date: date | None = None,
 ) -> GuardrailResult:
     """Refuse a symbol we already hold, already have working, or just traded.
 
-    ``asof`` is the execution day. The "recently picked" test deliberately looks
-    at the days *before* ``asof``, because today's own pick is in the journal by
-    the time the executor runs and must not block itself.
+    Args:
+        journal: the local journal.
+        symbol: the ticker about to be ordered.
+        asof: the execution day, which the cooling-off window is measured back
+            from.
+        within_days: the cooling-off window in calendar days; ``0`` disables it.
+        scan_date: the date of the scan report being executed. Picks carrying
+            that date are the *same* picks as the ones being placed, so they
+            never block themselves — a scan runs after the close and is executed
+            the next morning, which the previous "yesterday and earlier" rule
+            mistook for a repeat entry and refused (audit BUG-006). Leave it
+            ``None`` when there is no bundle, and only same-day picks are exempt.
     """
     sym = symbol.strip().upper()
 
@@ -508,7 +601,9 @@ def duplicate(
                 f"again: close it first, or run `swing positions` to reconcile.",
             )
 
-    if within_days > 0 and journal.recently_picked(sym, within_days, asof=asof - timedelta(days=1)):
+    if within_days > 0 and _picked_recently_elsewhere(
+        journal, sym, within_days, asof=asof, scan_date=scan_date
+    ):
         return _refuse(
             "duplicate",
             f"{sym} was already picked within the last {within_days} days, so it will not be "
@@ -527,18 +622,51 @@ def _symbol_set(symbols: Collection[str] | None) -> set[str]:
     return {str(s).strip().upper() for s in (symbols or []) if str(s).strip()}
 
 
+def working_order_symbols(journal: Journal) -> list[str]:
+    """Symbols the journal believes have an order alive at the broker.
+
+    Wider than :meth:`swing.state.Journal.open_orders` on purpose: it also
+    counts the ``pending`` row written just before a placement and the
+    ``unknown`` row left behind when a placement's outcome was never
+    established, because both may be real orders at Schwab (audit BUG-002).
+    """
+    out: list[str] = []
+    for order in journal.orders:
+        status = str(order.get("status", "open")).strip().lower()
+        if status not in WORKING_ORDER_STATUSES:
+            continue
+        symbol = str(order.get("symbol", "")).strip().upper()
+        if symbol:
+            out.append(symbol)
+    return sorted(set(out))
+
+
 def reconciliation(
     *,
     live_symbols: Collection[str] | None,
     journal_symbols: Collection[str] | None,
+    live_order_symbols: Collection[str] | None = None,
+    journal_order_symbols: Collection[str] | None = None,
     acknowledged: bool = False,
 ) -> GuardrailResult:
-    """Refuse when the broker and the journal disagree about what is held.
+    """Refuse when the broker and the journal disagree about what is outstanding.
 
-    If the two views differ, one of them is wrong, and placing orders against a
-    wrong view of the portfolio is how position limits get quietly broken. Pass
-    ``acknowledged=True`` to downgrade a known, understood difference to a
-    warning.
+    Two views are compared, not one. Positions answer "what do we own"; working
+    orders answer "what have we already asked for". Comparing positions alone
+    left an order that was placed but never journalled — or journalled but
+    cancelled in the Schwab app — completely invisible, which is the blindness
+    behind BUG-002 and half of BUG-007.
+
+    Args:
+        live_symbols: symbols the broker reports as positions; ``None`` when
+            they could not be read, which is a refusal.
+        journal_symbols: symbols the journal reports as positions.
+        live_order_symbols: symbols with a working order at the broker.
+            ``None`` means the broker's order book was not read, and that half
+            of the comparison is simply not made.
+        journal_order_symbols: symbols the journal believes have a working
+            order — see :func:`working_order_symbols`.
+        acknowledged: downgrade a known, understood difference to a warning.
     """
     if live_symbols is None:
         return _refuse(
@@ -548,16 +676,27 @@ def reconciliation(
         )
     live = _symbol_set(live_symbols)
     local = _symbol_set(journal_symbols)
-    only_broker = sorted(live - local)
-    only_local = sorted(local - live)
-    if not only_broker and not only_local:
-        return _ok("reconciliation", f"Broker and journal agree on {len(live)} position(s).")
-
     parts: list[str] = []
-    if only_broker:
+    if only_broker := sorted(live - local):
         parts.append(f"held at Schwab but not in the journal: {', '.join(only_broker)}")
-    if only_local:
+    if only_local := sorted(local - live):
         parts.append(f"in the journal but not at Schwab: {', '.join(only_local)}")
+
+    orders_compared = live_order_symbols is not None
+    if orders_compared:
+        live_orders = _symbol_set(live_order_symbols)
+        local_orders = _symbol_set(journal_order_symbols)
+        if extra := sorted(live_orders - local_orders):
+            parts.append(f"working at Schwab but not in the journal: {', '.join(extra)}")
+        if missing := sorted(local_orders - live_orders):
+            parts.append(f"working in the journal but not at Schwab: {', '.join(missing)}")
+
+    if not parts:
+        checked = f"{len(live)} position(s)"
+        if orders_compared:
+            checked += f" and {len(_symbol_set(live_order_symbols))} working order(s)"
+        return _ok("reconciliation", f"Broker and journal agree on {checked}.")
+
     detail = "; ".join(parts)
     if acknowledged:
         return _warn(
@@ -676,6 +815,7 @@ def run_guardrails(
     scan_date: date,
     token_age_days: float | None,
     live_symbols: Collection[str] | None = None,
+    live_order_symbols: Collection[str] | None = None,
     live_equity: float | None = None,
     acknowledged: bool = False,
     dry_run: bool = False,
@@ -689,6 +829,8 @@ def run_guardrails(
         scan_date: the date of the scan report being executed.
         token_age_days: from ``swing.broker.auth.token_age_days``.
         live_symbols: symbols the broker says are held; ``None`` when unknown.
+        live_order_symbols: symbols the broker says have a working order;
+            ``None`` when the order book was not read.
         live_equity: the broker's account value; ``None`` when unknown.
         acknowledged: downgrade a known reconciliation difference to a warning.
         dry_run: when True, checks that need live data report SKIP instead of
@@ -698,21 +840,22 @@ def run_guardrails(
         One :class:`GuardrailResult` per check. Ask :func:`all_clear` whether
         anything may be sent.
     """
+    today = to_eastern(now).date()
     results = [
         kill_switch(cfg),
         token_age(cfg, age_days=token_age_days),
         trading_hours(now),
         gate_passed(cfg),
-        stale_scan(scan_date=scan_date, today=_to_eastern(now).date()),
-        orders_today(journal, cfg, today=_to_eastern(now).date()),
+        stale_scan(scan_date=scan_date, today=today),
+        orders_today(journal, cfg, today=today),
     ]
 
     if dry_run and live_symbols is None:
         results.append(
             skipped(
                 "reconciliation",
-                "Not checked in a dry run: comparing Schwab's positions with the journal needs a "
-                "live connection.",
+                "Not checked in a dry run: comparing Schwab's positions and working orders with "
+                "the journal needs a live connection.",
             )
         )
     else:
@@ -720,6 +863,8 @@ def run_guardrails(
             reconciliation(
                 live_symbols=live_symbols,
                 journal_symbols=[p.get("symbol", "") for p in journal.positions()],
+                live_order_symbols=live_order_symbols,
+                journal_order_symbols=working_order_symbols(journal),
                 acknowledged=acknowledged,
             )
         )
@@ -749,6 +894,8 @@ def run_order_guardrails(
     proposed_notional: float,
     equity: float,
     dedupe_days: int = DEFAULT_DEDUPE_DAYS,
+    scan_date: date | None = None,
+    quote_error: str | None = None,
     dry_run: bool = False,
 ) -> list[GuardrailResult]:
     """Run every per-order guardrail for one drafted order.
@@ -756,6 +903,12 @@ def run_order_guardrails(
     In a dry run without a quote, ``quote_drift`` reports SKIP rather than
     refusing: the dry run must work with no network at all, and pretending we
     checked would be worse than saying we did not.
+
+    Args:
+        scan_date: the date of the scan being executed, so ``duplicate`` can
+            tell this pick apart from a genuine earlier one (audit BUG-006).
+        quote_error: why quotes were unavailable, carried into the refusal
+            (audit DEBT-004).
     """
     symbol = str(pick.get("symbol", "?")).upper()
     results = [limit_only(order)]
@@ -769,9 +922,11 @@ def run_order_guardrails(
             )
         )
     else:
-        results.append(quote_drift(pick, quote, cfg))
+        results.append(quote_drift(pick, quote, cfg, quote_error=quote_error))
 
-    results.append(duplicate(journal, symbol, asof=asof, within_days=dedupe_days))
+    results.append(
+        duplicate(journal, symbol, asof=asof, within_days=dedupe_days, scan_date=scan_date)
+    )
     results.append(
         new_exposure(
             cfg,

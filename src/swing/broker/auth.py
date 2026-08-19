@@ -26,9 +26,11 @@ import json
 import logging
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
@@ -40,7 +42,10 @@ __all__ = [
     "SETUP_GUIDE",
     "TokenStatus",
     "check",
+    "close_client",
+    "closing_client",
     "credentials_problem",
+    "describe_token_age",
     "get_client",
     "login",
     "quote_price",
@@ -61,6 +66,8 @@ REAUTH_WARN_DAYS = 6.0
 SETUP_GUIDE = "docs/schwab-setup.md"
 
 _SECONDS_PER_DAY = 86_400.0
+
+_T = TypeVar("_T")
 
 
 class AuthError(RuntimeError):
@@ -112,10 +119,14 @@ def _token_creation_epoch(path: Path) -> float | None:
 
     schwab-py wraps every token it writes as ``{"creation_timestamp": ...,
     "token": {...}}`` and deliberately keeps that timestamp fixed across
-    refreshes, which is exactly the number the seven-day clock runs on. When
-    the file is not in that shape (hand-written fixture, older schwab-py) we
-    fall back to the file's modification time, which is a pessimistic but
-    honest approximation.
+    refreshes, which is exactly the number the seven-day clock runs on.
+
+    There is no fallback, and that is deliberate (audit BUG-028). The obvious
+    one — the file's modification time — tracks the last *refresh*, and
+    schwab-py rewrites the file every time it refreshes, so a six-day-old token
+    refreshed five minutes ago measured five minutes old and the day-six warning
+    never fired. An age this function cannot establish is reported as unknown,
+    and an unknown age is treated as expired everywhere it matters.
     """
     raw: Any = None
     try:
@@ -126,14 +137,16 @@ def _token_creation_epoch(path: Path) -> float | None:
         stamp = raw.get("creation_timestamp")
         if isinstance(stamp, int | float) and not isinstance(stamp, bool):
             return float(stamp)
-    try:
-        return path.stat().st_mtime
-    except OSError:  # pragma: no cover - the exists() check above makes this rare
-        return None
+    log.warning(
+        "The Schwab token at %s carries no creation_timestamp, so its age is unknown and it will "
+        "be treated as expired. Run `swing auth` to write a fresh one.",
+        path,
+    )
+    return None
 
 
 def token_age_days(cfg: Config, *, now: _dt.datetime | None = None) -> float | None:
-    """Return the age of the stored token in days, or ``None`` if there is none.
+    """Return the age of the stored token in days, or ``None`` if it is unknowable.
 
     Args:
         cfg: the loaded configuration (only ``schwab.token_path`` is used).
@@ -141,8 +154,12 @@ def token_age_days(cfg: Config, *, now: _dt.datetime | None = None) -> float | N
             datetimes are interpreted in local time, matching file timestamps.
 
     Returns:
-        Age in fractional days (never negative), or ``None`` when no token file
-        exists or its creation time cannot be established.
+        Age in fractional days, or ``None`` when no token file exists, its
+        creation time cannot be established, or that creation time is in the
+        future. A future stamp used to clamp to ``0.0`` — "brand new, forever" —
+        so a skewed clock or a half-written file disabled the seven-day
+        guardrail entirely (audit BUG-028). It now reads as unknown, which
+        refuses.
     """
     path = token_path(cfg)
     if not path.exists():
@@ -151,7 +168,17 @@ def token_age_days(cfg: Config, *, now: _dt.datetime | None = None) -> float | N
     if created is None:
         return None
     moment = now or _dt.datetime.now(_dt.UTC)
-    return max(0.0, (moment.timestamp() - created) / _SECONDS_PER_DAY)
+    age = (moment.timestamp() - created) / _SECONDS_PER_DAY
+    if age < 0.0:
+        log.warning(
+            "The Schwab token at %s claims it was created %.1f day(s) in the future, so its age "
+            "is unknown and it will be treated as expired. Check the system clock, then run "
+            "`swing auth`.",
+            path,
+            -age,
+        )
+        return None
+    return age
 
 
 @dataclass(frozen=True)
@@ -160,7 +187,7 @@ class TokenStatus:
 
     path: Path
     age_days: float | None
-    state: str  # "missing" | "fresh" | "warn" | "expired"
+    state: str  # "missing" | "unknown" | "fresh" | "warn" | "expired"
     message: str
 
     @property
@@ -169,20 +196,53 @@ class TokenStatus:
         return self.state in {"fresh", "warn"}
 
 
-def token_status(cfg: Config, *, now: _dt.datetime | None = None) -> TokenStatus:
-    """Classify the stored token as missing, fresh, due for renewal, or dead."""
-    path = token_path(cfg)
-    age = token_age_days(cfg, now=now)
-    if age is None:
+def describe_token_age(
+    path: Path, age_days: float | None, *, exists: bool | None = None
+) -> TokenStatus:
+    """Classify an already-measured token age. The one copy of the seven-day ladder.
+
+    Both ``swing auth --check`` and the ``token_age`` guardrail used to walk
+    these thresholds themselves, so the day-six warning and the day-seven
+    refusal were free to drift apart (audit DEBT-007). They now both come here.
+    This function is pure: it reads no clock and, unless it has to decide
+    between "no token" and "unknown age", touches no file.
+
+    Args:
+        path: where the token lives — quoted in the messages.
+        age_days: the measured age, from :func:`token_age_days`. ``None`` means
+            the age could not be established.
+        exists: whether the token file is there, when the caller already knows.
+            Only consulted for a ``None`` age, to tell "you never logged in"
+            apart from "this file's age is unreadable" — two different problems
+            with two different fixes.
+    """
+    if age_days is None:
+        present = path.exists() if exists is None else exists
+        if not present:
+            return TokenStatus(
+                path=path,
+                age_days=None,
+                state="missing",
+                message=(
+                    f"There is no Schwab token at {path}, so nothing is logged in: run "
+                    f"`swing auth` to open the browser login flow ({SETUP_GUIDE})."
+                ),
+            )
         return TokenStatus(
             path=path,
             age_days=None,
-            state="missing",
+            state="unknown",
             message=(
-                f"There is no Schwab token at {path}, so nothing is logged in: run `swing auth` "
-                f"to open the browser login flow ({SETUP_GUIDE})."
+                f"The age of the Schwab token at {path} cannot be worked out — it carries no "
+                f"creation time, or claims one in the future — and a token of unknown age is "
+                f"treated as expired, so nothing will be sent: run `swing auth` to log in again "
+                f"and start a fresh {REFRESH_TOKEN_LIFETIME_DAYS:.0f}-day clock."
             ),
         )
+    return _describe_known_age(path, age_days)
+
+
+def _describe_known_age(path: Path, age: float) -> TokenStatus:
     if age >= REFRESH_TOKEN_LIFETIME_DAYS:
         return TokenStatus(
             path=path,
@@ -216,6 +276,12 @@ def token_status(cfg: Config, *, now: _dt.datetime | None = None) -> TokenStatus
     )
 
 
+def token_status(cfg: Config, *, now: _dt.datetime | None = None) -> TokenStatus:
+    """Classify the stored token: missing, unknown age, fresh, due for renewal, or dead."""
+    path = token_path(cfg)
+    return describe_token_age(path, token_age_days(cfg, now=now), exists=path.exists())
+
+
 def _secure_token_file(path: Path) -> None:
     """Make the token readable only by its owner. Best effort, never fatal."""
     try:
@@ -227,6 +293,36 @@ def _secure_token_file(path: Path) -> None:
 # --------------------------------------------------------------------------
 # the client factory
 # --------------------------------------------------------------------------
+
+
+def close_client(client: Any) -> None:
+    """Release a schwab-py client's HTTP connection pool. Never raises.
+
+    schwab-py's synchronous ``Client`` is a thin wrapper around an
+    ``httpx.Client`` it keeps in ``.session``, and it has no ``close()`` of its
+    own — so ``contextlib.closing`` alone would fail on it. Each client that is
+    built and dropped leaves a pool of open sockets behind, which is invisible
+    in a one-shot CLI run and a genuine leak in anything long-lived
+    (audit LEAK-004).
+    """
+    for owner in (client, getattr(client, "session", None)):
+        closer = getattr(owner, "close", None)
+        if not callable(closer):
+            continue
+        try:
+            closer()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("Closing the Schwab client raised %s", exc)
+        return
+
+
+@contextmanager
+def closing_client(client: _T) -> Iterator[_T]:
+    """Yield ``client`` and close its connection pool afterwards, come what may."""
+    try:
+        yield client
+    finally:
+        close_client(client)
 
 
 def get_client(cfg: Config) -> Any:
@@ -322,11 +418,16 @@ def login(cfg: Config) -> None:
         raise SystemExit(2) from exc
 
     try:
-        client_from_login_flow(
-            cfg.schwab.api_key,
-            cfg.schwab.app_secret,
-            cfg.schwab.callback_url,
-            str(path),
+        # The client this returns is only a side effect — the token file is
+        # what we came for — so its connection pool is closed straight away
+        # rather than left dangling (audit LEAK-004).
+        close_client(
+            client_from_login_flow(
+                cfg.schwab.api_key,
+                cfg.schwab.app_secret,
+                cfg.schwab.callback_url,
+                str(path),
+            )
         )
     except Exception as exc:
         print(
@@ -418,23 +519,38 @@ def account_hash(cfg: Config, client: Any) -> tuple[str, str]:
     return masked, str(row.get("hashValue", ""))
 
 
+#: Fields that hold a *current* price, in preference order. ``closePrice`` is
+#: deliberately absent: it is Schwab's **previous** close, and letting it stand
+#: in for a live quote meant the run-away-price guardrail could validate today's
+#: order against yesterday's number precisely when the data was already
+#: degraded (audit BUG-027).
+_CURRENT_PRICE_FIELDS = ("lastPrice", "mark", "regularMarketLastPrice")
+
+
 def quote_price(payload: Any, symbol: str) -> float | None:
-    """Dig the last traded price out of a Schwab quote payload."""
+    """Dig the last traded price for ``symbol`` out of a Schwab quote payload.
+
+    Returns ``None`` rather than a guess whenever the payload has no block for
+    this symbol. The old code fell back to the whole batch payload, so asking a
+    multi-symbol response for a symbol it did not contain answered with some
+    other symbol's price (audit BUG-027).
+    """
     if not isinstance(payload, dict):
         return None
-    block = payload.get(symbol, payload)
-    if isinstance(block, dict):
-        for key in ("quote", "regular", "extended"):
-            inner = block.get(key)
-            if isinstance(inner, dict):
-                for field in ("lastPrice", "mark", "regularMarketLastPrice", "closePrice"):
-                    value = inner.get(field)
-                    if isinstance(value, int | float) and not isinstance(value, bool):
-                        return float(value)
-        for field in ("lastPrice", "mark", "closePrice"):
-            value = block.get(field)
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                return float(value)
+    block = payload.get(symbol)
+    if not isinstance(block, dict):
+        return None
+    for key in ("quote", "regular", "extended"):
+        inner = block.get(key)
+        if isinstance(inner, dict):
+            for field in _CURRENT_PRICE_FIELDS:
+                value = inner.get(field)
+                if isinstance(value, int | float) and not isinstance(value, bool):
+                    return float(value)
+    for field in _CURRENT_PRICE_FIELDS:
+        value = block.get(field)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
     return None
 
 
@@ -448,7 +564,7 @@ def check(cfg: Config) -> None:
     status = token_status(cfg)
     print(f"Token file : {status.path}")
     if status.age_days is None:
-        print("Token age  : (no token)")
+        print("Token age  : (no token)" if status.state == "missing" else "Token age  : (unknown)")
     else:
         print(f"Token age  : {status.age_days:.1f} days")
     print(f"Status     : {status.message}")
@@ -466,32 +582,35 @@ def check(cfg: Config) -> None:
         print(str(exc))
         raise SystemExit(1) from exc
 
-    try:
-        masked, hash_value = account_hash(cfg, client)
-    except AuthError as exc:
-        print(str(exc))
-        raise SystemExit(1) from exc
-    except Exception as exc:
-        print(
-            f"Schwab would not list your accounts ({exc}). If the token has expired, run "
-            f"`swing auth`; otherwise check your internet connection and try again."
-        )
-        raise SystemExit(1) from exc
-    print(f"Account    : {masked} (hash {short_hash(hash_value)})")
+    with closing_client(client):
+        try:
+            masked, hash_value = account_hash(cfg, client)
+        except AuthError as exc:
+            print(str(exc))
+            raise SystemExit(1) from exc
+        except Exception as exc:
+            print(
+                f"Schwab would not list your accounts ({exc}). If the token has expired, run "
+                f"`swing auth`; otherwise check your internet connection and try again."
+            )
+            raise SystemExit(1) from exc
+        print(f"Account    : {masked} (hash {short_hash(hash_value)})")
 
-    try:
-        price = quote_price(response_json(client.get_quote("SPY")), "SPY")
-    except Exception as exc:
-        print(
-            f"The account looks fine but the SPY test quote failed ({exc}). Market data is a "
-            f"separate product on your developer.schwab.com app — check it was added and "
-            f"approved ({SETUP_GUIDE})."
-        )
-        raise SystemExit(1) from exc
-    if price is None:
-        print("SPY quote  : (Schwab answered, but with no price in it)")
-    else:
-        print(f"SPY quote  : {price:.2f}")
+        try:
+            price = quote_price(response_json(client.get_quote("SPY")), "SPY")
+        except Exception as exc:
+            print(
+                f"The account looks fine but the SPY test quote failed ({exc}). Market data is a "
+                f"separate product on your developer.schwab.com app — check it was added and "
+                f"approved ({SETUP_GUIDE})."
+            )
+            raise SystemExit(1) from exc
+        if price is None:
+            print("SPY quote  : (Schwab answered, but with no price in it)")
+        else:
+            print(f"SPY quote  : {price:.2f}")
 
-    if status.state == "expired":
+    # An unknown age is treated as expired everywhere that matters, so say so
+    # here too rather than reporting success on a token that cannot trade.
+    if status.state in {"expired", "unknown"}:
         raise SystemExit(1)

@@ -336,6 +336,29 @@ def test_quote_drift_blocks_when_the_scan_recorded_no_entry(test_cfg: Config) ->
     assert result.ok is False
 
 
+def test_quote_drift_refuses_a_pick_whose_entry_is_not_a_number(test_cfg: Config) -> None:
+    """Audit BUG-044: raw float() on an editable file field raised, mid-run."""
+    pick = {**make_pick(), "entry": "n/a"}
+    result = g.quote_drift(pick, 100.0, test_cfg)
+    assert result.ok is False
+    assert "not a number" in result.reason
+    assert result.reason.endswith(".")
+
+
+def test_quote_drift_survives_a_junk_atr(test_cfg: Config) -> None:
+    """Audit BUG-044: an unusable ATR falls back to the percentage limit, not a traceback."""
+    pick = {**make_pick(), "atr": "unknown"}
+    result = g.quote_drift(pick, 100.5, test_cfg)
+    assert result.ok is True
+
+
+def test_quote_drift_quotes_the_reason_the_price_was_missing(test_cfg: Config) -> None:
+    """Audit DEBT-004: "fix the data provider" without saying what it said is useless."""
+    result = g.quote_drift(make_pick(), None, test_cfg, quote_error="yfinance said HTTP 429")
+    assert result.ok is False
+    assert "yfinance said HTTP 429" in result.reason
+
+
 def test_quote_drift_passes_when_the_price_barely_moved(test_cfg: Config) -> None:
     assert g.quote_drift(make_pick(entry=100.0, atr=2.0), 100.4, test_cfg).ok is True
 
@@ -372,6 +395,30 @@ def test_orders_placed_on_reads_either_timestamp_key(test_cfg: Config) -> None:
     journal = Journal.load(test_cfg)
     journal.record_order({"symbol": "AAPL", "placed_at": "2026-08-18T10:30:00-04:00"})
     assert len(g.orders_placed_on(journal, date(2026, 8, 18))) == 1
+
+
+def test_remaining_order_budget_is_what_the_guardrail_enforces(cfg_factory: Any) -> None:
+    """Audit DEBT-007: the budget was computed here and again in the placement loop."""
+    cfg = cfg_factory(execution={"max_orders_per_day": 2})
+    journal = Journal.load(cfg)
+    today = date(2026, 8, 18)
+    assert g.remaining_order_budget(journal, cfg, today=today) == 2
+
+    journal.record_order({"symbol": "AAPL", "date": today.isoformat(), "status": "open"})
+    assert g.remaining_order_budget(journal, cfg, today=today) == 1
+    assert g.orders_today(journal, cfg, today=today).ok is True
+
+    journal.record_order({"symbol": "MSFT", "date": today.isoformat(), "status": "open"})
+    assert g.remaining_order_budget(journal, cfg, today=today) == 0
+    assert g.orders_today(journal, cfg, today=today).ok is False
+
+
+def test_remaining_order_budget_never_goes_negative(cfg_factory: Any) -> None:
+    cfg = cfg_factory(execution={"max_orders_per_day": 1})
+    journal = Journal.load(cfg)
+    for symbol in ("AAPL", "MSFT", "NVDA"):
+        journal.record_order({"symbol": symbol, "date": "2026-08-18", "status": "open"})
+    assert g.remaining_order_budget(journal, cfg, today=date(2026, 8, 18)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +507,13 @@ def test_duplicate_blocks_a_symbol_already_held(journal: Journal) -> None:
 
 
 def test_duplicate_blocks_a_symbol_picked_yesterday(journal: Journal) -> None:
+    """Audit BUG-006: with no bundle to exempt, yesterday's pick still blocks.
+
+    The old code subtracted a day from ``asof`` *before* asking the journal,
+    which shifted the whole cooling-off window and let this case through as
+    "today's own pick". The exemption is now by identity — see the scan_date
+    tests below — so the plain window is measured honestly again.
+    """
     journal.add_picks([make_record("AAPL", date(2026, 8, 17))])
     result = g.duplicate(journal, "AAPL", asof=date(2026, 8, 18), within_days=5)
     assert result.ok is False
@@ -472,9 +526,62 @@ def test_duplicate_does_not_block_todays_own_pick(journal: Journal) -> None:
     assert g.duplicate(journal, "AAPL", asof=date(2026, 8, 18), within_days=5).ok is True
 
 
+def test_duplicate_exempts_the_scan_being_executed(journal: Journal) -> None:
+    """Audit BUG-006: the designed flow is scan tonight, execute tomorrow morning.
+
+    Picks are stamped with the *scan* date (17:30, after the close), so at
+    execution time they are always dated the previous day. Treating that as a
+    repeat entry refused 100% of orders in the only workflow the system has.
+    """
+    journal.add_picks([make_record("AAPL", date(2026, 8, 17))])
+    result = g.duplicate(
+        journal,
+        "AAPL",
+        asof=date(2026, 8, 18),
+        within_days=5,
+        scan_date=date(2026, 8, 17),
+    )
+    assert result.ok is True
+
+
+def test_duplicate_still_refuses_a_genuinely_recent_pick(journal: Journal) -> None:
+    """Audit BUG-006: exempting the bundle must not switch dedupe off."""
+    journal.add_picks([make_record("AAPL", date(2026, 8, 15))])
+    result = g.duplicate(
+        journal,
+        "AAPL",
+        asof=date(2026, 8, 18),
+        within_days=5,
+        scan_date=date(2026, 8, 17),
+    )
+    assert result.ok is False
+    assert "within the last 5 days" in result.reason
+
+
+def test_duplicate_exempts_by_identity_not_by_age(journal: Journal) -> None:
+    """Audit BUG-006: only the bundle's own picks are exempt, not everything that day."""
+    journal.add_picks(
+        [make_record("AAPL", date(2026, 8, 17)), make_record("AAPL", date(2026, 8, 14))]
+    )
+    result = g.duplicate(
+        journal,
+        "AAPL",
+        asof=date(2026, 8, 18),
+        within_days=5,
+        scan_date=date(2026, 8, 17),
+    )
+    assert result.ok is False
+
+
 def test_duplicate_ignores_closed_orders(journal: Journal) -> None:
     journal.record_order({"symbol": "AAPL", "date": "2026-08-18", "status": "filled"})
     assert g.duplicate(journal, "AAPL", asof=date(2026, 8, 18), within_days=0).ok is True
+
+
+def test_duplicate_blocks_a_symbol_with_a_pending_order(journal: Journal) -> None:
+    """Audit BUG-002: a row written just before the network call may be a live order."""
+    journal.record_order({"symbol": "AAPL", "date": "2026-08-18", "status": "pending"})
+    assert g.working_order_symbols(journal) == ["AAPL"]
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +612,64 @@ def test_reconciliation_downgrades_an_acknowledged_difference() -> None:
 
 def test_reconciliation_passes_when_both_views_agree() -> None:
     assert g.reconciliation(live_symbols=["aapl"], journal_symbols=["AAPL"]).ok is True
+
+
+def test_reconciliation_refuses_an_order_the_journal_never_saw() -> None:
+    """Audit BUG-007/BUG-002: positions alone cannot see an unrecorded live order."""
+    result = g.reconciliation(
+        live_symbols=[],
+        journal_symbols=[],
+        live_order_symbols=["MSFT"],
+        journal_order_symbols=[],
+    )
+    assert result.ok is False
+    assert "working at Schwab but not in the journal: MSFT" in result.reason
+
+
+def test_reconciliation_refuses_an_order_the_broker_no_longer_has() -> None:
+    """Audit BUG-007: cancelled in the Schwab app, still 'working' in the journal."""
+    result = g.reconciliation(
+        live_symbols=[],
+        journal_symbols=[],
+        live_order_symbols=[],
+        journal_order_symbols=["AAPL"],
+    )
+    assert result.ok is False
+    assert "working in the journal but not at Schwab: AAPL" in result.reason
+
+
+def test_reconciliation_passes_when_both_order_books_agree() -> None:
+    result = g.reconciliation(
+        live_symbols=["AAPL"],
+        journal_symbols=["AAPL"],
+        live_order_symbols=["msft"],
+        journal_order_symbols=["MSFT"],
+    )
+    assert result.ok is True
+    assert "1 working order(s)" in result.reason
+
+
+def test_reconciliation_does_not_compare_orders_it_was_not_given() -> None:
+    """``None`` means "the order book was not read", which is not a disagreement."""
+    result = g.reconciliation(
+        live_symbols=["AAPL"], journal_symbols=["AAPL"], journal_order_symbols=["MSFT"]
+    )
+    assert result.ok is True
+
+
+def test_working_order_symbols_counts_every_status_that_might_be_alive(
+    journal: Journal,
+) -> None:
+    """Audit BUG-002: pending and unknown rows may be real orders at Schwab."""
+    for symbol, status in (
+        ("AAPL", "open"),
+        ("MSFT", "pending"),
+        ("NVDA", "unknown"),
+        ("TSLA", "filled"),
+        ("AMD", "cancelled"),
+    ):
+        journal.record_order({"symbol": symbol, "date": "2026-08-18", "status": status})
+    assert g.working_order_symbols(journal) == ["AAPL", "MSFT", "NVDA"]
 
 
 # ---------------------------------------------------------------------------

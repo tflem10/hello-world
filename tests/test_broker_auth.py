@@ -181,11 +181,16 @@ def test_token_age_ignores_later_writes_to_the_file(test_cfg: Config) -> None:
     assert age is not None and age > 5.9
 
 
-def test_token_age_falls_back_to_the_file_mtime(test_cfg: Config) -> None:
+def test_token_age_is_unknown_without_a_creation_stamp(test_cfg: Config) -> None:
+    """Audit BUG-028: the mtime fallback is gone — it measured the last refresh.
+
+    schwab-py rewrites the token file on every refresh, so the old fallback
+    reported a six-day-old token as five minutes old and the day-six warning
+    never fired. An age that cannot be established is now ``None``, which every
+    caller treats as expired.
+    """
     write_token(test_cfg, age_days=3.0, wrapped=False)
-    age = auth.token_age_days(test_cfg)
-    assert age is not None
-    assert 2.99 < age < 3.01
+    assert auth.token_age_days(test_cfg) is None
 
 
 def test_token_age_accepts_an_explicit_now(test_cfg: Config) -> None:
@@ -195,10 +200,46 @@ def test_token_age_accepts_an_explicit_now(test_cfg: Config) -> None:
     assert age is not None and 9.99 < age < 10.01
 
 
-def test_token_age_never_goes_negative(test_cfg: Config) -> None:
+def test_token_age_is_unknown_when_the_stamp_is_in_the_future(test_cfg: Config) -> None:
+    """Audit BUG-028: a future creation stamp used to clamp to 0.0 — new forever."""
     write_token(test_cfg, age_days=0.0)
     earlier = dt.datetime.now(dt.UTC) - dt.timedelta(days=5)
-    assert auth.token_age_days(test_cfg, now=earlier) == 0.0
+    assert auth.token_age_days(test_cfg, now=earlier) is None
+
+
+def test_an_unknown_age_reads_as_unknown_not_missing(test_cfg: Config) -> None:
+    """Audit BUG-028: "you never logged in" and "this file is unreadable" differ."""
+    write_token(test_cfg, age_days=3.0, wrapped=False)
+    status = auth.token_status(test_cfg)
+    assert status.state == "unknown"
+    assert status.usable is False
+    assert "treated as expired" in status.message
+    assert "swing auth" in status.message
+
+
+def test_describe_token_age_is_the_one_ladder(test_cfg: Config) -> None:
+    """Audit DEBT-007: auth and the guardrail must classify from the same code."""
+    from swing.broker import guardrails as g
+
+    path = auth.token_path(test_cfg)
+    for age, state, ok, warning in (
+        (0.5, "fresh", True, False),
+        (6.4, "warn", True, True),
+        (7.2, "expired", False, False),
+    ):
+        assert auth.describe_token_age(path, age).state == state
+        verdict = g.token_age(test_cfg, age_days=age)
+        assert (verdict.ok, verdict.warning) == (ok, warning)
+
+
+def test_the_guardrail_refuses_a_token_of_unknown_age(test_cfg: Config) -> None:
+    """Audit BUG-028: an unreadable age must refuse, and say why in English."""
+    from swing.broker import guardrails as g
+
+    write_token(test_cfg, age_days=3.0, wrapped=False)
+    result = g.token_age(test_cfg, age_days=auth.token_age_days(test_cfg))
+    assert result.ok is False
+    assert "treated as expired" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +332,84 @@ def test_login_runs_the_browser_flow_and_locks_the_token_down(
     assert cfg_with_keys.schwab.callback_url in out
     assert "7 days" in out
     assert "swing auth --check" in out
+
+
+class FakeSession:
+    """The one part of ``httpx.Client`` that matters here: it can be closed."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PoolClient:
+    """A schwab-py-shaped client: no ``close()`` of its own, a session that has one."""
+
+    def __init__(self) -> None:
+        self.session = FakeSession()
+
+    def get_account_numbers(self) -> FakeResponse:
+        return FakeResponse([{"accountNumber": "123456789", "hashValue": "ABCDEF0123456789"}])
+
+    def get_quote(self, symbol: str) -> FakeResponse:
+        return FakeResponse({symbol: {"quote": {"lastPrice": 512.34}}})
+
+
+def test_close_client_closes_the_underlying_connection_pool() -> None:
+    """Audit LEAK-004: schwab-py's Client has no close(); its httpx session does."""
+    client = PoolClient()
+    auth.close_client(client)
+    assert client.session.closed is True
+
+
+def test_close_client_never_raises_on_anything_else() -> None:
+    auth.close_client(object())  # no close, no session — and no traceback
+
+
+def test_check_closes_the_client_it_built(
+    cfg_with_keys: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Audit LEAK-004: `swing auth --check` built a pool just to print one quote."""
+    write_token(cfg_with_keys, age_days=1.0)
+    client = PoolClient()
+    monkeypatch.setattr(auth, "get_client", lambda cfg: client)
+
+    auth.check(cfg_with_keys)
+
+    assert client.session.closed is True
+    assert "512.34" in capsys.readouterr().out
+
+
+def test_check_closes_the_client_even_when_schwab_errors(
+    cfg_with_keys: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit LEAK-004: the failure path leaked the pool too."""
+    write_token(cfg_with_keys, age_days=1.0)
+    client = PoolClient()
+    monkeypatch.setattr(client, "get_quote", Mock(side_effect=RuntimeError("403 forbidden")))
+    monkeypatch.setattr(auth, "get_client", lambda cfg: client)
+
+    with pytest.raises(SystemExit):
+        auth.check(cfg_with_keys)
+
+    assert client.session.closed is True
+
+
+def test_login_closes_the_client_the_flow_hands_back(
+    cfg_with_keys: Config, fake_schwab: types.ModuleType
+) -> None:
+    """Audit LEAK-004: login wants the token file, not the client — so close it."""
+    client = PoolClient()
+
+    def flow(api_key: str, app_secret: str, callback_url: str, token_path: str) -> PoolClient:
+        Path(token_path).write_text('{"creation_timestamp": 1, "token": {}}', encoding="utf-8")
+        return client
+
+    fake_schwab.client_from_login_flow = Mock(side_effect=flow)  # type: ignore[attr-defined]
+    auth.login(cfg_with_keys)
+    assert client.session.closed is True
 
 
 def test_login_explains_the_usual_causes_when_the_flow_fails(
@@ -402,11 +521,30 @@ def test_response_json_passes_plain_objects_through() -> None:
         {"SPY": {"quote": {"lastPrice": 512.34}}},
         {"SPY": {"quote": {"mark": 512.34}}},
         {"SPY": {"lastPrice": 512.34}},
-        {"quote": {"lastPrice": 512.34}},
     ],
 )
 def test_quote_price_digs_the_price_out_of_several_shapes(payload: dict[str, Any]) -> None:
     assert auth.quote_price(payload, "SPY") == 512.34
+
+
+def test_quote_price_never_answers_with_another_symbols_block() -> None:
+    """Audit BUG-027: a missing symbol key used to fall back to the whole payload.
+
+    Asking a two-symbol batch for a third symbol answered with whichever price
+    the outer dict happened to expose — a wrong "current price" fed straight
+    into the run-away-price guardrail.
+    """
+    batch = {"AAPL": {"quote": {"lastPrice": 100.0}}, "quote": {"lastPrice": 512.34}}
+    assert auth.quote_price(batch, "MSFT") is None
+
+
+def test_quote_price_refuses_the_previous_close() -> None:
+    """Audit BUG-027: closePrice is *yesterday's* close, not a current price."""
+    assert auth.quote_price({"SPY": {"quote": {"closePrice": 512.34}}}, "SPY") is None
+    assert auth.quote_price({"SPY": {"closePrice": 512.34}}, "SPY") is None
+    # A real last price still wins, with the stale field sitting right beside it.
+    live = {"SPY": {"quote": {"closePrice": 500.0, "lastPrice": 512.34}}}
+    assert auth.quote_price(live, "SPY") == 512.34
 
 
 def test_short_hash_abbreviates_for_display() -> None:
