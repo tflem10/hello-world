@@ -60,6 +60,7 @@ sma_slow_rising_days = 21       # the 200-day SMA must be higher than N days ago
 min_above_low_mult = 1.25       # price >= 1.25x the 52-week low
 max_below_high_pct = 25.0       # price within 25% of the 52-week high
 adx_min = 20.0                  # minimum ADX(14): is there actually a trend?
+                                # 0 disables the ADX filter (ADX >= 0 always holds)
 
 # --- entry trigger ---------------------------------------------------------
 donchian_window = 20            # breakout of the prior N-day high

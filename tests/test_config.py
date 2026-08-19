@@ -221,6 +221,34 @@ def test_loads_an_explicit_file_and_overrides_only_what_is_given(tmp_path: Path)
     assert cfg.data.cache_dir == Path.home() / "somewhere" / "cache"  # ~ expanded
 
 
+def test_adx_min_zero_disables_the_filter(tmp_path: Path) -> None:
+    """Ablation sweeps switch the ADX filter off with 0.0, which must be legal."""
+    assert StrategyCfg(adx_min=0.0).adx_min == 0.0
+
+    cfg = load_config(_write(tmp_path / "c.toml", "[strategy]\nadx_min = 0.0\n"))
+    assert cfg.strategy.adx_min == 0.0
+
+    # written as a bare integer it still loads, as a float
+    cfg = load_config(_write(tmp_path / "c2.toml", "[strategy]\nadx_min = 0\n"))
+    assert cfg.strategy.adx_min == 0.0
+    assert isinstance(cfg.strategy.adx_min, float)
+
+
+def test_adx_min_below_zero_is_still_rejected() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        StrategyCfg(adx_min=-0.1)
+    message = str(excinfo.value)
+    assert "strategy.adx_min" in message
+    assert "at least 0.0" in message
+    assert "0 disables the filter" in message  # the message says how to switch it off
+    assert message.endswith(".")
+
+
+def test_adx_min_above_one_hundred_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="strategy.adx_min"):
+        StrategyCfg(adx_min=100.1)
+
+
 def test_backtest_initial_equity_is_separate_from_account_equity(tmp_path: Path) -> None:
     """The backtest measures the strategy at a reference capital, not your balance."""
     cfg = load_config(

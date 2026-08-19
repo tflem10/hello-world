@@ -519,8 +519,10 @@ A position open for `strategy.time_stop_days` **trading days** since its fill ba
 next open regardless of P&L. 40 trading days ≈ 8 weeks — the stated upper bound of the holding
 horizon, so this parameter is definitional rather than optimised.
 
-`strategy.time_stop_days = 0` **disables** the time stop entirely. This is the `time_stop_off`
-ablation variant.
+**There is no "off" value.** `strategy.time_stop_days` is validated as `>= 1`, and `0` would in any
+case mean "exit on the entry bar" under the engine's `hold_days >= time_stop_days` test, not
+"never exit". To disable the time stop, set a horizon longer than any run — the `time_stop_off`
+ablation variant uses `10_000` trading days (`scripts/ablations.py`).
 
 ### 11.4 Exit precedence
 

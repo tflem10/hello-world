@@ -347,7 +347,15 @@ class StrategyCfg:
             "max_below_high_pct",
             "how far below the 52-week high price may be, in percent",
         )
-        _in_range(self.adx_min, 0.0, 100.0, "strategy", "adx_min", "minimum ADX trend strength")
+        _in_range(
+            self.adx_min,
+            0.0,
+            100.0,
+            "strategy",
+            "adx_min",
+            "minimum ADX trend strength; 0 disables the filter",
+            low_inclusive=True,
+        )
         _in_range(
             self.breakout_proximity_pct,
             0.0,

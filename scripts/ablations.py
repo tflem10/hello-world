@@ -14,6 +14,15 @@ Usage::
     uv run python scripts/ablations.py --universe etf
     uv run python scripts/ablations.py --universe stocks
     uv run python scripts/ablations.py --universe full --quick
+    uv run python scripts/ablations.py --validate-only
+
+``--validate-only`` applies every variant's transform to the loaded ``Config`` and exits without
+running a single backtest. Because each config section validates in ``__post_init__``, this catches
+a variant that has drifted out of the allowed range in about a second, instead of crashing partway
+through a multi-minute sweep. The same check runs automatically before every real sweep.
+
+Exit codes: ``0`` success, ``1`` at least one backtest failed, ``2`` variant validation failed
+(nothing was run).
 
 The variant set is fixed and small on purpose. See ``docs/indicator-research.md`` for the rationale
 behind each variant and for why the best-scoring row must not be adopted as the shipping config.
@@ -38,6 +47,12 @@ RESULTS_PATH = REPO_ROOT / "docs" / "ablation-results.md"
 #: Number of calendar years covered by ``--quick``. Enough for indicator warm-up plus a 3-year
 #: in-sample window and a couple of out-of-sample folds -- a smoke test, not a result.
 QUICK_YEARS = 6
+
+#: How the ``time_stop_off`` variant disables the time stop. ``0`` cannot be used for two
+#: independent reasons: ``StrategyCfg`` validates ``time_stop_days >= 1``, and the engine's
+#: ``hold_days >= time_stop_days`` test would read 0 as "exit on the entry bar" rather than
+#: "never exit". A horizon far longer than any backtest window is the unambiguous encoding.
+TIME_STOP_OFF_SENTINEL = 10_000
 
 #: ``summary.json`` block that the table reports. Never ``full_period``.
 METRIC_BLOCK = "oos"
@@ -167,8 +182,12 @@ def build_variants() -> tuple[Variant, ...]:
         Variant(
             name="time_stop_off",
             label="ablate-time-stop-off",
-            change="`strategy.time_stop_days` 40 -> 0 (disabled)",
-            apply=lambda cfg: _replace_strategy(cfg, time_stop_days=0),
+            change=(
+                "`strategy.time_stop_days` 40 -> "
+                f"{TIME_STOP_OFF_SENTINEL:,} "
+                "(time stop off; sentinel horizon, never reached)"
+            ),
+            apply=lambda cfg: _replace_strategy(cfg, time_stop_days=TIME_STOP_OFF_SENTINEL),
         ),
         Variant(
             name="rsi2_on",
@@ -182,6 +201,25 @@ def build_variants() -> tuple[Variant, ...]:
 # --------------------------------------------------------------------------------------------
 # running
 # --------------------------------------------------------------------------------------------
+
+
+def validate_variants(base_cfg: Any, variants: Sequence[Variant]) -> list[tuple[str, str]]:
+    """Apply every variant transform up front, without running any backtest.
+
+    ``Config`` and its sections validate in ``__post_init__``, so ``dataclasses.replace`` raises
+    immediately on an out-of-range value. Exercising all transforms before the sweep turns a
+    validation drift into a one-second failure instead of a crash ten minutes into compute.
+
+    Returns ``(variant_name, message)`` for every variant that failed; empty means all are valid.
+    Every variant is attempted, so a single run reports *all* problems rather than just the first.
+    """
+    failures: list[tuple[str, str]] = []
+    for variant in variants:
+        try:
+            variant.apply(base_cfg)
+        except Exception as exc:
+            failures.append((variant.name, f"{type(exc).__name__}: {exc}"))
+    return failures
 
 
 @dataclass
@@ -452,6 +490,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"shorten the window to roughly the last {QUICK_YEARS} years (smoke test)",
     )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="check that every variant produces a valid Config, then exit without backtesting",
+    )
     return parser
 
 
@@ -464,6 +507,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     start, end = resolve_window(cfg, quick=args.quick, today=today)
 
     variants = build_variants()
+
+    # Pre-flight: never burn a full sweep to discover a variant was invalid all along.
+    invalid = validate_variants(cfg, variants)
+    if invalid:
+        print(
+            f"ablations: variant validation FAILED ({len(invalid)} of {len(variants)}); "
+            "no backtests were run",
+            file=sys.stderr,
+        )
+        for name, message in invalid:
+            print(f"  - {name}: {message}", file=sys.stderr)
+        return 2
+    print(f"ablations: validated {len(variants)} variants", file=sys.stderr, flush=True)
+
+    if args.validate_only:
+        return 0
+
     print(
         f"ablations: universe={args.universe} window={start} to {end} "
         f"variants={len(variants)} walkforward=True",

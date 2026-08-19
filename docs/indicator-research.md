@@ -645,10 +645,9 @@ top-scoring ablation and shipping it is exactly the failure mode all three paper
 ## Ablation plan
 
 Run by `scripts/ablations.py`, which loads the config, applies **one change at a time** via
-`dataclasses.replace`, calls
-`swing.backtest.runner.run_backtest(cfg, universe=..., start=..., end=..., walkforward=True,
-label=...)` (SPEC Contract 2), and tabulates the `oos` block of each run's `summary.json`
-(SPEC Contract 11) into `docs/ablation-results.md`.
+`dataclasses.replace`, and calls `swing.backtest.runner.run_backtest` (SPEC Contract 2) with
+`walkforward=True` and a per-variant `label`. It tabulates the `oos` block of each run's
+`summary.json` (SPEC Contract 11) into `docs/ablation-results.md`.
 
 All runs are walk-forward, so the reported metrics are **out-of-sample** (3-year IS / 1-year OOS
 stepped annually, concatenated OOS equity).
@@ -663,7 +662,7 @@ stepped annually, concatenated OOS equity).
 | 5 | Momentum horizon weighting | [§1](#1-intermediate-horizon-momentum-and-the-skip-effect) | `strategy.mom_weight_126` / `mom_weight_63` | `0.6/0.4` → `0.5/0.5` | TBD — filled by `scripts/ablations.py` during integration |
 | 6 | Trailing stop width (tighter) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `2.0` | TBD — filled by `scripts/ablations.py` during integration |
 | 7 | Trailing stop width (wider) | [§9](#9-atr-stops-and-position-sizing) | `strategy.chandelier_mult` | `3.0` → `4.0` | TBD — filled by `scripts/ablations.py` during integration |
-| 8 | Time stop | [§9](#9-atr-stops-and-position-sizing) | `strategy.time_stop_days` | `40` → `0` (disabled) | TBD — filled by `scripts/ablations.py` during integration |
+| 8 | Time stop | [§9](#9-atr-stops-and-position-sizing) | `strategy.time_stop_days` | `40` → `10_000` (sentinel = off; `0` is invalid and would mean "exit immediately") | TBD — filled by `scripts/ablations.py` during integration |
 | 9 | RSI(2) mean-reversion overlay | [§5](#5-rsi2-short-horizon-mean-reversion) | `strategy.rsi2_enabled` | `False` → `True` | TBD — filled by `scripts/ablations.py` during integration |
 
 Components deliberately **not** ablated, and why:
