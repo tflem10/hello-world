@@ -7,6 +7,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from swing.config import Config
 from swing.data.cache import BarCache, data_fingerprint, merge_bars
 from swing.data.pipeline import backfill, load_bars, update
 from swing.data.provider import normalize_bars
@@ -184,3 +185,117 @@ def test_update_does_not_re_request_known_absent_symbols(base_config):
 
     update(base_config, provider=provider, as_of=last)
     assert len(provider.bar_calls) == calls_after_first
+
+
+# ---------------------------------------------------------------------------
+# provider identity
+# ---------------------------------------------------------------------------
+def test_a_fresh_cache_adopts_the_configured_provider(base_config):
+    from swing.data.pipeline import ensure_provider
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    assert cache.stamped_provider() is None
+    assert ensure_provider(base_config, cache) == "yfinance"
+    assert cache.stamped_provider() == "yfinance"
+
+
+def test_an_unstamped_existing_cache_is_migrated_not_rejected(base_config):
+    """Caches written before stamping existed must keep working.
+
+    Whatever is in them was written by whatever was configured then, which is
+    what the user is running now — so adopting the stamp is safe, and refusing
+    would strand every existing install behind a 45-minute re-download.
+    """
+    from swing.data.pipeline import ensure_provider
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.write("AAA", trending_bars(n=30))
+    assert cache.stamped_provider() is None
+
+    ensure_provider(base_config, cache)
+    assert cache.stamped_provider() == "yfinance"
+    assert len(cache.read("AAA")) == 30      # nothing was discarded
+
+
+def test_switching_providers_on_a_stamped_cache_is_refused(base_config):
+    """The whole point: two adjustment bases must never be spliced together."""
+    from swing.data.cache import ProviderMismatch
+    from swing.data.pipeline import ensure_provider
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.stamp_provider("yfinance")
+
+    data = base_config.as_dict()
+    data["data"]["provider"] = "stooq"
+    switched = Config(data)
+
+    with pytest.raises(ProviderMismatch) as excinfo:
+        ensure_provider(switched, cache)
+
+    message = str(excinfo.value)
+    assert "yfinance" in message and "stooq" in message
+    assert "backfill" in message              # tells you how to recover
+    assert str(cache.root) in message         # names the cache to delete
+
+
+def test_backfill_refuses_to_write_into_a_mismatched_cache(base_config):
+    """A refusal that still downloaded would defeat the purpose."""
+    from swing.data.cache import ProviderMismatch
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.stamp_provider("stooq")
+
+    provider = FakeProvider(bars={s: trending_bars(n=100) for s in ("AAA", "BBB", "SPY")})
+    with pytest.raises(ProviderMismatch):
+        backfill(base_config, provider=provider)
+
+    assert provider.bar_calls == []           # nothing was fetched
+    assert cache.symbols() == []              # nothing was written
+
+
+def test_update_refuses_on_a_mismatched_cache(base_config):
+    from swing.data.cache import ProviderMismatch
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.stamp_provider("schwab")
+    provider = FakeProvider(bars={"AAA": trending_bars(n=100)})
+
+    with pytest.raises(ProviderMismatch):
+        update(base_config, provider=provider, as_of=date(2021, 1, 1))
+    assert provider.bar_calls == []
+
+
+def test_matching_provider_proceeds_normally(base_config):
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.stamp_provider("yfinance")
+    provider = FakeProvider(bars={s: trending_bars(n=100) for s in ("AAA", "BBB", "SPY")})
+
+    backfill(base_config, provider=provider)
+    assert cache.has("AAA")
+    assert cache.stamped_provider() == "yfinance"
+
+
+def test_the_stamp_survives_other_cache_writes(base_config):
+    """meta.json must not be clobbered by earnings/fundamentals/absent writes."""
+    from swing.data.provider import Fundamentals
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.stamp_provider("stooq")
+    cache.write("AAA", trending_bars(n=30))
+    cache.write_earnings({"AAA": None})
+    cache.write_fundamentals({"AAA": Fundamentals(symbol="AAA")})
+    cache.mark_absent(["ZZZ"])
+    assert cache.stamped_provider() == "stooq"
+
+
+def test_cache_status_reports_the_provider_and_flags_a_mismatch(base_config):
+    from swing.data.pipeline import cache_status
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache.write("AAA", trending_bars(n=30))
+    cache.stamp_provider("yfinance")
+    assert "yfinance" in cache_status(base_config)
+
+    data = base_config.as_dict()
+    data["data"]["provider"] = "stooq"
+    assert "MISMATCH" in cache_status(Config(data))

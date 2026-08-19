@@ -27,15 +27,20 @@ def cmd_universe(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_data(args: argparse.Namespace, cfg: Config) -> int:
+    from .data.cache import ProviderMismatch
     from .data.pipeline import backfill, cache_status, update
 
     if args.status or not (args.backfill or args.update):
         print(cache_status(cfg))
         return 0
-    if args.backfill:
-        backfill(cfg, symbols=args.symbols)
-    if args.update:
-        update(cfg, symbols=args.symbols)
+    try:
+        if args.backfill:
+            backfill(cfg, symbols=args.symbols)
+        if args.update:
+            update(cfg, symbols=args.symbols)
+    except ProviderMismatch as exc:
+        log.error("%s", exc)
+        return 2
     return 0
 
 

@@ -27,7 +27,7 @@ import pandas as pd
 from . import __version__
 from .backtest.gate import check_gate
 from .config import Config
-from .data.cache import BarCache
+from .data.cache import BarCache, ProviderMismatch
 from .data.pipeline import (
     load_bars,
     refresh_earnings,
@@ -87,6 +87,14 @@ def run_scan(
     if refresh:
         try:
             update(cfg)
+        except ProviderMismatch as exc:
+            # Every other data failure degrades to "scan the cache as it
+            # stands". This one must not: the cache and the configured
+            # provider disagree, so continuing would rank and size picks off
+            # spliced price series.
+            print(str(exc))
+            log.error("refusing to scan on a provider-mismatched cache")
+            return 5
         except Exception as exc:
             warnings.append(
                 f"data refresh failed ({exc}); scanning the cache as it stands. "

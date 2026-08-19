@@ -14,7 +14,7 @@ import pandas as pd
 
 from ..config import Config
 from ..logging_setup import get_logger
-from .cache import BarCache
+from .cache import BarCache, ProviderMismatch
 from .provider import DataProvider, get_provider
 from .universe import Symbol, build_universe
 
@@ -23,6 +23,43 @@ log = get_logger("swing.data.pipeline")
 
 def _cache(cfg: Config) -> BarCache:
     return BarCache(cfg.expand_path(cfg.data.cache_dir))
+
+
+def ensure_provider(cfg: Config, cache: BarCache) -> str:
+    """Bind the cache to one provider, or refuse to write into it.
+
+    Called before anything fetches. An unstamped cache (a fresh install, or one
+    that predates stamping) adopts the configured provider silently — that is
+    the migration path, and it is safe because whatever is already there was
+    written by whatever was configured then, which is the same thing the user
+    is running now. A *disagreeing* stamp raises: see ProviderMismatch for why
+    this cannot be a warning.
+    """
+    name = str(cfg.data.provider).lower()
+    stamped = cache.stamped_provider()
+
+    if stamped is None:
+        if cache.symbols():
+            log.info("stamping the existing cache as written by %r", name)
+        cache.stamp_provider(name)
+        return name
+
+    if stamped == name:
+        return name
+
+    raise ProviderMismatch(
+        f"this cache was written by the {stamped!r} provider, but [data] provider "
+        f"is now {name!r}.\n"
+        f"  cache: {cache.root}\n"
+        "Providers adjust prices differently (yfinance adjusts for dividends, "
+        "Stooq does not), so appending one to the other would splice two price "
+        "series into one and quietly corrupt every indicator, backtest and stop "
+        "derived from it.\n"
+        "To switch providers, delete the cache and re-download:\n"
+        f"  rm -rf {cache.root} && swing data --backfill\n"
+        "To keep the existing data, set [data] provider back to "
+        f"{stamped!r}."
+    )
 
 
 def _symbols_for(cfg: Config, symbols: list[str] | None) -> list[str]:
@@ -43,6 +80,7 @@ def backfill(
 ) -> dict[str, int]:
     """Download full history for every symbol that lacks it."""
     cache = _cache(cfg)
+    ensure_provider(cfg, cache)
     provider = provider or get_provider(cfg)
     start = date.fromisoformat(str(cfg.data.history_start))
     today = date.today()
@@ -90,6 +128,7 @@ def update(
     no network calls at all.
     """
     cache = _cache(cfg)
+    ensure_provider(cfg, cache)
     as_of = as_of or date.today()
     wanted = _symbols_for(cfg, symbols)
 
@@ -221,8 +260,15 @@ def cache_status(cfg: Config) -> str:
     stale_limit = int(cfg.data.get("max_stale_days", 5))
     stale = cov[cov["end"] < (newest - timedelta(days=stale_limit))]
 
+    stamped = cache.stamped_provider()
+    configured = str(cfg.data.provider).lower()
+    provider_line = stamped or "unstamped (adopts the configured provider on next write)"
+    if stamped and stamped != configured:
+        provider_line += f"  <-- MISMATCH: [data] provider is now {configured!r}"
+
     lines = [
         f"cache at {cache.root}",
+        f"  provider    {provider_line}",
         f"  symbols     {len(cov)}",
         f"  bars        {int(cov['bars'].sum()):,}",
         f"  history     {cov['start'].min()} -> {newest}",

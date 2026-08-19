@@ -30,6 +30,19 @@ from .provider import BARS_COLUMNS, Fundamentals, empty_bars, normalize_bars
 
 log = get_logger("swing.cache")
 
+
+class ProviderMismatch(RuntimeError):
+    """The cache holds bars written by a different provider than the one configured.
+
+    This is a hard error rather than a warning because the failure is silent
+    and total. Providers do not merely disagree at the margin: yfinance serves
+    split- *and* dividend-adjusted closes, Stooq serves split-adjusted only.
+    Appending one to the other splices two different adjustment bases into a
+    single series, so every indicator, every backtested trade and every stop
+    downstream is computed from prices that never existed. Nothing about the
+    resulting numbers looks wrong, which is exactly why it has to stop the run.
+    """
+
 _SAFE = str.maketrans({"/": "-", "\\": "-", ":": "-", "*": "-", "?": "-", " ": "_"})
 
 
@@ -43,6 +56,21 @@ class BarCache:
         self.earnings_path = self.root / "earnings.json"
         self.fundamentals_path = self.root / "fundamentals.json"
         self.absent_path = self.root / "absent.json"
+
+    # -- provider identity -------------------------------------------------
+    # The cache used to record nothing about who wrote it, so "delete
+    # data/cache/ when you switch providers" was advice you had to remember.
+    # Now it is enforced.
+    def stamped_provider(self) -> str | None:
+        """Name of the provider that wrote these bars, or None if unstamped."""
+        value = self._read_json(self.meta_path).get("provider")
+        return str(value).lower() if value else None
+
+    def stamp_provider(self, name: str) -> None:
+        meta = self._read_json(self.meta_path)
+        meta["provider"] = str(name).lower()
+        meta["provider_stamped_at"] = datetime.now().isoformat(timespec="seconds")
+        self._write_json(self.meta_path, meta)
 
     # -- paths -------------------------------------------------------------
     def _ensure(self) -> None:
