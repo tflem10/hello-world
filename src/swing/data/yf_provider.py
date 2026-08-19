@@ -30,6 +30,7 @@ from swing.data.provider import (
     Fundamentals,
     Quote,
     as_date,
+    as_utc,
     chunked,
     clean_symbols,
     coerce_float,
@@ -157,7 +158,7 @@ class YFinanceProvider:
         self, symbols: Sequence[str], *, now: datetime | None = None
     ) -> dict[str, Quote]:
         """Latest price per symbol; symbols Yahoo cannot price are omitted."""
-        stamp = now if now is not None else utcnow()
+        stamp = as_utc(now) if now is not None else utcnow()
         out: dict[str, Quote] = {}
         for symbol in clean_symbols(symbols):
             price = self._with_retry(
@@ -179,7 +180,7 @@ class YFinanceProvider:
         earliest upcoming date from either source, because for an earnings
         blackout an estimate that is a few days off is far better than nothing.
         """
-        stamp = now if now is not None else utcnow()
+        stamp = as_utc(now) if now is not None else utcnow()
         today = stamp.date()
         wanted = clean_symbols(symbols)
         return self._earnings_cache.get_or_fetch(
@@ -194,7 +195,7 @@ class YFinanceProvider:
         self, symbols: Sequence[str], *, now: datetime | None = None
     ) -> dict[str, Fundamentals]:
         """Trailing EPS and revenue growth per symbol, cached for a week."""
-        stamp = now if now is not None else utcnow()
+        stamp = as_utc(now) if now is not None else utcnow()
         wanted = clean_symbols(symbols)
         return self._fundamentals_cache.get_or_fetch(
             wanted,

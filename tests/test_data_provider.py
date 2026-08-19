@@ -12,6 +12,7 @@ import dataclasses
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -28,7 +29,7 @@ from swing.data import (
     get_provider,
     normalize_bars,
 )
-from swing.data.provider import as_date, chunked, clean_symbols, coerce_float
+from swing.data.provider import as_date, as_utc, chunked, clean_symbols, coerce_float
 
 # ---------------------------------------------------------------------------
 # value objects
@@ -211,6 +212,13 @@ def test_as_date_accepts_the_usual_suspects() -> None:
     assert as_date("2026-08-18") == date(2026, 8, 18)
     with pytest.raises(TypeError):
         as_date(17)  # type: ignore[arg-type]
+
+
+def test_as_utc_reads_a_naive_stamp_as_utc_and_leaves_aware_ones_alone() -> None:
+    naive = datetime(2026, 8, 18, 17, 30)
+    assert as_utc(naive) == datetime(2026, 8, 18, 17, 30, tzinfo=UTC)
+    aware = datetime(2026, 8, 18, 17, 30, tzinfo=ZoneInfo("America/New_York"))
+    assert as_utc(aware) is aware
 
 
 def test_coerce_float_rejects_junk() -> None:

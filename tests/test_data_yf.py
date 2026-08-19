@@ -309,6 +309,37 @@ def test_latest_quotes_reads_fast_info(test_cfg: Config) -> None:
     assert quotes["AAPL"].asof == NOW
 
 
+def test_a_naive_injected_clock_still_produces_a_timezone_aware_quote(test_cfg: Config) -> None:
+    """Contract 3 promises ``Quote.asof`` is aware UTC, whatever the caller passes."""
+    factory = TickerFactory({"AAPL": FakeTicker(fast=FakeFastInfo(last_price=191.25))})
+    naive = datetime(2026, 8, 18, 21, 0)
+
+    quote = build_provider(test_cfg, ticker_factory=factory).latest_quotes(["AAPL"], now=naive)[
+        "AAPL"
+    ]
+
+    assert quote.asof.tzinfo is not None
+    assert quote.asof == NOW
+
+
+def test_a_naive_injected_clock_leaves_the_ttl_logic_intact(test_cfg: Config) -> None:
+    ticker = FakeTicker(earnings=earnings_frame(["2026-09-01"]))
+    factory = TickerFactory({"AAPL": ticker})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    naive = datetime(2026, 8, 18, 21, 0)
+
+    first = provider.earnings_dates(["AAPL"], now=naive)
+    after_first = factory.count
+    cached = provider.earnings_dates(["AAPL"], now=naive + timedelta(days=2))
+    after_cached = factory.count
+    refetched = provider.earnings_dates(["AAPL"], now=naive + timedelta(days=4))
+
+    assert first == cached == refetched == {"AAPL": date(2026, 9, 1)}
+    assert after_cached == after_first, "a naive clock must not confuse the TTL"
+    assert factory.count > after_cached
+    assert provider.fundamentals(["AAPL"], now=naive) is not None
+
+
 def test_latest_quotes_accepts_mapping_style_fast_info(test_cfg: Config) -> None:
     class MappingOnly:
         def __init__(self, values: dict[str, Any]) -> None:

@@ -266,6 +266,17 @@ def test_latest_quotes_reads_the_nested_quote_record(test_cfg: Config) -> None:
     assert quotes["MSFT"].price == 402.5
 
 
+def test_a_naive_injected_clock_still_produces_a_timezone_aware_quote(test_cfg: Config) -> None:
+    payload = {"AAPL": {"quote": {"lastPrice": 191.25}}}
+    naive = datetime(2026, 8, 18, 21, 0)
+
+    provider = build_provider(test_cfg, FakeClient(quotes=payload))
+    quote = provider.latest_quotes(["AAPL"], now=naive)["AAPL"]
+
+    assert quote.asof.tzinfo is not None
+    assert quote.asof == NOW
+
+
 def test_latest_quotes_falls_back_through_the_price_fields(test_cfg: Config) -> None:
     payload = {"AAPL": {"quote": {"lastPrice": 0.0, "mark": 190.0}}}
     quotes = build_provider(test_cfg, FakeClient(quotes=payload)).latest_quotes(["AAPL"], now=NOW)

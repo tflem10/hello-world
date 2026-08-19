@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
@@ -32,6 +32,7 @@ __all__ = [
     "Fundamentals",
     "Quote",
     "as_date",
+    "as_utc",
     "chunked",
     "clean_symbols",
     "coerce_float",
@@ -147,6 +148,17 @@ def chunked(items: Sequence[str], size: int) -> Iterator[list[str]]:
         raise ValueError("Batch size must be at least 1.")
     for i in range(0, len(items), size):
         yield list(items[i : i + size])
+
+
+def as_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive datetime so every stamp we store or compare lines up.
+
+    A caller who injects ``now=datetime(2026, 8, 18, 17, 30)`` means a real
+    moment, not an ambiguous one, so we read a naive value as UTC rather than
+    letting it leak into a :class:`Quote` (whose ``asof`` is promised to be
+    timezone-aware) or into a TTL subtraction (which raises on mixed operands).
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def as_date(value: date | datetime | pd.Timestamp | str) -> date:

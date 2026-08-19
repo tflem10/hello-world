@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from swing.data.provider import as_date, clean_symbols, normalize_bars
+from swing.data.provider import as_date, as_utc, clean_symbols, normalize_bars
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
@@ -75,11 +75,6 @@ _UNSAFE_FILENAME = re.compile(r"[^A-Z0-9._-]")
 def utcnow() -> datetime:
     """Current UTC time, timezone-aware. Only ever called at a public boundary."""
     return datetime.now(tz=UTC)
-
-
-def _as_utc(value: datetime) -> datetime:
-    """Attach UTC to a naive datetime so comparisons never explode."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _write_atomic(path: Path, write: Callable[[Path], None]) -> None:
@@ -121,7 +116,7 @@ class CacheMeta:
             "first_bar": self.first_bar.isoformat() if self.first_bar else None,
             "last_bar": self.last_bar.isoformat() if self.last_bar else None,
             "rows": self.rows,
-            "fetched_at": _as_utc(self.fetched_at).isoformat(),
+            "fetched_at": as_utc(self.fetched_at).isoformat(),
         }
 
     @classmethod
@@ -137,7 +132,7 @@ class CacheMeta:
                 first_bar=date.fromisoformat(raw["first_bar"]) if raw.get("first_bar") else None,
                 last_bar=date.fromisoformat(raw["last_bar"]) if raw.get("last_bar") else None,
                 rows=int(raw.get("rows", 0)),
-                fetched_at=_as_utc(datetime.fromisoformat(raw["fetched_at"])),
+                fetched_at=as_utc(datetime.fromisoformat(raw["fetched_at"])),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -260,7 +255,7 @@ class BarCache:
         Returns:
             ``{symbol: bars}``, omitting symbols with no usable data.
         """
-        stamp = _as_utc(now) if now is not None else utcnow()
+        stamp = as_utc(now) if now is not None else utcnow()
         start, end = as_date(start), as_date(end)
         if start > end:
             raise ValueError(
@@ -471,7 +466,7 @@ class TtlJsonCache:
             ``{key: value}`` for every key that was cached or successfully
             fetched; keys the fetch could not resolve are simply absent.
         """
-        moment = _as_utc(now)
+        moment = as_utc(now)
         entries = self.read_all()
         out: dict[str, Any] = {}
         stale: list[str] = []
@@ -510,6 +505,6 @@ def _parse_stamp(raw: Any) -> datetime | None:
     if not isinstance(raw, str):
         return None
     try:
-        return _as_utc(datetime.fromisoformat(raw))
+        return as_utc(datetime.fromisoformat(raw))
     except ValueError:
         return None

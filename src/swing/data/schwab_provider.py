@@ -33,6 +33,7 @@ from swing.data.provider import (
     Fundamentals,
     Quote,
     as_date,
+    as_utc,
     chunked,
     clean_symbols,
     coerce_float,
@@ -226,7 +227,7 @@ class SchwabProvider:
         self, symbols: Sequence[str], *, now: datetime | None = None
     ) -> dict[str, Quote]:
         """Latest price per symbol from Schwab's quote endpoint."""
-        stamp = now if now is not None else utcnow()
+        stamp = as_utc(now) if now is not None else utcnow()
         wanted = clean_symbols(symbols)
         out: dict[str, Quote] = {}
         for batch in chunked(wanted, self._quote_batch):
