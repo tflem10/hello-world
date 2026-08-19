@@ -11,6 +11,8 @@ The behaviours pinned here are the ones that cost real money if they break:
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +21,7 @@ import pytest
 
 from conftest import make_bars
 from swing.data.cache import BarCache, CacheMeta, TtlJsonCache
+from swing.state import file_lock
 
 NOW = datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
 FULL = make_bars(60, start="2020-01-02")
@@ -47,6 +50,11 @@ class RecordingFetch:
 @pytest.fixture
 def cache(tmp_path: Path) -> BarCache:
     return BarCache(tmp_path / "cache" / "daily")
+
+
+def warm(cache: BarCache, through: date = LAST_DAY, *, source: pd.DataFrame = FULL) -> None:
+    """Fill the cache for AAPL from the first day up to ``through``."""
+    cache.get_bars(["AAPL"], FIRST_DAY, through, RecordingFetch(source=source), now=NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +159,9 @@ def test_a_missing_head_refetches_the_whole_range(cache: BarCache) -> None:
     assert fetch.calls[0][1] == FIRST_DAY, "an earlier start means the tail trick cannot help"
 
 
-def test_an_empty_tail_is_remembered_so_a_weekend_rerun_stays_offline(cache: BarCache) -> None:
+def test_a_tail_with_no_new_bars_is_remembered_so_the_rerun_stays_offline(
+    cache: BarCache,
+) -> None:
     """Nothing traded after the last cached bar: mark it covered, do not re-ask."""
     fetch = RecordingFetch()
     cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
@@ -165,6 +175,58 @@ def test_an_empty_tail_is_remembered_so_a_weekend_rerun_stays_offline(cache: Bar
     out = cache.get_bars(["AAPL"], FIRST_DAY, later, fetch, now=NOW)
     assert fetch.count == 0
     assert len(out["AAPL"]) == len(FULL)
+
+
+def test_an_empty_answer_over_a_weekend_is_recorded_as_covered(cache: BarCache) -> None:
+    """The market was shut, so a rerun on Sunday must stay offline."""
+    friday = date(2020, 3, 20)
+    assert friday.weekday() == 4
+    leg = FULL.loc[: str(friday)]
+    warm(cache, friday, source=leg)
+    sunday = friday + timedelta(days=2)
+
+    calls: list[tuple[date, date]] = []
+
+    def nothing_traded(symbols, start, end):
+        calls.append((start, end))
+        return {symbol: FULL.iloc[:0].copy() for symbol in symbols}
+
+    cache.get_bars(["AAPL"], FIRST_DAY, sunday, nothing_traded, now=NOW)
+    assert len(calls) == 1
+    assert cache.read_meta("AAPL").covered_end == sunday
+
+    cache.get_bars(["AAPL"], FIRST_DAY, sunday, nothing_traded, now=NOW)
+    assert len(calls) == 1, "the weekend is genuinely covered"
+
+
+def test_an_empty_answer_on_a_trading_day_is_not_recorded_as_covered(
+    cache: BarCache,
+) -> None:
+    """Audit BUG-035: "nothing traded" and "the vendor blinked" look identical.
+
+    A transient failure at 21:00 used to mark the symbol covered through today,
+    so the natural rerun an hour later stayed offline on stale bars — and the
+    empty frame comes back from a *successful* call, so no exception, no log,
+    nothing to notice.
+    """
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    wednesday = MID_DAY + timedelta(days=1)
+    assert wednesday.weekday() < 5
+
+    calls: list[tuple[date, date]] = []
+
+    def blinked(symbols, start, end):
+        calls.append((start, end))
+        return {symbol: FULL.iloc[:0].copy() for symbol in symbols}
+
+    cache.get_bars(["AAPL"], FIRST_DAY, wednesday, blinked, now=NOW)
+    assert cache.read_meta("AAPL").covered_end == MID_DAY, "coverage does not move"
+
+    recovered = RecordingFetch()
+    out = cache.get_bars(["AAPL"], FIRST_DAY, wednesday, recovered, now=NOW)
+
+    assert recovered.count == 1, "the rerun an hour later actually asks again"
+    assert out["AAPL"].index[-1].date() > MID_DAY
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +288,78 @@ def test_a_difference_inside_the_tolerance_is_treated_as_the_same_series(
     assert fetch.count == 1, "no refetch for rounding-level differences"
 
 
-def test_the_tolerance_boundary_is_where_the_docstring_says_it_is(cache: BarCache) -> None:
+def test_a_uniform_shift_is_a_re_adjustment_however_small_it_is(cache: BarCache) -> None:
+    """Audit BUG-014a: a 0.05% dividend used to be *merged* under the tolerance.
+
+    That is the exact step discontinuity this cache exists to prevent — old
+    basis 87.317 sitting beside new basis 83.742 — and low-yield names
+    accumulated it a couple of tenths of a percent a year. Uniformity, not
+    magnitude, is what identifies a re-adjustment: every bar moves by the same
+    factor.
+    """
     base = FULL.iloc[:10]
-    fresh_ok = _readjusted(base, 1.0005)  # 0.05% — inside 0.1%
-    fresh_bad = _readjusted(base, 1.002)  # 0.2% — outside
-    assert cache._overlap_conflicts(base, fresh_ok) is False
-    assert cache._overlap_conflicts(base, fresh_bad) is True
+    assert cache._overlap_conflicts(base, _readjusted(base, 1.0005)) is True
+    assert cache._overlap_conflicts(base, _readjusted(base, 1.002)) is True
+
+
+def test_scattered_rounding_noise_is_not_a_re_adjustment(cache: BarCache) -> None:
+    """The other half of BUG-014a: per-bar noise must still append, not refetch."""
+    base = FULL.iloc[:10]
+    noisy = base.copy()
+    scale = [1.0 + 0.00005 * (-1) ** i for i in range(len(noisy))]
+    noisy.loc[:, "close"] = noisy["close"].to_numpy() * scale
+    assert cache._overlap_conflicts(base, noisy) is False
+
+
+def test_a_sub_tolerance_re_adjustment_forces_a_full_refetch(cache: BarCache) -> None:
+    """BUG-014a end to end: the splice must never reach the parquet."""
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    adjusted = _readjusted(FULL, 1.0005)  # 0.05% — under the old 0.1% tolerance
+    fetch = RecordingFetch(source=adjusted)
+
+    out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert fetch.count == 2, "a tail probe, then a full refetch on the new basis"
+    assert fetch.calls[1][1] == FIRST_DAY
+    pd.testing.assert_frame_equal(out["AAPL"], adjusted)
+
+
+def test_a_tail_response_sharing_no_dates_is_treated_as_a_conflict(cache: BarCache) -> None:
+    """Audit BUG-014b: a tail fetch starts *at* a cached bar by construction.
+
+    Zero shared dates therefore means the vendor ignored the range we asked
+    for — precisely when its basis is least trustworthy — and the old code
+    read that as "no conflict" and concatenated the two halves.
+    """
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    disjoint = FULL.loc[str(FULL.index[35].date()) :]
+    calls: list[tuple[date, date]] = []
+
+    def fetch(symbols, start, end):
+        calls.append((start, end))
+        if len(calls) == 1:
+            return {symbol: disjoint.copy() for symbol in symbols}  # the range is ignored
+        return {symbol: FULL.loc[str(start) : str(end)].copy() for symbol in symbols}
+
+    out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert len(calls) == 2, "the disjoint answer is refused, then history is refetched"
+    assert calls[1][0] == FIRST_DAY
+    assert out["AAPL"].index.is_unique
+    pd.testing.assert_frame_equal(out["AAPL"], FULL)
+
+
+def test_history_older_than_the_refetch_window_is_downloaded_again(cache: BarCache) -> None:
+    """Audit BUG-014c: small re-adjustments accumulate and nothing else resets them."""
+    warm(cache)
+    fetch = RecordingFetch()
+
+    assert cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW + timedelta(days=89))
+    assert fetch.count == 0, "inside the window a complete cache is still free"
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW + timedelta(days=91))
+    assert fetch.count == 1
+    assert fetch.calls[0][1] == FIRST_DAY, "the whole history, not just a tail"
 
 
 def test_overlap_check_ignores_frames_that_do_not_share_a_date(cache: BarCache) -> None:
@@ -244,15 +372,23 @@ def test_overlap_check_ignores_frames_that_do_not_share_a_date(cache: BarCache) 
 # ---------------------------------------------------------------------------
 
 
-def test_a_corrupt_parquet_is_reported_removed_and_refetched(cache: BarCache) -> None:
+def test_a_corrupt_parquet_is_reported_removed_and_refetched(
+    cache: BarCache, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The report is a log line, not ``warnings.warn`` (audit DEBT-014).
+
+    This runs once per symbol inside a 1,500-iteration loop, where every
+    sibling failure already logs.
+    """
     fetch = RecordingFetch()
     cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
     cache.path_for("AAPL").write_bytes(b"this is not a parquet file")
     fetch.calls.clear()
 
-    with pytest.warns(UserWarning, match="could not be read"):
+    with caplog.at_level("WARNING", logger="swing.data.cache"):
         out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
 
+    assert "could not be read" in caplog.text
     assert fetch.count == 1
     pd.testing.assert_frame_equal(out["AAPL"], FULL)
     assert cache.read("AAPL") is not None
@@ -326,6 +462,250 @@ def test_cache_construction_rejects_a_useless_overlap(tmp_path: Path) -> None:
         BarCache(tmp_path, overlap_rows=0)
     with pytest.raises(ValueError, match="tolerance"):
         BarCache(tmp_path, tolerance=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# the sidecar must describe the file beside it (audit BUG-004)
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_meta(cache: BarCache, symbol: str, **changes) -> None:
+    """Hand-edit a sidecar the way a racing second writer would leave it."""
+    raw = json.loads(cache.meta_path_for(symbol).read_text(encoding="utf-8"))
+    raw.update(changes)
+    cache.meta_path_for(symbol).write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_a_sidecar_that_does_not_match_its_parquet_is_rebuilt_and_healed(
+    cache: BarCache, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit BUG-004: 150 rows served as "fully cached, zero network".
+
+    The parquet and the sidecar are two atomic writes, not one, so a second
+    process can leave a record describing a different frame. Believing it is
+    how SMA-200 and ATR end up computed on a series that stops months early —
+    with no error, no warning and no self-healing.
+    """
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    _rewrite_meta(cache, "AAPL", covered_end=LAST_DAY.isoformat(), rows=len(FULL))
+    fetch = RecordingFetch()
+
+    with caplog.at_level("WARNING", logger="swing.data.cache"):
+        out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert "is being rebuilt from the file" in caplog.text
+    assert fetch.count == 1, "the truncated tail is noticed and downloaded"
+    assert len(out["AAPL"]) == len(FULL)
+    assert cache.read_meta("AAPL").rows == len(FULL)
+
+
+def test_a_sidecar_claiming_the_wrong_last_bar_is_rebuilt(cache: BarCache) -> None:
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    _rewrite_meta(cache, "AAPL", covered_end=LAST_DAY.isoformat(), last_bar=LAST_DAY.isoformat())
+
+    fetch = RecordingFetch()
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert fetch.count == 1
+
+
+def test_the_mutating_half_of_a_fetch_holds_the_cache_lock(cache: BarCache) -> None:
+    """Audit BUG-004: two writers must not interleave on one cache directory."""
+    held: list[bool] = []
+
+    def fetch(symbols, start, end):
+        try:
+            with file_lock(cache.lock_path, timeout=0):
+                held.append(False)
+        except TimeoutError:
+            held.append(True)
+        return {symbol: FULL.copy() for symbol in symbols}
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert held == [True], "the lock is already held while the vendor call runs"
+
+
+def test_a_warm_read_takes_no_lock_at_all(cache: BarCache) -> None:
+    """Zero network *and* zero contention: a warm scan must not block a backtest."""
+    warm(cache)
+    lock_file = cache.lock_path.with_name(cache.lock_path.name + ".lock")
+    lock_file.unlink(missing_ok=True)
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, RecordingFetch(), now=NOW)
+
+    assert not lock_file.exists()
+
+
+def test_a_cache_locked_by_another_process_degrades_to_what_is_on_disk(
+    cache: BarCache, caplog: pytest.LogCaptureFixture
+) -> None:
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    fetch = RecordingFetch()
+    cache.lock_timeout = 0.0
+
+    with file_lock(cache.lock_path, timeout=0), caplog.at_level("WARNING"):
+        out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert fetch.count == 0
+    assert "still writing the price cache" in caplog.text
+    assert out["AAPL"].index[-1].date() == MID_DAY, "stale beats nothing, and it says so"
+
+
+# ---------------------------------------------------------------------------
+# coverage is a range, and a refetch widens it (audit BUG-013, BUG-050)
+# ---------------------------------------------------------------------------
+
+
+def test_a_refetch_for_an_earlier_end_keeps_the_live_tail(cache: BarCache) -> None:
+    """Audit BUG-013: 49 live-tail bars deleted by ``swing backtest --end <past>``.
+
+    Both refetch paths asked for ``[from_date, end]`` and *replaced* the file.
+    The start side was widened to the cached start; the end side was not, and
+    ``covered_end`` was not even tracked.
+    """
+    cache.get_bars(["AAPL"], MID_DAY, LAST_DAY, RecordingFetch(), now=NOW)
+    fetch = RecordingFetch()
+
+    cache.get_bars(["AAPL"], FIRST_DAY, MID_DAY, fetch, now=NOW)
+
+    assert fetch.count == 1
+    assert fetch.calls[0][1] == FIRST_DAY, "the missing head"
+    assert fetch.calls[0][2] == LAST_DAY, "and the tail we already had — the union"
+    assert cache.read("AAPL").index[-1].date() == LAST_DAY
+    meta = cache.read_meta("AAPL")
+    assert (meta.covered_start, meta.covered_end) == (FIRST_DAY, LAST_DAY)
+
+
+def test_a_conflict_refetch_also_keeps_the_live_tail(cache: BarCache) -> None:
+    """The same union rule on the re-adjustment path (audit BUG-013)."""
+    warm(cache)
+    earlier_end = FULL.index[45].date()
+    fetch = RecordingFetch(source=_readjusted(FULL, 0.97))
+
+    cache.get_bars(["AAPL"], FIRST_DAY, earlier_end, fetch, now=NOW + timedelta(days=91))
+
+    assert fetch.calls[-1][2] == LAST_DAY
+    assert cache.read("AAPL").index[-1].date() == LAST_DAY
+
+
+def test_a_lost_sidecar_does_not_turn_a_late_listing_into_a_full_refetch(
+    cache: BarCache,
+) -> None:
+    """Audit BUG-050: a symbol that listed in 2020 has no 2019 bars to fetch.
+
+    Rebuilding coverage from the frame's own first bar made every run see a
+    missing head and refetch the lot.
+    """
+    warm(cache)
+    cache.meta_path_for("AAPL").unlink()
+    fetch = RecordingFetch()
+
+    out = cache.get_bars(["AAPL"], FIRST_DAY - timedelta(days=400), LAST_DAY, fetch, now=NOW)
+
+    assert fetch.count == 0
+    assert len(out["AAPL"]) == len(FULL)
+
+
+# ---------------------------------------------------------------------------
+# a failed download is not "nothing traded" (audit BUG-035)
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_tail_fetch_does_not_mark_the_symbol_covered(cache: BarCache) -> None:
+    """The other half of BUG-035, which already held: a raised call is not coverage.
+
+    ``_call`` now returns a sentinel rather than an empty dict, so "the batch
+    failed" and "the batch answered with nothing" are different outcomes to
+    every caller — this pins the behaviour the sentinel must preserve.
+    """
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+
+    def broken(symbols, start, end):
+        raise RuntimeError("Yahoo is having a day")
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, broken, now=NOW)
+    assert cache.read_meta("AAPL").covered_end == MID_DAY, "coverage stands still"
+
+    fetch = RecordingFetch()
+    out = cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, fetch, now=NOW)
+
+    assert fetch.count == 1, "the rerun an hour later actually tries again"
+    assert len(out["AAPL"]) == len(FULL)
+
+
+def test_a_symbol_the_vendor_drops_from_a_good_batch_keeps_its_old_coverage(
+    cache: BarCache,
+) -> None:
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+
+    def partial(symbols, start, end):
+        return {}  # the call worked; this symbol simply was not in the answer
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, partial, now=NOW)
+    assert cache.read_meta("AAPL").covered_end == MID_DAY
+
+
+# ---------------------------------------------------------------------------
+# housekeeping: the read memo (PERF-006) and abandoned temp files (LEAK-002)
+# ---------------------------------------------------------------------------
+
+
+def test_an_unchanged_parquet_is_read_from_disk_only_once(
+    cache: BarCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit PERF-006: every warm scan re-read and re-normalised every file."""
+    warm(cache)
+    reads: list[Path] = []
+    real = pd.read_parquet
+
+    def counting(path, *args, **kwargs):
+        reads.append(Path(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", counting)
+    reader = BarCache(cache.root)
+
+    first = reader.read("AAPL")
+    second = reader.read("AAPL")
+    third = reader.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, RecordingFetch(), now=NOW)["AAPL"]
+
+    assert len(reads) == 1, "the second and third look-ups come from the memo"
+    assert second is first
+    assert len(third) == len(FULL)
+
+
+def test_the_memo_notices_a_file_written_by_someone_else(cache: BarCache) -> None:
+    warm(cache, MID_DAY, source=FULL.loc[: str(MID_DAY)])
+    assert len(cache.read("AAPL")) == 30
+
+    other = BarCache(cache.root)
+    other.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, RecordingFetch(), now=NOW)
+
+    assert len(cache.read("AAPL")) == len(FULL), "mtime and size key the memo, not the symbol"
+
+
+def test_the_memo_is_dropped_before_it_can_grow_without_bound(tmp_path: Path) -> None:
+    cache = BarCache(tmp_path / "daily", memo_limit=2)
+    for symbol in ("AAPL", "MSFT", "NVDA"):
+        cache.get_bars([symbol], FIRST_DAY, LAST_DAY, RecordingFetch(), now=NOW)
+    assert len(cache._memo) <= 2
+
+
+def test_abandoned_temp_files_are_swept_on_the_next_fetch(cache: BarCache) -> None:
+    """Audit LEAK-002: each orphan is a full symbol history left by a SIGKILL."""
+    cache.root.mkdir(parents=True, exist_ok=True)
+    stale = cache.root / "AAPL.parquet1234.tmp"
+    fresh = cache.root / "MSFT.parquet5678.tmp"
+    stale.write_bytes(b"half a parquet")
+    fresh.write_bytes(b"half a parquet")
+    two_days_ago = time.time() - 2 * 86_400
+    os.utime(stale, (two_days_ago, two_days_ago))
+
+    cache.get_bars(["AAPL"], FIRST_DAY, LAST_DAY, RecordingFetch(), now=NOW)
+
+    assert not stale.exists()
+    assert fresh.exists(), "a temp file from a write happening right now is not litter"
 
 
 def test_cache_meta_round_trips_through_json() -> None:
@@ -433,3 +813,76 @@ def test_ttl_cache_survives_a_failing_fetch(ttl_cache: TtlJsonCache) -> None:
 def test_ttl_cache_rejects_a_nonsense_lifetime(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="positive amount of time"):
         TtlJsonCache(tmp_path / "x.json", timedelta(0))
+    with pytest.raises(ValueError, match="positive amount of time"):
+        TtlJsonCache(tmp_path / "x.json", timedelta(days=1), miss_ttl=timedelta(0))
+
+
+def test_a_negative_answer_expires_sooner_than_a_real_one(tmp_path: Path) -> None:
+    """Audit BUG-051: "no earnings date" cached 3 days against a 10-day blackout.
+
+    A date published inside that window admitted exactly the entry the
+    blackout exists to block, so a miss now goes stale in hours.
+    """
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3), miss_ttl=timedelta(hours=12))
+    answers: dict[str, str | None] = {"KNOWN": "2026-09-01", "UNKNOWN": None}
+    calls: list[list[str]] = []
+
+    def fetch(keys: list[str]) -> dict[str, str | None]:
+        calls.append(sorted(keys))
+        return {key: answers[key] for key in keys}
+
+    cache.get_or_fetch(["KNOWN", "UNKNOWN"], fetch, now=NOW)
+    later = NOW + timedelta(hours=13)
+    answers["UNKNOWN"] = "2026-08-20"
+    out = cache.get_or_fetch(["KNOWN", "UNKNOWN"], fetch, now=later)
+
+    assert calls[1] == ["UNKNOWN"], "the real answer is still fresh, the miss is not"
+    assert out == {"KNOWN": "2026-09-01", "UNKNOWN": "2026-08-20"}
+
+
+def test_long_dead_entries_are_dropped_when_the_file_is_written(tmp_path: Path) -> None:
+    """Audit LEAK-003: symbols leave the universe; their entries never did."""
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3))
+    cache.get_or_fetch(["GONE"], lambda keys: {"GONE": "x"}, now=NOW - timedelta(days=40))
+    cache.get_or_fetch(["HERE"], lambda keys: {"HERE": "y"}, now=NOW)
+
+    assert sorted(cache.read_all()) == ["HERE"], "40 days is far past 10 times a 3-day TTL"
+
+
+def test_a_value_saved_by_another_process_mid_fetch_is_not_clobbered(tmp_path: Path) -> None:
+    """Audit LEAK-003: the read-modify-write now re-reads under the lock.
+
+    The scan holds this cache open across minutes of downloading while the
+    morning confirm writes to the same file; the old code merged into the
+    snapshot it had read *before* the fetch and saved that.
+    """
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3))
+    cache.get_or_fetch(["OLD"], lambda keys: {"OLD": "old"}, now=NOW)
+
+    def fetch(keys: list[str]) -> dict[str, str]:
+        other = TtlJsonCache(cache.path, cache.ttl)
+        other.get_or_fetch(["SIDE"], lambda k: {"SIDE": "side"}, now=NOW)
+        return {"NEW": "new"}
+
+    cache.get_or_fetch(["NEW"], fetch, now=NOW)
+
+    assert sorted(cache.read_all()) == ["NEW", "OLD", "SIDE"]
+
+
+def test_a_long_cold_walk_is_persisted_chunk_by_chunk(tmp_path: Path) -> None:
+    """Audit PERF-003: a Ctrl-C at symbol 1,400 used to discard all 1,400."""
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3))
+    keys = [f"S{i}" for i in range(5)]
+    calls: list[list[str]] = []
+
+    def fetch(batch: list[str]) -> dict[str, str]:
+        calls.append(list(batch))
+        if len(calls) == 3:
+            raise KeyboardInterrupt("the user gave up")
+        return dict.fromkeys(batch, "value")
+
+    with pytest.raises(KeyboardInterrupt):
+        cache.get_or_fetch(keys, fetch, now=NOW, chunk_size=2)
+
+    assert calls == [["S0", "S1"], ["S2", "S3"], ["S4"]]
+    assert sorted(cache.read_all()) == ["S0", "S1", "S2", "S3"], "four survive the interrupt"

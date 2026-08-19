@@ -9,7 +9,11 @@ plain-English message rather than a stack trace mid-scan.
 
 from __future__ import annotations
 
+import os
 import sys
+import time as time_module
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -17,7 +21,7 @@ import pandas as pd
 import pytest
 
 import swing.broker
-from conftest import make_bars
+from conftest import build_config, make_bars
 from swing.config import Config
 from swing.data.provider import Fundamentals, Quote
 from swing.data.schwab_provider import (
@@ -109,15 +113,38 @@ class StubFallback:
 
     def __init__(self) -> None:
         self.earnings_calls: list[Any] = []
+        self.history_calls: list[tuple[list[str], date, date]] = []
         self.fundamentals_calls: list[Any] = []
 
     def earnings_dates(self, symbols: Any, **kwargs: Any) -> dict[str, date | None]:
         self.earnings_calls.append(list(symbols))
         return {"AAPL": date(2026, 9, 1)}
 
+    def earnings_history(
+        self, symbols: Any, start: date, end: date, **kwargs: Any
+    ) -> dict[str, tuple[date, ...]]:
+        self.history_calls.append((list(symbols), start, end))
+        return {"AAPL": (date(2025, 5, 2),)}
+
     def fundamentals(self, symbols: Any, **kwargs: Any) -> dict[str, Fundamentals]:
         self.fundamentals_calls.append(list(symbols))
         return {"AAPL": Fundamentals("AAPL", 0.2, 0.1)}
+
+
+@contextmanager
+def local_timezone(name: str) -> Iterator[None]:
+    """Run the block as if the host machine were in ``name``."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time_module.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time_module.tzset()
 
 
 def build_provider(cfg: Config, client: FakeClient | None = None, **kwargs: Any) -> SchwabProvider:
@@ -182,6 +209,68 @@ def test_a_payload_that_is_not_a_record_is_refused() -> None:
         candles_to_bars(["nope"])
 
 
+def test_a_seconds_based_timestamp_is_not_decoded_as_1970() -> None:
+    """Audit BUG-038: the ambiguous ``time``/``timestamp`` keys are not always ms.
+
+    Read as milliseconds, a seconds value lands in January 1970 — normalises
+    cleanly, caches cleanly, and then the symbol simply vanishes from every
+    window slice with no diagnostic anywhere.
+    """
+    payload = {
+        "candles": [
+            {
+                "timestamp": millis("2020-01-02") // 1000,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10,
+            }
+        ]
+    }
+    assert list(candles_to_bars(payload).index.date) == [date(2020, 1, 2)]
+
+
+def test_millisecond_timestamps_are_still_read_as_milliseconds() -> None:
+    payload = {
+        "candles": [
+            {"timestamp": millis("2020-01-02"), "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}
+        ]
+    }
+    assert list(candles_to_bars(payload).index.date) == [date(2020, 1, 2)]
+
+
+def test_candles_sharing_a_trading_date_are_aggregated_not_deduped() -> None:
+    """Audit BUG-049: keep-last halves the day's volume and loses its true range."""
+    payload = {
+        "candles": [
+            {
+                "datetime": millis("2020-01-02", at="09:30"),
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.5,
+                "close": 10.5,
+                "volume": 400,
+            },
+            {
+                "datetime": millis("2020-01-02", at="15:30"),
+                "open": 10.5,
+                "high": 12.0,
+                "low": 10.2,
+                "close": 11.8,
+                "volume": 600,
+            },
+        ]
+    }
+
+    bars = candles_to_bars(payload)
+
+    assert len(bars) == 1
+    row = bars.iloc[0]
+    assert (row.open, row.high, row.low, row.close) == (10.0, 12.0, 9.5, 11.8)
+    assert row.volume == 1000.0, "both sessions' shares, not just the last candle's"
+
+
 # ---------------------------------------------------------------------------
 # daily_bars
 # ---------------------------------------------------------------------------
@@ -209,6 +298,15 @@ def test_daily_bars_uses_a_cache_of_its_own(test_cfg: Config) -> None:
     provider.daily_bars(["AAPL"], START, END)
     assert provider.cache.path_for("AAPL").is_file()
     assert not (test_cfg.data.cache_dir / "daily" / "AAPL.parquet").exists()
+
+
+def test_daily_bars_accepts_an_injected_clock(test_cfg: Config) -> None:
+    """Audit DEBT-014: ``daily_bars`` was the one contract call with no ``now=``."""
+    provider = build_provider(test_cfg, FakeClient(history=candle_payload()))
+
+    provider.daily_bars(["AAPL"], START, END, now=NOW)
+
+    assert provider.cache.read_meta("AAPL").fetched_at == NOW
 
 
 def test_daily_bars_are_cached_so_a_rerun_is_free(test_cfg: Config) -> None:
@@ -246,6 +344,98 @@ def test_an_http_error_is_retried_then_skipped(test_cfg: Config) -> None:
 def test_a_thrown_client_error_never_escapes(test_cfg: Config) -> None:
     provider = build_provider(test_cfg, FakeClient(error=RuntimeError("socket closed")), retries=1)
     assert provider.daily_bars(["AAPL"], START, END) == {}
+
+
+def test_the_request_bounds_are_stamped_in_exchange_time(test_cfg: Config) -> None:
+    """Audit BUG-034: naive bounds are epoch-encoded in the *host's* zone.
+
+    schwab-py converts whatever datetime it is given using the local zone while
+    the response is decoded as New York, so a Denver laptop asked for 02:00 ET
+    and lost the first bar of every cold fetch — and probed four overlap bars
+    instead of five, feeding BUG-014's empty-intersection path.
+    """
+    client = FakeClient(history=candle_payload())
+
+    with local_timezone("America/Denver"):
+        build_provider(test_cfg, client).daily_bars(["AAPL"], START, END)
+
+    _symbol, start_dt, end_dt = client.history_calls[0]
+    assert start_dt.tzinfo is not None, "a naive bound means the host's zone"
+    assert int(start_dt.timestamp() * 1000) == millis(START.isoformat(), at="00:00")
+    assert int(end_dt.timestamp() * 1000) == millis(END.isoformat(), at="23:59:59.999999")
+
+
+def test_history_is_requested_in_the_schwab_symbology(test_cfg: Config) -> None:
+    """Amendment A13 / audit BUG-039: the universe says BRK-B, Schwab says BRK/B."""
+    seen: list[str] = []
+
+    def history(symbol: str) -> Any:
+        seen.append(symbol)
+        return candle_payload() if symbol == "BRK/B" else {"candles": []}
+
+    provider = build_provider(test_cfg, FakeClient(history=history))
+    out = provider.daily_bars(["BRK-B"], START, END)
+
+    assert seen == ["BRK/B"], "the request is translated"
+    assert list(out) == ["BRK-B"], "and the answer comes back in the caller's symbology"
+
+
+def test_quotes_are_requested_and_returned_in_the_two_symbologies(test_cfg: Config) -> None:
+    client = FakeClient(quotes={"BRK/B": {"quote": {"lastPrice": 402.5}}})
+    provider = build_provider(test_cfg, client)
+
+    quotes = provider.latest_quotes(["brk-b"], now=NOW)
+
+    assert client.quote_calls == [["BRK/B"]]
+    assert quotes["BRK-B"].price == 402.5
+
+
+def test_a_run_where_nothing_came_back_says_so_once(
+    test_cfg: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit BUG-039: one line per symbol is invisible; the count is not."""
+    provider = build_provider(test_cfg, FakeClient(history={"candles": []}))
+
+    with caplog.at_level("WARNING", logger="swing.data.schwab_provider"):
+        provider.daily_bars(["AAPL", "MSFT"], START, END)
+
+    assert "2 of 2 symbols returned no history from Schwab" in caplog.text
+
+
+def test_history_for_many_symbols_is_fetched_concurrently(test_cfg: Config) -> None:
+    """Audit PERF-007: ~1,500 strictly serial round trips on a cold Schwab run."""
+    import threading
+
+    symbols = ["AAPL", "MSFT", "NVDA", "AMD"]
+    # The barrier only releases once all four calls are in flight at the same
+    # moment, so a serial implementation cannot get past it.
+    barrier = threading.Barrier(len(symbols), timeout=3)
+
+    def history(symbol: str) -> Any:
+        barrier.wait()
+        return candle_payload()
+
+    provider = build_provider(test_cfg, FakeClient(history=history), workers=4)
+
+    out = provider.daily_bars(symbols, START, END)
+
+    assert sorted(out) == sorted(symbols)
+
+
+def test_concurrent_history_comes_back_in_the_order_it_was_asked_for(
+    test_cfg: Config,
+) -> None:
+    """Concurrency must not leak into the output: the pool finishes out of order."""
+    import random
+
+    def history(symbol: str) -> Any:
+        time_module.sleep(random.random() / 1000)
+        return candle_payload()
+
+    provider = build_provider(test_cfg, FakeClient(history=history), workers=4)
+    symbols = ["NVDA", "AAPL", "MSFT", "AMD"]
+
+    assert list(provider.daily_bars(symbols, START, END)) == symbols
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +510,28 @@ def test_earnings_and_fundamentals_delegate_to_yahoo(test_cfg: Config) -> None:
     assert provider.fundamentals(["AAPL"])["AAPL"].eps_growth == 0.2
     assert fallback.earnings_calls == [["AAPL"]]
     assert fallback.fundamentals_calls == [["AAPL"]]
+
+
+def test_earnings_history_delegates_to_yahoo_too(test_cfg: Config) -> None:
+    """Amendment A12: Schwab's retail API has no calendar, past or future."""
+    fallback = StubFallback()
+    provider = build_provider(test_cfg, FakeClient(), fallback=fallback)
+
+    out = provider.earnings_history(["AAPL"], date(2025, 1, 1), date(2025, 12, 31))
+
+    assert out == {"AAPL": (date(2025, 5, 2),)}
+    assert fallback.history_calls == [(["AAPL"], date(2025, 1, 1), date(2025, 12, 31))]
+
+
+def test_the_yahoo_fallback_inherits_the_configured_retry_policy(tmp_path: Any) -> None:
+    """Audit DEBT-014: the fallback used to be built with the hardcoded defaults."""
+    cfg = build_config(tmp_path, data={"retries": 2, "retry_backoff": 0.001})
+    provider = SchwabProvider(cfg, client_factory=lambda: FakeClient())
+
+    fallback = provider._yf()
+
+    assert fallback._policy.retries == 2
+    assert fallback._policy.backoff == pytest.approx(0.001)
 
 
 def test_delegation_does_not_need_a_schwab_client_at_all(test_cfg: Config) -> None:

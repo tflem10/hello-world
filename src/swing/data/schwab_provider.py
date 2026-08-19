@@ -17,6 +17,11 @@ Two deliberate design choices:
   adjusted but *not* dividend-adjusted, so they are not interchangeable with
   yfinance's auto-adjusted series. Mixing both in one parquet file would create
   exactly the silent discontinuity the overlap check exists to prevent.
+
+Symbology (audit BUG-039, amendment A13): the universe speaks Yahoo — ``BRK-B``
+— and Schwab writes share classes with a slash. Requests are translated on the
+way out by :func:`swing.universe.to_schwab_symbol` and the answers are keyed
+back to the Yahoo form, so nothing outside this module ever sees ``BRK/B``.
 """
 
 from __future__ import annotations
@@ -25,22 +30,28 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from swing.data.cache import BarCache, utcnow
 from swing.data.provider import (
+    DEFAULT_WORKERS,
     Fundamentals,
     Quote,
+    RetryPolicy,
     as_date,
     as_utc,
     chunked,
     clean_symbols,
     coerce_float,
     empty_bars,
+    map_concurrent,
     normalize_bars,
+    with_retry,
 )
 from swing.data.yf_provider import YFinanceProvider
+from swing.universe import to_schwab_symbol
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
@@ -56,8 +67,18 @@ EXCHANGE_TZ = "America/New_York"
 SCHWAB_CACHE_SUBDIR = "daily-schwab"
 #: Schwab's quote endpoint accepts a few hundred symbols per request.
 QUOTE_BATCH = 250
+#: Epoch values below this are seconds, above it milliseconds: 1e11 ms is 1973
+#: and 1e11 s is the year 5138, so nothing real is ambiguous (audit BUG-038).
+SECONDS_CUTOFF = 1e11
 
 _DATETIME_KEYS = ("datetime", "datetime_ms", "datetimeMillis", "time", "timestamp")
+_OHLCV_AGGREGATION = (
+    ("open", "first"),
+    ("high", "max"),
+    ("low", "min"),
+    ("close", "last"),
+    ("volume", "sum"),
+)
 _PRICE_KEYS = (
     "lastPrice",
     "last_price",
@@ -135,7 +156,10 @@ class SchwabProvider:
         fallback: provider used for earnings and fundamentals; a
             :class:`~swing.data.yf_provider.YFinanceProvider` by default.
         cache: injected :class:`BarCache`; built from ``cfg`` when omitted.
-        retries / retry_backoff: bounded retry policy for client calls.
+        retries / retry_backoff: bounded retry policy for client calls;
+            both default to the ``[data]`` section of the config.
+        workers: upper bound on concurrent price-history calls.
+        quote_batch: symbols per quote request.
     """
 
     def __init__(
@@ -145,12 +169,14 @@ class SchwabProvider:
         client_factory: Callable[[], Any] | None = None,
         fallback: Any | None = None,
         cache: BarCache | None = None,
-        retries: int = 3,
-        retry_backoff: float = 0.5,
+        retries: int | None = None,
+        retry_backoff: float | None = None,
+        workers: int = DEFAULT_WORKERS,
         quote_batch: int = QUOTE_BATCH,
     ) -> None:
         if quote_batch < 1:
             raise ValueError("quote_batch must be at least 1.")
+        self._policy = RetryPolicy.from_config(cfg, retries=retries, backoff=retry_backoff)
         self._cfg = cfg
         self._client_factory = client_factory or (lambda: default_client_factory(cfg))
         self._client: Any | None = None
@@ -158,8 +184,7 @@ class SchwabProvider:
         self._cache = (
             cache if cache is not None else BarCache.from_config(cfg, subdir=SCHWAB_CACHE_SUBDIR)
         )
-        self._retries = retries
-        self._retry_backoff = retry_backoff
+        self._workers = max(1, workers)
         self._quote_batch = quote_batch
 
     @property
@@ -199,29 +224,27 @@ class SchwabProvider:
 
     def _yf(self) -> YFinanceProvider:
         if self._fallback is None:
-            self._fallback = YFinanceProvider(self._cfg)
+            # The fallback inherits this provider's retry policy: it used to be
+            # built with the hardcoded defaults, so turning retries down in the
+            # config left half the data layer ignoring it (audit DEBT-014).
+            self._fallback = YFinanceProvider(
+                self._cfg, retries=self._policy.retries, retry_backoff=self._policy.backoff
+            )
         return self._fallback
 
     def _with_retry(self, what: str, call: Callable[[], Any]) -> Any:
-        from tenacity import Retrying, stop_after_attempt, wait_exponential
-
-        try:
-            for attempt in Retrying(
-                stop=stop_after_attempt(self._retries),
-                wait=wait_exponential(multiplier=self._retry_backoff, min=0, max=8),
-                reraise=True,
-            ):
-                with attempt:
-                    return call()
-        except Exception as exc:  # noqa: BLE001 - caller decides what to skip
-            log.warning("Gave up on %s after %d attempts (%s).", what, self._retries, exc)
-        return None
+        """Run ``call`` under the configured retry policy (audit DEBT-013)."""
+        return with_retry(what, call, policy=self._policy)
 
     # -- Contract 3 -------------------------------------------------------
 
-    def daily_bars(self, symbols: Sequence[str], start: date, end: date) -> dict[str, pd.DataFrame]:
+    def daily_bars(
+        self, symbols: Sequence[str], start: date, end: date, *, now: datetime | None = None
+    ) -> dict[str, pd.DataFrame]:
         """Daily bars from Schwab's price-history endpoint, parquet-cached."""
-        return self._cache.get_bars(symbols, as_date(start), as_date(end), self._fetch_bars)
+        return self._cache.get_bars(
+            symbols, as_date(start), as_date(end), self._fetch_bars, now=now
+        )
 
     def latest_quotes(
         self, symbols: Sequence[str], *, now: datetime | None = None
@@ -237,8 +260,7 @@ class SchwabProvider:
             if not isinstance(payload, dict):
                 continue
             for symbol in batch:
-                entry = payload.get(symbol) or payload.get(symbol.upper())
-                price = _quote_price(entry)
+                price = _quote_price(payload.get(symbol))
                 if price is None:
                     log.warning("Schwab returned no usable price for %s, so it is skipped.", symbol)
                     continue
@@ -249,6 +271,12 @@ class SchwabProvider:
         """Delegated to Yahoo — Schwab's retail API has no earnings calendar."""
         return self._yf().earnings_dates(symbols, **kwargs)
 
+    def earnings_history(
+        self, symbols: Sequence[str], start: date, end: date, **kwargs: Any
+    ) -> dict[str, tuple[date, ...]]:
+        """Delegated to Yahoo — Schwab's retail API has no earnings calendar."""
+        return self._yf().earnings_history(symbols, start, end, **kwargs)
+
     def fundamentals(self, symbols: Sequence[str], **kwargs: Any) -> dict[str, Fundamentals]:
         """Delegated to Yahoo — Schwab's retail API has no growth fundamentals."""
         return self._yf().fundamentals(symbols, **kwargs)
@@ -258,32 +286,70 @@ class SchwabProvider:
     def _fetch_bars(
         self, symbols: Sequence[str], start: date, end: date
     ) -> dict[str, pd.DataFrame]:
-        """The cache's fetch callback: one price-history call per symbol."""
+        """The cache's fetch callback: one price-history call per symbol.
+
+        Schwab has no bulk history endpoint, so the only lever is concurrency —
+        1,500 strictly serial round trips is a cold fetch measured in tens of
+        minutes (audit PERF-007). Results are collected in request order, so
+        the output is identical whatever order the calls finish in.
+        """
         client = self.ensure_client()
+        wanted = clean_symbols(symbols)
+        payloads = map_concurrent(
+            wanted,
+            lambda symbol: self._history(client, symbol, start, end),
+            workers=self._workers,
+        )
         out: dict[str, pd.DataFrame] = {}
-        for symbol in clean_symbols(symbols):
-            payload = self._with_retry(
-                f"the price history for {symbol}",
-                lambda s=symbol: _payload(
-                    client.get_price_history_every_day(
-                        s,
-                        start_datetime=datetime.combine(start, time.min),
-                        end_datetime=datetime.combine(end, time.max),
-                    )
-                ),
-            )
+        for symbol in wanted:
+            payload = payloads.get(symbol)
             if payload is None:
                 continue
             try:
                 out[symbol] = candles_to_bars(payload)
             except ValueError as exc:
                 log.warning("Skipping %s: its price history was unreadable (%s).", symbol, exc)
+        blank = sum(1 for symbol in wanted if symbol not in out or out[symbol].empty)
+        if blank:
+            # One line per symbol is invisible in a 1,500-symbol run; the count
+            # is what tells you the symbology or the token is wrong (BUG-039).
+            log.warning("%d of %d symbols returned no history from Schwab.", blank, len(wanted))
         return out
 
+    def _history(self, client: Any, symbol: str, start: date, end: date) -> Any:
+        """One price-history call, with the Schwab-form symbol and ET bounds."""
+        requested = to_schwab_symbol(symbol)
+        # Aware bounds: schwab-py epoch-encodes whatever it is given using the
+        # host's local zone, while the response is decoded as exchange time —
+        # so a naive midnight on a Denver laptop asked for 02:00 ET and lost the
+        # first bar of every cold fetch (audit BUG-034).
+        exchange = ZoneInfo(EXCHANGE_TZ)
+        return self._with_retry(
+            f"the price history for {symbol}",
+            lambda: _payload(
+                client.get_price_history_every_day(
+                    requested,
+                    start_datetime=datetime.combine(start, time.min, tzinfo=exchange),
+                    end_datetime=datetime.combine(end, time.max, tzinfo=exchange),
+                )
+            ),
+        )
+
     def _quotes(self, batch: Sequence[str]) -> dict[str, Any]:
+        """Quote one batch, keyed back to the Yahoo symbols the caller used."""
         client = self.ensure_client()
-        payload = _payload(client.get_quotes(list(batch)))
-        return payload if isinstance(payload, dict) else {}
+        requests = {symbol: to_schwab_symbol(symbol) for symbol in batch}
+        payload = _payload(client.get_quotes(list(requests.values())))
+        if not isinstance(payload, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for symbol, requested in requests.items():
+            entry = payload.get(requested)
+            if entry is None and requested != symbol:
+                entry = payload.get(symbol)  # some endpoints echo the plain form
+            if entry is not None:
+                out[symbol] = entry
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +377,11 @@ def candles_to_bars(payload: Any) -> pd.DataFrame:
         payload: ``{"candles": [{"datetime": <epoch ms>, "open": .., ...}], ...}``.
 
     Returns:
-        A normalised bars frame; empty when Schwab reports no candles.
+        A normalised bars frame; empty when Schwab reports no candles. Candles
+        sharing a trading date are aggregated into one bar (open first, high
+        max, low min, close last, volume summed) rather than deduplicated —
+        keeping only the last one would halve the day's volume the first time
+        the endpoint returns intraday rows (audit BUG-049).
 
     Raises:
         ValueError: if the candles have no timestamp or no price columns.
@@ -331,9 +401,8 @@ def candles_to_bars(payload: Any) -> pd.DataFrame:
             "These Schwab candles carry no timestamp field "
             f"(looked for {', '.join(_DATETIME_KEYS)})."
         )
-    millis = pd.to_numeric(frame[stamp_key], errors="coerce")
     stamps = (
-        pd.to_datetime(millis, unit="ms", utc=True)
+        pd.to_datetime(_epoch_millis(frame[stamp_key]), unit="ms", utc=True)
         .dt.tz_convert(EXCHANGE_TZ)
         .dt.tz_localize(None)
         .dt.normalize()
@@ -341,7 +410,32 @@ def candles_to_bars(payload: Any) -> pd.DataFrame:
     frame = frame.drop(columns=[stamp_key])
     frame.index = pd.DatetimeIndex(stamps).rename(None)
     frame = frame.loc[frame.index.notna()]
+    if not frame.index.is_unique:
+        frame = _combine_same_day(frame)
     return normalize_bars(frame)
+
+
+def _epoch_millis(values: Any) -> pd.Series:
+    """Read a Schwab timestamp column as epoch milliseconds.
+
+    ``datetime`` is documented as milliseconds, but the ambiguous ``time`` and
+    ``timestamp`` keys have been seen carrying seconds — decoded as
+    milliseconds they land in 1970, normalise cleanly, cache cleanly, and then
+    the symbol simply vanishes from every window slice with no diagnostic
+    anywhere (audit BUG-038). The magnitude settles it.
+    """
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric.mask(numeric.abs() < SECONDS_CUTOFF, numeric * 1000)
+
+
+def _combine_same_day(frame: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate rows sharing a trading date into one OHLCV bar."""
+    lowered = frame.rename(columns=lambda name: str(name).strip().lower())
+    lowered = lowered.loc[:, ~lowered.columns.duplicated(keep="first")]
+    how = {name: rule for name, rule in _OHLCV_AGGREGATION if name in lowered.columns}
+    if not how:
+        return frame
+    return lowered.sort_index(kind="stable").groupby(level=0, sort=True).agg(how)
 
 
 def _quote_price(entry: Any) -> float | None:

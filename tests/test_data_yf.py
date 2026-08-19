@@ -4,17 +4,24 @@ Yahoo is an unsupported, best-effort source, so the tests here are mostly about
 *misbehaviour*: a batch that silently omits a ticker, a sub-frame with no price
 columns, a call that fails three times, fundamentals that exist for one symbol
 and not the next.
+
+Every test injects both seams (``download`` and ``ticker_factory``) whenever the
+path under test can reach either one. yfinance 1.6 talks through ``curl_cffi``,
+which does not go anywhere near ``socket.socket.connect`` — so the suite's
+socket block would *not* catch a leak here.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
 import pytest
 
-from conftest import make_bars
+from conftest import build_config, make_bars
 from swing.config import Config
 from swing.data.provider import Fundamentals
 from swing.data.yf_provider import YFinanceProvider, _split_download
@@ -159,8 +166,15 @@ class TickerFactory:
 
 
 def build_provider(cfg: Config, **kwargs: Any) -> YFinanceProvider:
-    """A provider that never waits between retries."""
+    """A provider that never waits between retries and never dials out.
+
+    ``download`` defaults to a downloader that refuses: the quote path falls
+    back to a bulk download for anything ``fast_info`` could not price, and a
+    test that forgets to say what Yahoo should answer must fail rather than
+    quietly reach the real endpoint.
+    """
     kwargs.setdefault("retry_backoff", 0.0)
+    kwargs.setdefault("download", RecordingDownload(error=AssertionError("no download injected")))
     return YFinanceProvider(cfg, **kwargs)
 
 
@@ -199,6 +213,22 @@ def test_split_download_skips_a_symbol_yahoo_left_out() -> None:
 def test_split_download_accepts_a_flat_single_symbol_frame() -> None:
     flat = BARS.rename(columns=str.title)
     assert list(_split_download(flat, ["AAPL"])) == ["AAPL"]
+
+
+def test_a_whole_batch_collapsing_to_one_table_is_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Audit BUG-015: 200 symbols evaporating used to leave one DEBUG line.
+
+    Downstream that is indistinguishable from a bear market — a missing SPY is
+    reported to the user as "the market regime gate is OFF".
+    """
+    flat = BARS.rename(columns=str.title)
+
+    with caplog.at_level("WARNING", logger="swing.data.yf_provider"):
+        assert _split_download(flat, ["AAPL", "MSFT", "NVDA"]) == {}
+
+    assert "single unlabelled table for a batch of 3 symbols" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +323,37 @@ def test_provider_construction_rejects_impossible_settings(test_cfg: Config) -> 
         YFinanceProvider(test_cfg, retries=0)
 
 
+def test_the_network_knobs_come_from_the_config(tmp_path: Any) -> None:
+    """Audit DEBT-013: a rate-limited user had to edit the source to back off."""
+    cfg = build_config(tmp_path, data={"retries": 2, "retry_backoff": 0.001, "download_batch": 10})
+    download = RecordingDownload(error=RuntimeError("rate limited"))
+    provider = YFinanceProvider(cfg, download=download)
+
+    assert provider.batch_size == 10
+    assert provider.daily_bars(["AAPL"], START, END) == {}
+    assert download.count == 2, "two attempts, because the config said two"
+
+
+def test_the_download_batch_size_comes_from_the_config(tmp_path: Any) -> None:
+    cfg = build_config(tmp_path, data={"download_batch": 10, "retry_backoff": 0.001})
+    symbols = [f"S{index}" for index in range(12)]
+    download = RecordingDownload(download_frame(dict.fromkeys(symbols, BARS)))
+
+    YFinanceProvider(cfg, download=download).daily_bars(symbols, START, END)
+
+    assert [len(call["tickers"]) for call in download.calls] == [10, 2]
+
+
+def test_daily_bars_accepts_an_injected_clock(test_cfg: Config) -> None:
+    """Audit DEBT-014: ``daily_bars`` was the one call with no ``now=`` seam."""
+    download = RecordingDownload(download_frame({"AAPL": BARS}))
+    provider = build_provider(test_cfg, download=download)
+
+    provider.daily_bars(["AAPL"], START, END, now=NOW)
+
+    assert provider.cache.read_meta("AAPL").fetched_at == NOW
+
+
 # ---------------------------------------------------------------------------
 # quotes
 # ---------------------------------------------------------------------------
@@ -353,36 +414,81 @@ def test_latest_quotes_accepts_mapping_style_fast_info(test_cfg: Config) -> None
     assert quotes["AAPL"].price == 55.5
 
 
-def test_latest_quotes_falls_back_to_the_last_close(test_cfg: Config) -> None:
-    history = pd.DataFrame(
-        {"Close": [10.0, 11.5]}, index=pd.DatetimeIndex(["2026-08-17", "2026-08-18"])
+def test_latest_quotes_falls_back_to_one_bulk_download_for_the_misses(
+    test_cfg: Config,
+) -> None:
+    """Audit PERF-002: the fallback used to be a 5-day history call *per miss*.
+
+    Two unpriced symbols now cost one download between them, and the symbol
+    ``fast_info`` could price never waits for it.
+    """
+    recent = make_bars(3, start="2026-08-14")
+    download = RecordingDownload(download_frame({"MISS1": recent, "MISS2": recent}))
+    factory = TickerFactory(
+        {
+            "AAPL": FakeTicker(fast=FakeFastInfo(last_price=191.25)),
+            "MISS1": FakeTicker(fast=FakeFastInfo()),
+            "MISS2": FakeTicker(fast=FakeFastInfo()),
+        }
     )
-    factory = TickerFactory({"AAPL": FakeTicker(fast=FakeFastInfo(), history=history)})
-    quotes = build_provider(test_cfg, ticker_factory=factory).latest_quotes(["AAPL"], now=NOW)
-    assert quotes["AAPL"].price == 11.5
+    provider = build_provider(test_cfg, download=download, ticker_factory=factory, retries=1)
+
+    quotes = provider.latest_quotes(["AAPL", "MISS1", "MISS2"], now=NOW)
+
+    assert download.count == 1, "one call for both misses"
+    assert download.calls[0]["tickers"] == ["MISS1", "MISS2"], "and only for the misses"
+    assert quotes["AAPL"].price == 191.25, "the fresher intraday price still wins"
+    assert quotes["MISS1"].price == pytest.approx(recent["close"].iloc[-1])
+    assert quotes["MISS2"].price == pytest.approx(recent["close"].iloc[-1])
+
+
+def test_the_quote_fallback_reads_the_flat_frame_yahoo_sends_for_one_symbol(
+    test_cfg: Config,
+) -> None:
+    """A single-ticker download has no MultiIndex header — the common miss."""
+    recent = make_bars(3, start="2026-08-14").rename(columns=str.title)
+    download = RecordingDownload(recent)
+    factory = TickerFactory({"AAPL": FakeTicker(fast=FakeFastInfo())})
+    provider = build_provider(test_cfg, download=download, ticker_factory=factory, retries=1)
+
+    quotes = provider.latest_quotes(["AAPL"], now=NOW)
+
+    assert download.calls[0]["period"] == "5d"
+    assert quotes["AAPL"].price == pytest.approx(recent["Close"].iloc[-1])
+
+
+def test_latest_quotes_needs_no_download_when_every_symbol_is_priced(
+    test_cfg: Config,
+) -> None:
+    download = RecordingDownload(error=AssertionError("must not be called"))
+    factory = TickerFactory({"AAPL": FakeTicker(fast=FakeFastInfo(last_price=191.25))})
+    provider = build_provider(test_cfg, download=download, ticker_factory=factory)
+
+    assert provider.latest_quotes(["AAPL"], now=NOW)["AAPL"].price == 191.25
+    assert download.count == 0
 
 
 def test_latest_quotes_skips_a_symbol_it_cannot_price(test_cfg: Config) -> None:
+    download = RecordingDownload(download_frame({"AAPL": BARS}))
     factory = TickerFactory(
         {
             "AAPL": FakeTicker(fast=FakeFastInfo(last_price=100.0)),
             "DEAD": FakeTicker(explode=True),
         }
     )
-    quotes = build_provider(test_cfg, ticker_factory=factory, retries=1).latest_quotes(
-        ["AAPL", "DEAD"], now=NOW
-    )
+    quotes = build_provider(
+        test_cfg, download=download, ticker_factory=factory, retries=1
+    ).latest_quotes(["AAPL", "DEAD"], now=NOW)
     assert sorted(quotes) == ["AAPL"]
 
 
 def test_latest_quotes_ignores_a_zero_or_missing_price(test_cfg: Config) -> None:
+    download = RecordingDownload(error=RuntimeError("Yahoo has nothing either"))
     factory = TickerFactory(
         {"AAPL": FakeTicker(fast=FakeFastInfo(last_price=0.0, previousClose=None))}
     )
-    assert (
-        build_provider(test_cfg, ticker_factory=factory, retries=1).latest_quotes(["AAPL"], now=NOW)
-        == {}
-    )
+    provider = build_provider(test_cfg, download=download, ticker_factory=factory, retries=1)
+    assert provider.latest_quotes(["AAPL"], now=NOW) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +542,52 @@ def test_earnings_dates_are_cached_until_the_ttl_expires(test_cfg: Config) -> No
     assert factory.count > after_cached, "past the TTL the calendar is checked again"
 
 
+def test_a_cold_earnings_walk_is_persisted_in_chunks(test_cfg: Config) -> None:
+    """Audit PERF-003: nothing was written until all 1,500 symbols had answered.
+
+    A Ctrl-C at symbol 1,400 threw away 1,400 downloads. Chunks are persisted
+    as they complete, so an interrupted run resumes almost where it stopped.
+    """
+    symbols = [f"S{index}" for index in range(5)]
+    factory = TickerFactory(
+        {symbol: FakeTicker(earnings=earnings_frame(["2026-09-01"])) for symbol in symbols}
+    )
+    provider = build_provider(test_cfg, ticker_factory=factory, chunk_size=2)
+    cache_file = test_cfg.data.cache_dir / "earnings.json"
+
+    class StopAfterTwoChunks(FakeTicker):
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            if len(json.loads(cache_file.read_text())["entries"]) >= 4:
+                raise KeyboardInterrupt("the user gave up")
+            return earnings_frame(["2026-09-01"])
+
+    factory.tickers["S4"] = StopAfterTwoChunks()
+
+    with pytest.raises(KeyboardInterrupt):
+        provider.earnings_dates(symbols, now=NOW)
+
+    saved = json.loads(cache_file.read_text())["entries"]
+    assert sorted(saved) == ["S0", "S1", "S2", "S3"], "two chunks survive the interrupt"
+
+
+def test_a_cold_walk_asks_for_several_symbols_at_once(test_cfg: Config) -> None:
+    """Audit PERF-003: the serial dict comprehension is now a bounded pool."""
+    symbols = ["S0", "S1", "S2", "S3"]
+    barrier = threading.Barrier(len(symbols), timeout=3)
+
+    class Blocking(FakeTicker):
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            barrier.wait()  # only clears if every call is in flight together
+            return earnings_frame(["2026-09-01"])
+
+    factory = TickerFactory({symbol: Blocking() for symbol in symbols})
+    provider = build_provider(test_cfg, ticker_factory=factory, workers=4)
+
+    out = provider.earnings_dates(symbols, now=NOW)
+
+    assert out == dict.fromkeys(symbols, date(2026, 9, 1))
+
+
 def test_earnings_cache_survives_a_new_provider_instance(test_cfg: Config) -> None:
     factory = TickerFactory({"AAPL": FakeTicker(earnings=earnings_frame(["2026-09-01"]))})
     build_provider(test_cfg, ticker_factory=factory).earnings_dates(["AAPL"], now=NOW)
@@ -460,14 +612,100 @@ def test_a_stale_earnings_entry_is_refetched(test_cfg: Config) -> None:
     assert factory.count > before
 
 
+def test_an_unknown_earnings_date_is_re_asked_the_same_day(test_cfg: Config) -> None:
+    """Audit BUG-051: "Yahoo has no date" cached three days against a 10-day blackout.
+
+    A date published in the meantime could not be seen until the TTL expired,
+    so an entry the blackout exists to block sailed through.
+    """
+    ticker = FakeTicker(earnings=None, calendar=None)
+    factory = TickerFactory({"AAPL": ticker})
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+
+    assert provider.earnings_dates(["AAPL"], now=NOW) == {"AAPL": None}
+    assert provider.earnings_dates(["AAPL"], now=NOW + timedelta(hours=6)) == {"AAPL": None}
+    before = factory.count
+
+    ticker._earnings = earnings_frame(["2026-08-24"])
+    later = provider.earnings_dates(["AAPL"], now=NOW + timedelta(hours=13))
+
+    assert later == {"AAPL": date(2026, 8, 24)}
+    assert factory.count > before
+
+
+# ---------------------------------------------------------------------------
+# earnings history (amendment A12 / audit BUG-036)
+# ---------------------------------------------------------------------------
+
+
+def test_earnings_history_returns_past_and_future_dates_in_the_window(
+    test_cfg: Config,
+) -> None:
+    """A12: the backtest needs where the blackouts *were*, not the next one."""
+    factory = TickerFactory(
+        {
+            "AAPL": FakeTicker(
+                earnings=earnings_frame(["2024-02-01", "2025-05-02", "2025-08-01", "2026-11-02"])
+            )
+        }
+    )
+    provider = build_provider(test_cfg, ticker_factory=factory)
+
+    out = provider.earnings_history(["aapl"], date(2025, 1, 1), date(2025, 12, 31), now=NOW)
+
+    assert out == {"AAPL": (date(2025, 5, 2), date(2025, 8, 1))}
+
+
+def test_earnings_history_is_unknown_rather_than_empty_when_yahoo_has_nothing(
+    test_cfg: Config,
+) -> None:
+    factory = TickerFactory({"AAPL": FakeTicker(earnings=None)})
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+
+    out = provider.earnings_history(["AAPL"], date(2025, 1, 1), date(2025, 12, 31), now=NOW)
+
+    assert out == {"AAPL": ()}
+
+
+def test_earnings_history_caches_the_whole_list_not_the_window(test_cfg: Config) -> None:
+    """Two windows over one symbol must share a single download."""
+    factory = TickerFactory(
+        {"AAPL": FakeTicker(earnings=earnings_frame(["2024-02-01", "2025-05-02"]))}
+    )
+    provider = build_provider(test_cfg, ticker_factory=factory)
+
+    provider.earnings_history(["AAPL"], date(2024, 1, 1), date(2024, 12, 31), now=NOW)
+    before = factory.count
+    second = provider.earnings_history(["AAPL"], date(2025, 1, 1), date(2025, 12, 31), now=NOW)
+
+    assert factory.count == before, "a different window is a filter, not a fetch"
+    assert second == {"AAPL": (date(2025, 5, 2),)}
+
+
+def test_earnings_history_asks_for_enough_history_to_backtest(test_cfg: Config) -> None:
+    class Recorder(FakeTicker):
+        limits: list[int] = []
+
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            Recorder.limits.append(limit)
+            return earnings_frame(["2025-05-02"])
+
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory({"AAPL": Recorder()}))
+    provider.earnings_history(["AAPL"], date(2020, 1, 1), date(2026, 1, 1), now=NOW)
+
+    assert Recorder.limits == [60]
+
+
 # ---------------------------------------------------------------------------
 # fundamentals
 # ---------------------------------------------------------------------------
 
 
-def income_statement(eps: list[float], revenue: list[float]) -> pd.DataFrame:
-    """Two reporting periods, newest column first, as yfinance returns them."""
-    columns = pd.DatetimeIndex(["2025-12-31", "2024-12-31"])
+def income_statement(
+    eps: list[float], revenue: list[float], *, periods: list[str] | None = None
+) -> pd.DataFrame:
+    """Reporting periods newest column first, as yfinance returns them."""
+    columns = pd.DatetimeIndex(periods or ["2025-12-31", "2024-12-31"])
     return pd.DataFrame([eps, revenue], index=["Diluted EPS", "Total Revenue"], columns=columns)
 
 
@@ -477,7 +715,9 @@ def test_fundamentals_prefer_the_company_profile(test_cfg: Config) -> None:
 
     out = build_provider(test_cfg, ticker_factory=factory).fundamentals(["AAPL"], now=NOW)
 
-    assert out["AAPL"] == Fundamentals(symbol="AAPL", eps_growth=0.18, revenue_growth=0.09)
+    assert out["AAPL"] == Fundamentals(
+        symbol="AAPL", eps_growth=0.18, revenue_growth=0.09, basis="quarterly"
+    )
 
 
 def test_fundamentals_fall_back_to_the_income_statement(test_cfg: Config) -> None:
@@ -489,6 +729,63 @@ def test_fundamentals_fall_back_to_the_income_statement(test_cfg: Config) -> Non
 
     assert out["AAPL"].eps_growth == pytest.approx(0.2)
     assert out["AAPL"].revenue_growth == pytest.approx(0.1)
+    assert out["AAPL"].basis == "annual", "and it says so, instead of passing as quarterly"
+
+
+def test_fundamentals_ask_for_the_quarterly_statement_first(test_cfg: Config) -> None:
+    """Audit BUG-037: the fallback was the *annual* statement, invisibly.
+
+    ``info``'s growth is quarter-over-quarter year-on-year, so a candidate
+    screened on the fallback was screened on a different measurement with
+    nothing in the record to say so.
+    """
+    quarterly = income_statement([1.2, 1.0], [55.0, 50.0], periods=["2025-09-30", "2025-06-30"])
+    asked: list[str] = []
+
+    class FreqAwareTicker(FakeTicker):
+        def get_income_stmt(self, freq: str = "yearly") -> pd.DataFrame | None:
+            asked.append(freq)
+            return quarterly if freq == "quarterly" else self._statement
+
+    factory = TickerFactory(
+        {"AAPL": FreqAwareTicker(info={}, statement=income_statement([6.0, 5.0], [110.0, 100.0]))}
+    )
+
+    out = build_provider(test_cfg, ticker_factory=factory).fundamentals(["AAPL"], now=NOW)
+
+    assert asked[0] == "quarterly"
+    assert out["AAPL"].eps_growth == pytest.approx(0.2)
+    assert out["AAPL"].revenue_growth == pytest.approx(0.1)
+    assert out["AAPL"].basis == "quarterly"
+
+
+def test_fundamentals_refuse_to_compare_non_adjacent_periods(test_cfg: Config) -> None:
+    """Audit BUG-037: a two-period gap used to masquerade as one period of growth."""
+    gapped = income_statement(
+        [6.0, float("nan"), 5.0],
+        [110.0, float("nan"), 100.0],
+        periods=["2025-12-31", "2024-12-31", "2023-12-31"],
+    )
+    factory = TickerFactory({"AAPL": FakeTicker(info={}, statement=gapped)})
+
+    out = build_provider(test_cfg, ticker_factory=factory).fundamentals(["AAPL"], now=NOW)
+
+    assert out["AAPL"].eps_growth is None
+    assert out["AAPL"].revenue_growth is None
+    assert out["AAPL"].basis is None
+
+
+def test_a_mixed_pair_of_sources_is_labelled_mixed(test_cfg: Config) -> None:
+    factory = TickerFactory(
+        {
+            "AAPL": FakeTicker(
+                info={"revenueGrowth": 0.05},
+                statement=income_statement([6.0, 5.0], [110.0, 100.0]),
+            )
+        }
+    )
+    out = build_provider(test_cfg, ticker_factory=factory).fundamentals(["AAPL"], now=NOW)
+    assert out["AAPL"].basis == "mixed"
 
 
 def test_fundamentals_can_be_half_known(test_cfg: Config) -> None:
@@ -529,7 +826,9 @@ def test_fundamentals_survive_a_json_round_trip(test_cfg: Config) -> None:
     cached = provider.fundamentals(["AAPL"], now=NOW + timedelta(days=6))
 
     assert factory.count == before, "fundamentals are cached for a week"
-    assert cached["AAPL"] == Fundamentals(symbol="AAPL", eps_growth=0.18, revenue_growth=0.09)
+    assert cached["AAPL"] == Fundamentals(
+        symbol="AAPL", eps_growth=0.18, revenue_growth=0.09, basis="quarterly"
+    ), "the basis label survives the round trip too"
 
 
 def test_fundamentals_are_refetched_after_a_week(test_cfg: Config) -> None:

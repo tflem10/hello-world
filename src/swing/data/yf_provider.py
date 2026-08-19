@@ -12,13 +12,18 @@ and skipped, every scalar run through a "is this actually a number" gate, and
 anything slow-moving (earnings, fundamentals) cached with a TTL. The
 :mod:`yfinance` import itself is lazy so that ``import swing.data`` stays cheap
 and offline tests never touch it.
+
+The per-symbol calls (quotes, earnings, fundamentals) run in a small thread
+pool and persist in chunks rather than in one final write, because serially
+walking 1,500 symbols took thousands of round trips and a Ctrl-C near the end
+threw all of them away (audit PERF-002, PERF-003).
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -26,21 +31,30 @@ import pandas as pd
 
 from swing.data.cache import BarCache, TtlJsonCache, utcnow
 from swing.data.provider import (
-    PRICE_FIELD_LABELS,
+    DEFAULT_WORKERS,
     Fundamentals,
     Quote,
+    RetryPolicy,
     as_date,
     as_utc,
+    choose_header_level,
     chunked,
     clean_symbols,
     coerce_float,
+    map_concurrent,
     normalize_bars,
+    with_retry,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
-__all__ = ["EARNINGS_TTL", "FUNDAMENTALS_TTL", "YFinanceProvider"]
+__all__ = [
+    "EARNINGS_MISS_TTL",
+    "EARNINGS_TTL",
+    "FUNDAMENTALS_TTL",
+    "YFinanceProvider",
+]
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +62,16 @@ log = logging.getLogger(__name__)
 DOWNLOAD_BATCH = 200
 #: Earnings dates get confirmed/moved on a scale of days, not hours.
 EARNINGS_TTL = timedelta(days=3)
+#: But "Yahoo has no date for this symbol" is a *much* weaker statement, and
+#: caching it for three days against a ten-day blackout lets a newly published
+#: date slip through the window it exists to block (audit BUG-051).
+EARNINGS_MISS_TTL = timedelta(hours=12)
 #: Fundamentals only change when a company reports.
 FUNDAMENTALS_TTL = timedelta(days=7)
+#: Symbols per persisted chunk of a cold earnings/fundamentals walk.
+FETCH_CHUNK = 50
+#: Past *and* future announcements, enough for a decade of backtests.
+EARNINGS_HISTORY_LIMIT = 60
 
 _EPS_INFO_KEYS = ("earningsQuarterlyGrowth", "earningsGrowth")
 _REVENUE_INFO_KEYS = ("revenueGrowth", "revenueQuarterlyGrowth")
@@ -63,20 +85,29 @@ _PRICE_ATTRS = (
     "previous_close",
     "previousClose",
 )
+#: ``info``'s growth figures are quarter-over-quarter year-on-year.
+_INFO_BASIS = "quarterly"
 
 
 class YFinanceProvider:
     """A :class:`~swing.data.provider.DataProvider` backed by Yahoo Finance.
 
     Args:
-        cfg: the loaded configuration; only ``data.cache_dir`` is read.
+        cfg: the loaded configuration; ``data.cache_dir`` and the ``data``
+            network knobs (``retries``, ``retry_backoff``, ``download_batch``)
+            are read from it.
         download: injected replacement for ``yfinance.download`` (tests).
         ticker_factory: injected replacement for ``yfinance.Ticker`` (tests).
         cache: injected :class:`BarCache`; built from ``cfg`` when omitted.
-        batch_size: tickers per bulk download call.
-        retries: attempts per network call, including the first.
+        batch_size: tickers per bulk download call; defaults to
+            ``cfg.data.download_batch``.
+        retries: attempts per network call, including the first; defaults to
+            ``cfg.data.retries``.
         retry_backoff: seconds multiplier for exponential backoff; ``0``
-            disables waiting entirely, which is what tests want.
+            disables waiting entirely, which is what tests want. Defaults to
+            ``cfg.data.retry_backoff``.
+        workers: upper bound on concurrent per-symbol calls.
+        chunk_size: symbols per persisted chunk of a cold TTL-cache walk.
         earnings_ttl / fundamentals_ttl: how long those caches stay fresh.
     """
 
@@ -87,31 +118,41 @@ class YFinanceProvider:
         download: Callable[..., Any] | None = None,
         ticker_factory: Callable[[str], Any] | None = None,
         cache: BarCache | None = None,
-        batch_size: int = DOWNLOAD_BATCH,
-        retries: int = 3,
-        retry_backoff: float = 0.5,
+        batch_size: int | None = None,
+        retries: int | None = None,
+        retry_backoff: float | None = None,
+        workers: int = DEFAULT_WORKERS,
+        chunk_size: int = FETCH_CHUNK,
         earnings_ttl: timedelta = EARNINGS_TTL,
         fundamentals_ttl: timedelta = FUNDAMENTALS_TTL,
     ) -> None:
-        if batch_size < 1:
-            raise ValueError("batch_size must be at least 1.")
-        if retries < 1:
-            raise ValueError("retries must be at least 1 (one attempt, no retry).")
+        self._policy = RetryPolicy.from_config(
+            cfg, retries=retries, backoff=retry_backoff, batch=batch_size
+        )
         self._cfg = cfg
         self._download = download
         self._ticker_factory = ticker_factory
         self._cache = cache if cache is not None else BarCache.from_config(cfg)
-        self._batch_size = batch_size
-        self._retries = retries
-        self._retry_backoff = retry_backoff
+        self._workers = max(1, workers)
+        self._chunk_size = max(1, chunk_size)
         cache_dir = self._cache.root.parent
-        self._earnings_cache = TtlJsonCache(cache_dir / "earnings.json", earnings_ttl)
+        self._earnings_cache = TtlJsonCache(
+            cache_dir / "earnings.json", earnings_ttl, miss_ttl=EARNINGS_MISS_TTL
+        )
+        self._earnings_history_cache = TtlJsonCache(
+            cache_dir / "earnings-history.json", earnings_ttl, miss_ttl=EARNINGS_MISS_TTL
+        )
         self._fundamentals_cache = TtlJsonCache(cache_dir / "fundamentals.json", fundamentals_ttl)
 
     @property
     def cache(self) -> BarCache:
         """The parquet cache these bars are stored in."""
         return self._cache
+
+    @property
+    def batch_size(self) -> int:
+        """Tickers per bulk download call."""
+        return self._policy.batch
 
     # -- lazy yfinance handles -------------------------------------------
 
@@ -129,41 +170,52 @@ class YFinanceProvider:
             self._ticker_factory = yfinance.Ticker
         return self._ticker_factory(symbol)
 
-    def _retrying(self) -> Any:
-        from tenacity import Retrying, stop_after_attempt, wait_exponential
-
-        return Retrying(
-            stop=stop_after_attempt(self._retries),
-            wait=wait_exponential(multiplier=self._retry_backoff, min=0, max=8),
-            reraise=True,
-        )
-
     def _with_retry(self, what: str, call: Callable[[], Any]) -> Any:
-        """Run ``call`` with bounded retries; return ``None`` if it never works."""
-        try:
-            for attempt in self._retrying():
-                with attempt:
-                    return call()
-        except Exception as exc:  # noqa: BLE001 - the caller decides what to skip
-            log.warning("Gave up on %s after %d attempts (%s).", what, self._retries, exc)
-        return None
+        """Run ``call`` under the configured retry policy (audit DEBT-013)."""
+        return with_retry(what, call, policy=self._policy)
+
+    def _map(self, keys: Sequence[str], call: Callable[[str], Any]) -> dict[str, Any]:
+        """Run a per-symbol call over ``keys`` in the bounded pool."""
+        return map_concurrent(keys, call, workers=self._workers)
 
     # -- Contract 3 -------------------------------------------------------
 
-    def daily_bars(self, symbols: Sequence[str], start: date, end: date) -> dict[str, pd.DataFrame]:
-        """Auto-adjusted daily bars, served from the parquet cache where possible."""
-        return self._cache.get_bars(symbols, as_date(start), as_date(end), self._fetch_bars)
+    def daily_bars(
+        self, symbols: Sequence[str], start: date, end: date, *, now: datetime | None = None
+    ) -> dict[str, pd.DataFrame]:
+        """Auto-adjusted daily bars, served from the parquet cache where possible.
+
+        ``now`` is injected only to stamp and age the cache records; it exists
+        so tests and backtests can pin the clock the way every other call in
+        this contract already lets them (audit DEBT-014).
+        """
+        return self._cache.get_bars(
+            symbols, as_date(start), as_date(end), self._fetch_bars, now=now
+        )
 
     def latest_quotes(
         self, symbols: Sequence[str], *, now: datetime | None = None
     ) -> dict[str, Quote]:
-        """Latest price per symbol; symbols Yahoo cannot price are omitted."""
+        """Latest price per symbol; symbols Yahoo cannot price are omitted.
+
+        The intraday ``fast_info`` price is still the answer wherever Yahoo has
+        one — a stale close would quietly weaken the execution drift guard —
+        but the probes now run concurrently instead of one blocking round trip
+        after another, and the symbols that come back unpriced are resolved by
+        a *single* bulk download rather than one 5-day history call each
+        (audit PERF-002).
+        """
         stamp = as_utc(now) if now is not None else utcnow()
+        wanted = clean_symbols(symbols)
+        prices: dict[str, float | None] = dict(self._map(wanted, self._quote_price))
+
+        missing = [symbol for symbol in wanted if prices.get(symbol) is None]
+        if missing:
+            prices.update(self._bulk_last_closes(missing))
+
         out: dict[str, Quote] = {}
-        for symbol in clean_symbols(symbols):
-            price = self._with_retry(
-                f"the latest price for {symbol}", lambda s=symbol: self._price(s)
-            )
+        for symbol in wanted:
+            price = prices.get(symbol)
             if price is None:
                 log.warning("No usable price for %s, so it will be skipped.", symbol)
                 continue
@@ -175,21 +227,61 @@ class YFinanceProvider:
     ) -> dict[str, date | None]:
         """Next upcoming earnings date per symbol, ``None`` when Yahoo has none.
 
-        Cached for :data:`EARNINGS_TTL`. Yahoo mixes confirmed dates with
-        estimated ones and does not always say which is which; we return the
-        earliest upcoming date from either source, because for an earnings
-        blackout an estimate that is a few days off is far better than nothing.
+        Cached for :data:`EARNINGS_TTL` — but a ``None`` only for
+        :data:`EARNINGS_MISS_TTL`. Yahoo mixes confirmed dates with estimated
+        ones and does not always say which is which; we return the earliest
+        upcoming date from either source, because for an earnings blackout an
+        estimate that is a few days off is far better than nothing.
         """
         stamp = as_utc(now) if now is not None else utcnow()
         today = stamp.date()
         wanted = clean_symbols(symbols)
         return self._earnings_cache.get_or_fetch(
             wanted,
-            lambda keys: {key: self._next_earnings(key, today) for key in keys},
+            lambda keys: self._map(keys, lambda key: self._next_earnings(key, today)),
             now=stamp,
+            chunk_size=self._chunk_size,
             encode=lambda value: value.isoformat() if isinstance(value, date) else None,
             decode=lambda value: date.fromisoformat(value) if isinstance(value, str) else None,
         )
+
+    def earnings_history(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, tuple[date, ...]]:
+        """Announcement dates intersecting ``[start, end]``, past and future.
+
+        Amendment A12. yfinance already returns past dates from
+        ``get_earnings_dates``; the contract simply used to throw them away, so
+        every historical blackout check in the backtest was fed a single future
+        date and blocked nothing (audit BUG-036).
+
+        The *unfiltered* list is what gets cached, keyed by symbol alone, so
+        two callers asking for different windows share one download.
+
+        Returns:
+            ``{symbol: (dates...)}`` for every requested symbol, sorted and
+            unique. An empty tuple means "unknown", never "there were none".
+        """
+        stamp = as_utc(now) if now is not None else utcnow()
+        first, last = as_date(start), as_date(end)
+        wanted = clean_symbols(symbols)
+        known = self._earnings_history_cache.get_or_fetch(
+            wanted,
+            lambda keys: self._map(keys, self._earnings_history),
+            now=stamp,
+            chunk_size=self._chunk_size,
+            encode=_encode_days,
+            decode=_decode_days,
+        )
+        return {
+            symbol: tuple(day for day in (known.get(symbol) or ()) if first <= day <= last)
+            for symbol in wanted
+        }
 
     def fundamentals(
         self, symbols: Sequence[str], *, now: datetime | None = None
@@ -199,12 +291,14 @@ class YFinanceProvider:
         wanted = clean_symbols(symbols)
         return self._fundamentals_cache.get_or_fetch(
             wanted,
-            lambda keys: {key: self._fundamentals(key) for key in keys},
+            lambda keys: self._map(keys, self._fundamentals),
             now=stamp,
+            chunk_size=self._chunk_size,
             encode=lambda value: {
                 "symbol": value.symbol,
                 "eps_growth": value.eps_growth,
                 "revenue_growth": value.revenue_growth,
+                "basis": value.basis,
             },
             decode=_decode_fundamentals,
         )
@@ -217,7 +311,7 @@ class YFinanceProvider:
         """The cache's fetch callback: bulk download, then normalise per symbol."""
         wanted = clean_symbols(symbols)
         out: dict[str, pd.DataFrame] = {}
-        for batch in chunked(wanted, self._batch_size):
+        for batch in chunked(wanted, self._policy.batch):
             frame = self._download_batch(batch, start, end)
             if frame is None:
                 continue
@@ -247,6 +341,9 @@ class YFinanceProvider:
             )
 
         frame = self._with_retry(f"the price history for {len(batch)} symbols", call)
+        return self._usable_frame(frame, batch)
+
+    def _usable_frame(self, frame: Any, batch: Sequence[str]) -> pd.DataFrame | None:
         if frame is None:
             return None
         if not isinstance(frame, pd.DataFrame):
@@ -258,25 +355,50 @@ class YFinanceProvider:
 
     # -- quotes -----------------------------------------------------------
 
-    def _price(self, symbol: str) -> float | None:
+    def _quote_price(self, symbol: str) -> float | None:
+        """The freshest price Yahoo will admit to for one symbol, or ``None``."""
+        return self._with_retry(f"the latest price for {symbol}", lambda: self._fast_price(symbol))
+
+    def _fast_price(self, symbol: str) -> float | None:
         ticker = self._ticker(symbol)
         fast = getattr(ticker, "fast_info", None)
         for attr in _PRICE_ATTRS:
             price = coerce_float(_lookup(fast, attr))
             if price is not None and price > 0:
                 return price
-        history = getattr(ticker, "history", None)
-        if callable(history):
-            frame = history(period="5d", auto_adjust=True)
-            if isinstance(frame, pd.DataFrame) and not frame.empty:
-                for column in ("Close", "close"):
-                    if column in frame.columns:
-                        closes = frame[column].dropna()
-                        if not closes.empty:
-                            price = coerce_float(closes.iloc[-1])
-                            if price is not None and price > 0:
-                                return price
         return None
+
+    def _bulk_last_closes(self, symbols: Sequence[str]) -> dict[str, float]:
+        """One download for every symbol ``fast_info`` could not price.
+
+        Replaces a per-symbol 5-day history call, which was the slowest part of
+        a quote sweep over an arbitrary list (audit PERF-002).
+        """
+        batch = list(symbols)
+        download = self._downloader()
+
+        def call() -> Any:
+            return download(
+                batch,
+                period="5d",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+                group_by="ticker",
+                actions=False,
+            )
+
+        frame = self._usable_frame(
+            self._with_retry(f"recent closes for {len(batch)} symbols", call), batch
+        )
+        if frame is None:
+            return {}
+        out: dict[str, float] = {}
+        for symbol, raw in _split_download(frame, batch).items():
+            price = _last_close(raw)
+            if price is not None:
+                out[symbol] = price
+        return out
 
     # -- earnings ---------------------------------------------------------
 
@@ -297,6 +419,20 @@ class YFinanceProvider:
             calendar = getattr(ticker, "calendar", None)
         return _dates_from_calendar(calendar)
 
+    def _earnings_history(self, symbol: str) -> tuple[date, ...] | None:
+        """Every announcement date Yahoo remembers, or ``None`` when unknown."""
+
+        def call() -> list[date]:
+            ticker = self._ticker(symbol)
+            return _dates_from_frame(
+                _safe_call(ticker, "get_earnings_dates", limit=EARNINGS_HISTORY_LIMIT)
+            )
+
+        days = self._with_retry(f"the earnings history for {symbol}", call)
+        if not days:
+            return None
+        return tuple(sorted(set(days)))
+
     # -- fundamentals -----------------------------------------------------
 
     def _fundamentals(self, symbol: str) -> Fundamentals:
@@ -306,15 +442,23 @@ class YFinanceProvider:
         )
         eps = _first_number(info, _EPS_INFO_KEYS)
         revenue = _first_number(info, _REVENUE_INFO_KEYS)
+        bases = {_INFO_BASIS} if (eps is not None or revenue is not None) else set()
+
         if eps is None or revenue is None:
-            statement = self._with_retry(
-                f"the income statement for {symbol}", lambda: self._financials(symbol)
-            )
-            if eps is None:
-                eps = _growth_from_statement(statement, _EPS_ROWS)
-            if revenue is None:
-                revenue = _growth_from_statement(statement, _REVENUE_ROWS)
-        return Fundamentals(symbol=symbol, eps_growth=eps, revenue_growth=revenue)
+            for basis, statement in self._statements(symbol):
+                if eps is None:
+                    eps = _growth_from_statement(statement, _EPS_ROWS)
+                    if eps is not None:
+                        bases.add(basis)
+                if revenue is None:
+                    revenue = _growth_from_statement(statement, _REVENUE_ROWS)
+                    if revenue is not None:
+                        bases.add(basis)
+                if eps is not None and revenue is not None:
+                    break
+        return Fundamentals(
+            symbol=symbol, eps_growth=eps, revenue_growth=revenue, basis=_basis_label(bases)
+        )
 
     def _info(self, symbol: str) -> dict[str, Any]:
         ticker = self._ticker(symbol)
@@ -323,13 +467,36 @@ class YFinanceProvider:
             info = getattr(ticker, "info", None)
         return info if isinstance(info, dict) else {}
 
-    def _financials(self, symbol: str) -> pd.DataFrame | None:
+    def _statements(self, symbol: str) -> Iterator[tuple[str, pd.DataFrame]]:
+        """Yield ``(basis, income statement)``, quarterly before annual.
+
+        The fallback used to be whatever ``get_income_stmt()`` returned, which
+        is the *annual* statement — silently mixing a year-over-year quarter
+        from ``info`` with a year-over-year year from here (audit BUG-037).
+        Asking for the quarterly frequency first keeps the two comparable, and
+        whichever one answers is recorded in ``Fundamentals.basis``.
+        """
+        for basis, quarterly in (("quarterly", True), ("annual", False)):
+            frame = self._with_retry(
+                f"the {basis} income statement for {symbol}",
+                lambda q=quarterly: self._financials(symbol, quarterly=q),
+            )
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                yield basis, frame
+
+    def _financials(self, symbol: str, *, quarterly: bool) -> pd.DataFrame | None:
         ticker = self._ticker(symbol)
+        kwargs: dict[str, Any] = {"freq": "quarterly"} if quarterly else {}
         for name in ("get_income_stmt", "get_financials"):
-            frame = _safe_call(ticker, name)
+            frame = _safe_call(ticker, name, **kwargs)
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 return frame
-        for attr in ("income_stmt", "financials"):
+        attrs = (
+            ("quarterly_income_stmt", "quarterly_financials")
+            if quarterly
+            else ("income_stmt", "financials")
+        )
+        for attr in attrs:
             frame = getattr(ticker, attr, None)
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 return frame
@@ -350,10 +517,22 @@ def _split_download(frame: pd.DataFrame, symbols: Sequence[str]) -> dict[str, pd
     """
     columns = frame.columns
     if not isinstance(columns, pd.MultiIndex):
-        return {symbols[0]: frame} if len(symbols) == 1 else {}
+        if len(symbols) == 1:
+            return {symbols[0]: frame}
+        # Yahoo flattens the header when all but one ticker in the batch fail.
+        # A whole 200-symbol batch evaporating deserves more than a DEBUG line:
+        # downstream it looks exactly like a bear market (audit BUG-015).
+        log.warning(
+            "Yahoo returned a single unlabelled table for a batch of %d symbols (%s...), so none "
+            "of them could be read. This is usually a transient failure — the cached history is "
+            "used instead.",
+            len(symbols),
+            ", ".join(symbols[:5]),
+        )
+        return {}
 
     wanted = {symbol.upper() for symbol in symbols}
-    level = _ticker_level(columns, wanted)
+    level = choose_header_level(columns, tickers=wanted)
     labels = {str(v).strip().upper(): v for v in columns.get_level_values(level).unique()}
     out: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
@@ -365,16 +544,20 @@ def _split_download(frame: pd.DataFrame, symbols: Sequence[str]) -> dict[str, pd
     return out
 
 
-def _ticker_level(columns: pd.MultiIndex, wanted: set[str]) -> int:
-    """Pick the column level that holds tickers rather than OHLCV field names."""
-    best_level, best_score = 0, float("-inf")
-    for level in range(columns.nlevels):
-        values = {str(v).strip().upper() for v in columns.get_level_values(level)}
-        size = max(len(values), 1)
-        score = len(values & wanted) / size - len(values & PRICE_FIELD_LABELS) / size
-        if score > best_score:
-            best_level, best_score = level, score
-    return best_level
+def _last_close(frame: Any) -> float | None:
+    """The most recent usable close in a vendor sub-frame."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    for column in frame.columns:
+        if str(column).strip().lower() not in ("close", "adj close", "adjclose"):
+            continue
+        closes = frame[column].dropna()
+        if closes.empty:
+            continue
+        price = coerce_float(closes.iloc[-1])
+        if price is not None and price > 0:
+            return price
+    return None
 
 
 def _lookup(container: Any, key: str) -> Any:
@@ -461,10 +644,15 @@ def _first_number(info: dict[str, Any], keys: Sequence[str]) -> float | None:
 
 
 def _growth_from_statement(frame: Any, rows: Sequence[str]) -> float | None:
-    """Period-over-period growth for the first matching row of an income statement.
+    """Growth between two *adjacent* reporting periods of an income statement.
 
     yfinance returns statements with one column per reporting period, newest
     first — but not reliably, so we sort by column date before comparing.
+
+    Adjacency matters: dropping the unreadable periods and comparing whatever
+    survived turned a two-year gap into "one period of growth" with no way to
+    tell (audit BUG-037). We now walk back from the newest period and take the
+    first *neighbouring* pair that is usable, or give up.
     """
     if not isinstance(frame, pd.DataFrame) or frame.empty or len(frame.columns) < 2:
         return None
@@ -480,21 +668,44 @@ def _growth_from_statement(frame: Any, rows: Sequence[str]) -> float | None:
         with contextlib.suppress(TypeError):  # an unsortable header stays as-is
             series = series.sort_index(ascending=True)
         numbers = [coerce_float(value) for value in series.tolist()]
-        usable = [value for value in numbers if value is not None]
-        if len(usable) < 2:
-            continue
-        latest, prior = usable[-1], usable[-2]
-        if prior == 0:
-            continue
-        return (latest - prior) / abs(prior)
+        for index in range(len(numbers) - 1, 0, -1):
+            latest, prior = numbers[index], numbers[index - 1]
+            if latest is None or prior is None or prior == 0:
+                continue
+            return (latest - prior) / abs(prior)
     return None
+
+
+def _basis_label(bases: set[str]) -> str | None:
+    """One word for where the growth figures came from."""
+    if not bases:
+        return None
+    if len(bases) == 1:
+        return next(iter(bases))
+    return "mixed"
+
+
+def _encode_days(value: Any) -> Any:
+    if not value:
+        return None
+    return [day.isoformat() for day in value]
+
+
+def _decode_days(payload: Any) -> tuple[date, ...] | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise ValueError("A cached earnings history was not a list of dates.")
+    return tuple(date.fromisoformat(str(item)) for item in payload)
 
 
 def _decode_fundamentals(payload: Any) -> Fundamentals:
     if not isinstance(payload, dict):
         raise ValueError("A cached fundamentals record was not a record.")
+    basis = payload.get("basis")
     return Fundamentals(
         symbol=str(payload.get("symbol", "")),
         eps_growth=coerce_float(payload.get("eps_growth")),
         revenue_growth=coerce_float(payload.get("revenue_growth")),
+        basis=str(basis) if isinstance(basis, str) and basis else None,
     )
