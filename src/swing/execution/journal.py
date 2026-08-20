@@ -36,6 +36,15 @@ EVENT_STOP_MOVED = "stop_moved"
 EVENT_NOTE = "note"
 EVENT_KILL = "kill"
 
+# One attempt to transmit an order writes an EVENT_PLACED with STATUS_SUBMITTING
+# before the API call and, if the broker takes it, a second one with
+# STATUS_ACCEPTED after. Two events, one order: anything counting orders has to
+# know that, which is why the writer (``executor._place``) and the counter
+# (``guardrails.today_orders_placed``) share these names rather than repeating
+# the strings.
+STATUS_SUBMITTING = "submitting"
+STATUS_ACCEPTED = "accepted"
+
 
 @dataclass
 class OpenPosition:
@@ -86,10 +95,33 @@ def record(cfg: Config, event_type: str, **fields: Any) -> dict:
     return payload
 
 
+# One ``swing execute`` re-reads the journal twice per order (duplicate
+# suppression, open positions) plus a few times for the account-level checks.
+# The file is append-only, so its (mtime_ns, size) identifies its contents: an
+# append changes the size and a rewrite changes the mtime, which means
+# :func:`record` invalidates this cache without having to know it exists.
+_EVENT_CACHE: dict[Path, tuple[tuple[int, int], list[dict]]] = {}
+
+
 def read_events(cfg: Config) -> list[dict]:
     path = journal_path(cfg)
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except OSError:
+        _EVENT_CACHE.pop(path, None)
         return []
+
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _EVENT_CACHE.get(path)
+    if cached is None or cached[0] != stamp:
+        cached = (stamp, _parse_events(path))
+        _EVENT_CACHE[path] = cached
+    # A fresh list every call, as an uncached read gave: the cached parse must
+    # not be reachable through something a caller is free to append to.
+    return list(cached[1])
+
+
+def _parse_events(path: Path) -> list[dict]:
     events = []
     for line_no, line in enumerate(path.read_text().splitlines(), start=1):
         line = line.strip()
@@ -186,8 +218,13 @@ def open_positions(cfg: Config) -> dict[str, OpenPosition]:
 
 
 def placed_today(cfg: Config, when: date | None = None) -> list[dict]:
-    """Orders already transmitted today — the input to the daily-count guardrail
-    and to duplicate suppression."""
+    """The raw EVENT_PLACED lines for one day.
+
+    Lines, not orders: one attempt writes up to two of them (see
+    STATUS_SUBMITTING). Duplicate suppression only asks whether a symbol
+    appears here at all, so it can read this directly; anything that *counts*
+    must go through :func:`guardrails.today_orders_placed`.
+    """
     when = when or date.today()
     stamp = when.isoformat()
     return [

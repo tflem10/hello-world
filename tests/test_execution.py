@@ -23,6 +23,7 @@ from swing.execution.guardrails import (
     preflight,
     release_kill_switch,
     set_kill_switch,
+    today_orders_placed,
 )
 from swing.execution.journal import (
     EVENT_PLACED,
@@ -100,6 +101,24 @@ class RecordingClient:
             }
         }
         return FakeResponse(status=200, payload=payload)
+
+
+class KillingClient(RecordingClient):
+    """Engages the kill switch once it has taken an order.
+
+    This is the human with a second terminal: the first order goes out, it
+    looks wrong, `swing kill` runs while the executor is still working through
+    the sheet.
+    """
+
+    def __init__(self, cfg: Config, **kw):
+        super().__init__(**kw)
+        self._cfg = cfg
+
+    def place_order(self, account_hash, order_spec):
+        response = super().place_order(account_hash, order_spec)
+        set_kill_switch(self._cfg)
+        return response
 
 
 @pytest.fixture
@@ -248,6 +267,48 @@ def test_kill_switch_says_it_does_not_cancel_resting_orders(exec_config, capsys)
     assert "does NOT cancel orders already resting" in capsys.readouterr().out
 
 
+def test_the_kill_switch_engaged_mid_run_stops_the_remaining_orders(exec_config, capsys):
+    """One check at startup is not a kill switch: a sheet takes minutes to work
+    through, and the orders that have not gone out yet are the ones it is for."""
+    picks = [_pick(symbol=s, shares=5, close=50.0) for s in ("AAA", "BBB", "CCC")]
+    path = _write(exec_config, _sheet(exec_config, picks=picks))
+    client = KillingClient(exec_config, prices=dict.fromkeys(("AAA", "BBB", "CCC"), 50.0))
+
+    assert run_execute(exec_config, live=True, sheet_path=path, client=client,
+                       now=MARKET_OPEN) == 6
+    assert len(client.placed) == 1
+
+    out = capsys.readouterr().out
+    assert "KILL SWITCH ENGAGED" in out
+    # The summary says which orders it stopped, not just that it stopped.
+    assert out.count("kill switch engaged mid-run") == 2
+
+    stopped = [e for e in read_events(exec_config) if e.get("stage") == "kill_switch"]
+    assert {e["symbol"] for e in stopped} == {"BBB", "CCC"}
+
+
+def test_the_kill_switch_engaged_at_the_prompt_stops_the_transmit(exec_config, monkeypatch):
+    """The window a per-order check alone leaves open: the run is parked at
+    `input()`, the switch goes on, and only then does the human type yes."""
+    data = exec_config.as_dict()
+    data["execution"]["autopilot"] = False
+    cfg = Config(data)
+    path = _write(cfg, _sheet(cfg))
+    client = RecordingClient()
+
+    def kill_then_say_yes(pick, order):
+        set_kill_switch(cfg)
+        return True
+
+    monkeypatch.setattr("swing.execution.executor._confirm", kill_then_say_yes)
+
+    assert run_execute(cfg, live=True, sheet_path=path, client=client,
+                       now=MARKET_OPEN) == 6
+    assert client.placed == []
+    # No attempt was journalled either: nothing can be resting at the broker.
+    assert [e for e in read_events(cfg) if e.get("type") == EVENT_PLACED] == []
+
+
 # ---------------------------------------------------------------------------
 # pre-flight blocks
 # ---------------------------------------------------------------------------
@@ -355,6 +416,77 @@ def test_daily_order_cap_blocks_further_orders(exec_config):
     assert run_execute(exec_config, live=True, sheet_path=path, client=client,
                        now=MARKET_OPEN) == 5
     assert client.placed == []
+
+
+# ---------------------------------------------------------------------------
+# what the daily cap counts
+#
+# One order writes two EVENT_PLACED lines, so the count the cap is checked
+# against has to be built, not measured with len(). These tests pin both halves
+# of that: an order is one unit however many lines it left, and the units are
+# spent for the whole day rather than per run.
+# ---------------------------------------------------------------------------
+def test_a_placed_order_is_one_attempt_though_it_writes_two_events(exec_config):
+    from swing.execution.journal import placed_today
+
+    path = _write(exec_config, _sheet(exec_config))
+    client = RecordingClient()
+    run_execute(exec_config, live=True, sheet_path=path, client=client, now=MARKET_OPEN)
+
+    assert len(client.placed) == 1
+    # Both lines are still written — the schema is what other tooling reads.
+    assert len(placed_today(exec_config, date.today())) == 2
+    assert today_orders_placed(exec_config, date.today()) == 1
+
+
+@pytest.mark.parametrize(
+    "statuses,attempts",
+    [
+        (["submitting", "accepted"], 1),          # what one _place() call writes
+        (["submitting"], 1),                      # killed in flight — may have landed
+        (["accepted"], 1),                        # recorded by hand, or by an older build
+        (["submitting", "accepted"] * 2, 2),
+    ],
+)
+def test_attempts_are_counted_per_order_not_per_line(exec_config, statuses, attempts):
+    """Unpairable lines round the count up. Refusing an order that was allowed
+    costs a trade; allowing one that was capped is the failure being defended."""
+    from swing.execution.journal import record
+
+    for status in statuses:
+        record(exec_config, EVENT_PLACED, symbol="AAA", status=status,
+               ts=MARKET_OPEN.isoformat())
+    assert today_orders_placed(exec_config, MARKET_OPEN.date()) == attempts
+
+
+def test_the_cap_counts_attempts_made_by_earlier_runs_today(exec_config):
+    """Cap 3, one attempt already spent by a run that was interrupted: this run
+    gets the remaining two, not a fresh three."""
+    from swing.execution.journal import record
+
+    record(exec_config, EVENT_PLACED, symbol="ZZZ", status="submitting",
+           ts=MARKET_OPEN.isoformat())
+
+    picks = [_pick(symbol=s, shares=5, close=50.0) for s in ("AAA", "BBB", "CCC")]
+    path = _write(exec_config, _sheet(exec_config, picks=picks))
+    client = RecordingClient(prices=dict.fromkeys(("AAA", "BBB", "CCC"), 50.0))
+
+    run_execute(exec_config, live=True, sheet_path=path, client=client, now=MARKET_OPEN)
+    assert len(client.placed) == 2
+
+
+def test_a_broker_rejection_still_spends_one_of_the_day(exec_config):
+    """The cap is there to stop a loop, and a loop of failures is still a loop."""
+    data = exec_config.as_dict()
+    data["execution"]["max_orders_per_day"] = 2
+    cfg = Config(data)
+    picks = [_pick(symbol=s, shares=5, close=50.0) for s in ("AAA", "BBB", "CCC")]
+    path = _write(cfg, _sheet(cfg, picks=picks))
+    client = RecordingClient(fail=True, prices=dict.fromkeys(("AAA", "BBB", "CCC"), 50.0))
+
+    run_execute(cfg, live=True, sheet_path=path, client=client, now=MARKET_OPEN)
+    assert len(client.placed) == 2          # the third never reaches the wire
+    assert today_orders_placed(cfg, date.today()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +684,50 @@ def test_journal_is_written_with_restrictive_permissions(exec_config):
 
 
 # ---------------------------------------------------------------------------
+# the journal read cache
+#
+# read_events() caches its parse against the file's (mtime, size). One
+# `swing execute` reads the journal ~2N+3 times, and every one of those reads
+# decides whether an order goes out — a stale answer is a duplicate position,
+# so what these tests are really pinning is that the cache is never consulted
+# after the file has moved on.
+# ---------------------------------------------------------------------------
+def test_read_events_sees_every_append_in_the_same_process(exec_config):
+    assert read_events(exec_config) == []            # no file yet
+
+    record_entry(exec_config, "AAA", 10, 100.0, 95.0)
+    assert [e["symbol"] for e in read_events(exec_config)] == ["AAA"]
+
+    record_entry(exec_config, "BBB", 5, 50.0, 45.0)
+    assert [e["symbol"] for e in read_events(exec_config)] == ["AAA", "BBB"]
+
+    record_exit(exec_config, "AAA", 10, 105.0, reason="stop")
+    assert read_events(exec_config)[-1]["type"] == "exit"
+    assert set(open_positions(exec_config)) == {"BBB"}
+
+
+def test_read_events_reparses_a_journal_changed_behind_its_back(exec_config):
+    record_entry(exec_config, "AAA", 10, 100.0, 95.0)
+    assert len(read_events(exec_config)) == 1
+
+    path = exec_config.expand_path(exec_config.execution.journal_path)
+    with path.open("a") as fh:
+        fh.write(json.dumps({"ts": MARKET_OPEN.isoformat(), "type": "note"}) + "\n")
+    assert len(read_events(exec_config)) == 2
+
+    path.unlink()
+    assert read_events(exec_config) == []
+
+
+def test_read_events_hands_back_a_list_the_caller_can_own(exec_config):
+    """The cached parse is shared; the list handed out is not."""
+    record_entry(exec_config, "AAA", 10, 100.0, 95.0)
+    events = read_events(exec_config)
+    events.append({"type": "invented"})
+    assert len(read_events(exec_config)) == 1
+
+
+# ---------------------------------------------------------------------------
 # guardrail units
 # ---------------------------------------------------------------------------
 def test_preflight_report_is_readable(exec_config):
@@ -563,9 +739,48 @@ def test_preflight_report_is_readable(exec_config):
 def test_check_order_report_names_each_blocker(exec_config):
     pick = _pick()
     report = check_order(exec_config, pick, quote_price=None, new_exposure_so_far=0.0,
-                         equity=10_000.0, orders_placed_today=0, now=MARKET_OPEN)
+                         equity=10_000.0, attempts_today=0, now=MARKET_OPEN)
     assert not report.passed
     assert any("no live quote" in g.detail for g in report.blockers)
+
+
+def _guard(cfg, pick, name):
+    """One named guard from a clean per-order report on ``pick``."""
+    report = check_order(cfg, pick, quote_price=pick.close, new_exposure_so_far=0.0,
+                         equity=10_000.0, attempts_today=0, now=MARKET_OPEN)
+    return next(g for g in report.guards if g.name == name)
+
+
+def test_a_market_child_order_fails_the_guardrail(exec_config):
+    """`validate_order` already refuses a MARKET at any depth, so nothing was
+    ever transmitted. What was wrong is the guardrail printing "limit only"
+    over a tree it had only looked at the top of."""
+    pick = _pick()
+    assert _guard(exec_config, pick, "no market orders").passed
+
+    pick.orders["bracket_stop"]["childOrderStrategies"][0]["orderType"] = "MARKET"
+    guard = _guard(exec_config, pick, "no market orders")
+    assert not guard.passed
+    assert "bracket_stop.child[0]" in guard.detail
+
+
+def test_a_market_order_nested_two_deep_fails_the_guardrail(exec_config):
+    """One level down is not the rule — anywhere in the tree is.
+
+    Schwab nests OCO exits under a trigger's child, and the drafted-orders
+    schema is documented as liable to change, so a scan that stops at the depth
+    today's drafts happen to use would go quietly blind at the next one.
+    """
+    pick = _pick()
+    protective = pick.orders["bracket_stop"]["childOrderStrategies"][0]
+    protective["childOrderStrategies"] = [
+        {"orderType": "MARKET", "orderStrategyType": "SINGLE"}
+    ]
+
+    guard = _guard(exec_config, pick, "no market orders")
+    assert not guard.passed
+    # The path is the evidence: it says which node it found, not just that it looked.
+    assert "bracket_stop.child[0].child[0]" in guard.detail
 
 
 def test_no_sheet_is_a_clear_error(exec_config, capsys):

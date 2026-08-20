@@ -34,6 +34,9 @@ The checks, and what each is actually defending against:
     ``swing execute`` after a timeout must not double the position.
 ``daily order cap``
     ``max_orders_per_day``. A bug that generates orders in a loop stops at 3.
+    The unit is one *attempt* to transmit, counted across every run of the day:
+    a run interrupted after two orders does not hand the next one a fresh
+    budget. :func:`today_orders_placed` is the only thing that counts them.
 ``new-exposure cap``
     ``max_new_exposure_pct`` of equity deployed in one day, total.
 ``reconciliation``
@@ -230,13 +233,11 @@ def preflight(
     if broker_positions is not None:
         report.add(*_reconcile(cfg, broker_positions))
 
-    from .journal import placed_today
-
-    already = placed_today(cfg, now.date())
+    already = today_orders_placed(cfg, now.date())
     cap = int(cfg.execution.get("max_orders_per_day", 3))
     report.add(
-        "daily order cap", len(already) < cap,
-        f"{len(already)} placed today, cap {cap}",
+        "daily order cap", already < cap,
+        f"{already} attempt(s) today, cap {cap}",
     )
 
     return report
@@ -285,10 +286,16 @@ def check_order(
     quote_price: float | None,
     new_exposure_so_far: float,
     equity: float,
-    orders_placed_today: int,
+    attempts_today: int,
     now: datetime | None = None,
 ) -> GuardReport:
-    """Checks for one specific order, given everything already committed today."""
+    """Checks for one specific order, given everything already committed today.
+
+    ``attempts_today`` is every attempt the day has spent — the ones this run
+    has made *plus* the ones :func:`today_orders_placed` finds from earlier
+    runs. The caller sums them because only the caller knows about attempts it
+    has made since it last read the journal.
+    """
     report = GuardReport()
     now = now or datetime.now()
 
@@ -329,8 +336,8 @@ def check_order(
 
     cap = int(cfg.execution.get("max_orders_per_day", 3))
     report.add(
-        "daily order cap", orders_placed_today < cap,
-        f"{orders_placed_today}/{cap} placed today",
+        "daily order cap", attempts_today < cap,
+        f"{attempts_today}/{cap} attempted today",
     )
 
     exposure_cap = float(cfg.execution.get("max_new_exposure_pct", 1.0)) * equity
@@ -356,14 +363,37 @@ def check_order(
             f"({drift_pct:+.2%}, {drift_atr:+.2f} ATR; limits {max_pct:.0%} / {max_atr:g} ATR)",
         )
 
+    market = None
     for name, order in (pick.orders or {}).items():
-        if order.get("orderType") == "MARKET":
-            report.add("no market orders", False, f"{name} is a MARKET order")
+        market = _find_market_order(order, name)
+        if market is not None:
             break
-    else:
-        report.add("no market orders", True, "limit only")
+    report.add(
+        "no market orders", market is None,
+        f"{market} is a MARKET order" if market else "limit only",
+    )
 
     return report
+
+
+def _find_market_order(order, path: str) -> str | None:
+    """Where the first MARKET order sits in this order tree, if anywhere.
+
+    The protective stop rides in ``childOrderStrategies``, so a scan of
+    top-level ``orderType`` alone can print "limit only" over an order it never
+    looked inside. ``validate_order`` recurses and refuses a MARKET at any
+    depth before anything is transmitted; this walk is what makes the guardrail
+    line evidence rather than a claim.
+    """
+    if not isinstance(order, dict):
+        return None
+    if order.get("orderType") == "MARKET":
+        return path
+    for i, child in enumerate(order.get("childOrderStrategies") or []):
+        found = _find_market_order(child, f"{path}.child[{i}]")
+        if found is not None:
+            return found
+    return None
 
 
 def choose_order_variant(cfg: Config, pick) -> tuple[str, dict] | None:
@@ -389,6 +419,29 @@ def choose_order_variant(cfg: Config, pick) -> tuple[str, dict] | None:
 
 
 def today_orders_placed(cfg: Config, when: date | None = None) -> int:
-    from .journal import placed_today
+    """How many attempts to transmit an order the journal records for a day.
 
-    return len(placed_today(cfg, when))
+    The one place that turns journal lines into a number of orders, because the
+    two disagree: a successful placement writes ``submitting`` before the API
+    call and ``accepted`` after it, so counting raw EVENT_PLACED lines doubles
+    every order. The pair is collapsed per symbol.
+
+    It rounds *up* in both directions that are ambiguous. An attempt with no
+    confirmation still counts — a process killed between the request and the
+    response may well have reached the broker — and so does a confirmation with
+    no attempt line, which is what a hand-written entry or a journal older than
+    the ``submitting`` marker looks like. The cap is a brake; the failure worth
+    avoiding is placing one order too many, not one too few.
+    """
+    from .journal import STATUS_SUBMITTING, placed_today
+
+    attempted: dict[str, int] = {}
+    confirmed: dict[str, int] = {}
+    for event in placed_today(cfg, when):
+        symbol = str(event.get("symbol", "")).upper()
+        seen = attempted if event.get("status") == STATUS_SUBMITTING else confirmed
+        seen[symbol] = seen.get(symbol, 0) + 1
+    return sum(
+        max(attempted.get(symbol, 0), confirmed.get(symbol, 0))
+        for symbol in attempted.keys() | confirmed.keys()
+    )

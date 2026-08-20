@@ -32,24 +32,30 @@ from ..picks import PickSheet, latest_sheet_path, load_sheet
 from .guardrails import (
     check_order,
     choose_order_variant,
+    kill_file,
     kill_switch_engaged,
     preflight,
+    today_orders_placed,
 )
 from .journal import (
     EVENT_DRAFTED,
     EVENT_PLACED,
     EVENT_REJECTED,
+    STATUS_ACCEPTED,
+    STATUS_SUBMITTING,
     record,
     record_entry,
 )
 
 log = get_logger("swing.execute")
 
+KILL_REASON = "kill switch engaged mid-run"
+
 
 @dataclass
 class ExecutionOutcome:
     symbol: str
-    action: str          # placed | skipped | rejected | dry_run
+    action: str          # placed | skipped | rejected | dry_run | killed
     detail: str = ""
     order_id: str | None = None
 
@@ -72,11 +78,11 @@ def run_execute(
 
     # The kill switch is checked before anything else, including reading the
     # config's execution block, so that it works even when the rest is broken.
+    # It is checked again per order and again before each transmit: the run can
+    # outlive the check by minutes at a confirmation prompt, and `swing kill`
+    # from another terminal has to stop what is already in flight.
     if kill_switch_engaged(cfg):
-        print(
-            f"KILL SWITCH ENGAGED ({cfg.expand_path(cfg.execution.kill_file)}).\n"
-            "No orders will be placed. Release with `swing kill --release`."
-        )
+        print(_kill_notice(cfg))
         return 6
 
     path = Path(sheet_path) if sheet_path else _newest_sheet(cfg)
@@ -128,10 +134,20 @@ def run_execute(
     # -- per order ---------------------------------------------------------
     outcomes: list[ExecutionOutcome] = []
     exposure = 0.0
-    placed = 0
     autopilot = bool(cfg.execution.get("autopilot", False)) or assume_yes
 
-    for pick in tradable:
+    # The daily cap is spent by attempts, and earlier runs today have already
+    # spent some: a run interrupted after two orders must not start over with a
+    # full budget. Read once, then track this run's own attempts in memory —
+    # the journal write can fail, the cap must not depend on it.
+    prior_attempts = today_orders_placed(cfg, now.date())
+    attempts = 0
+
+    for index, pick in enumerate(tradable):
+        if kill_switch_engaged(cfg):
+            outcomes.extend(_abandon(cfg, tradable[index:]))
+            break
+
         quote_price = _quote_price(quotes, pick.symbol) if quotes is not None else None
         if quote_price is None and not live:
             # In a dry run there may be no quote source at all; fall back to
@@ -139,7 +155,8 @@ def run_execute(
             quote_price = pick.confirm_price or pick.close
 
         order_report = check_order(
-            cfg, pick, quote_price, exposure, sheet.equity, placed, now=now
+            cfg, pick, quote_price, exposure, sheet.equity,
+            prior_attempts + attempts, now=now,
         )
         chosen = choose_order_variant(cfg, pick)
 
@@ -182,10 +199,13 @@ def run_execute(
             outcomes.append(ExecutionOutcome(pick.symbol, "skipped", "declined at the prompt"))
             continue
 
+        # The attempt is spent the moment _place is called. A broker rejection
+        # still consumed one, and so does a process killed inside the call —
+        # counting only the successes is how a loop of failures runs forever.
+        attempts += 1
         outcome = _place(cfg, client, pick, order, variant)
         outcomes.append(outcome)
         if outcome.action == "placed":
-            placed += 1
             exposure += pick.notional
 
     # -- summary -----------------------------------------------------------
@@ -198,7 +218,7 @@ def run_execute(
             "  1. set [execution] enabled = true in config.toml\n"
             "  2. swing execute --live"
         )
-    return 0
+    return 6 if any(o.action == "killed" for o in outcomes) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +229,31 @@ def _newest_sheet(cfg: Config) -> Path | None:
         return None
     confirmed = latest.parent / "picks-confirmed.json"
     return confirmed if confirmed.exists() else latest
+
+
+def _kill_notice(cfg: Config) -> str:
+    """One wording for the kill switch, whether it was already on at startup or
+    was engaged while the run was working through the sheet."""
+    return (
+        f"KILL SWITCH ENGAGED ({kill_file(cfg)}).\n"
+        "No orders will be placed. Release with `swing kill --release`."
+    )
+
+
+def _abandon(cfg: Config, remaining: list) -> list[ExecutionOutcome]:
+    """Drop the rest of the sheet because the kill switch came on mid-run.
+
+    Every pick that will not be attempted gets a journal line. The point of the
+    kill switch is that afterwards you can read exactly what it stopped, and
+    silence there is indistinguishable from a run that simply ended.
+    """
+    print(f"\n{_kill_notice(cfg)}")
+    outcomes = []
+    for pick in remaining:
+        record(cfg, EVENT_REJECTED, symbol=pick.symbol, reason=KILL_REASON,
+               stage="kill_switch")
+        outcomes.append(ExecutionOutcome(pick.symbol, "killed", KILL_REASON))
+    return outcomes
 
 
 def _confirm(pick, order) -> bool:
@@ -230,11 +275,20 @@ def _place(cfg: Config, client, pick, order: dict, variant: str) -> ExecutionOut
         record(cfg, EVENT_REJECTED, symbol=pick.symbol, reason=detail, stage="config")
         return ExecutionOutcome(pick.symbol, "rejected", detail)
 
+    # Last look at the kill switch, after the confirmation prompt and with
+    # nothing but a file append between here and the wire. It is checked before
+    # the attempt is journalled so that a refusal here cannot leave a
+    # "submitting" line claiming something may be resting at the broker.
+    if kill_switch_engaged(cfg):
+        record(cfg, EVENT_REJECTED, symbol=pick.symbol, reason=KILL_REASON,
+               stage="kill_switch")
+        return ExecutionOutcome(pick.symbol, "killed", KILL_REASON)
+
     # Journal the attempt BEFORE the call: a process killed between the request
     # and the response must leave evidence that something may be resting at the
     # broker, rather than silently nothing.
     record(cfg, EVENT_PLACED, symbol=pick.symbol, variant=variant, shares=pick.shares,
-           limit=order.get("price"), stop=pick.stop, status="submitting")
+           limit=order.get("price"), stop=pick.stop, status=STATUS_SUBMITTING)
 
     try:
         response = client.place_order(account_hash, order)
@@ -246,7 +300,8 @@ def _place(cfg: Config, client, pick, order: dict, variant: str) -> ExecutionOut
 
     order_id = _extract_order_id(response)
     record(cfg, EVENT_PLACED, symbol=pick.symbol, variant=variant, shares=pick.shares,
-           limit=order.get("price"), stop=pick.stop, status="accepted", order_id=order_id)
+           limit=order.get("price"), stop=pick.stop, status=STATUS_ACCEPTED,
+           order_id=order_id)
     # The entry is journalled optimistically so slot counting stays right. A
     # buy LIMIT that never fills leaves a phantom position, which the next
     # reconciliation catches and blocks on — noisy, but the safe direction.
