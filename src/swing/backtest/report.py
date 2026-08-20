@@ -21,6 +21,26 @@ before the last bar, so ``start``/``end`` describe the *data*, not the record.
 Every headline here names ``oos_start``/``oos_end`` — the stretch the numbers
 directly above it actually cover — and the data span is demoted to provenance,
 where it belongs.
+
+LEGIBILITY IN A DARK-MODE BROWSER (audit BUG-051)
+-------------------------------------------------
+This stylesheet used to set ``color: #222`` on ``body`` and no background at
+all. A browser in dark mode painted its own near-black canvas behind that
+near-black text and the whole report vanished — every heading, every table,
+everything except the two banners, which happened to declare backgrounds of
+their own. Three rules now prevent that from ever recurring, and
+``tests/test_html_contrast.py`` enforces all three:
+
+1. ``:root`` declares ``color-scheme`` and the whole palette as custom
+   properties, with a ``prefers-color-scheme: dark`` block redefining them.
+2. ``body`` sets **both** ``background`` and ``color`` — the canvas is never
+   inherited from the browser.
+3. Every rule that sets a background sets a foreground too. A background-only
+   rule is the exact shape of the original bug.
+
+The palette is deliberately the same one as
+``swing/alerts/templates/picks.html.j2``: the pick sheet and the backtest
+report are two artefacts of one system and should look like it.
 """
 
 from __future__ import annotations
@@ -38,13 +58,38 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
 __all__ = [
+    "CHART_COLORS",
     "METRIC_LABELS",
+    "STYLESHEET",
     "format_metric",
     "measured_period",
     "print_latest",
     "render_html",
     "render_markdown",
 ]
+
+#: The colours baked into the matplotlib PNGs.
+#:
+#: A PNG cannot answer the viewer's ``prefers-color-scheme``, so the charts
+#: commit to one deliberate plate rather than inheriting matplotlib's defaults
+#: and turning into glaring white rectangles in dark mode. The stylesheet paints
+#: ``--plate`` — the same colour, in *both* themes — behind every ``<img>``, so
+#: the chart reads as a printed figure laid on the page instead of a hole
+#: punched through it. Keep ``--plate`` and ``CHART_COLORS["plate"]`` equal;
+#: ``tests/test_html_contrast.py`` asserts they are.
+#:
+#: ``equity`` and ``drawdown`` are the chart's ink and clear 3:1 against the
+#: plate (7.9:1 and 6.6:1). ``drawdown_fill`` is a pre-blended tint rather than
+#: an alpha, so the rendered colour is exactly the colour the test measures.
+CHART_COLORS: dict[str, str] = {
+    "plate": "#f2f4f7",
+    "ink": "#14181d",
+    "muted": "#5b6572",
+    "grid": "#c3cad4",
+    "equity": "#1f4e79",
+    "drawdown": "#a4262c",
+    "drawdown_fill": "#e7c3c5",
+}
 
 #: Human labels and units for the Contract 11 metric keys.
 METRIC_LABELS: dict[str, tuple[str, str]] = {
@@ -233,11 +278,40 @@ def _png_data_uri(figure: Any) -> str:
 
     try:
         with io.BytesIO() as buffer:
-            figure.savefig(buffer, format="png", dpi=110, bbox_inches="tight")
+            # facecolor is passed explicitly: `bbox_inches="tight"` re-renders
+            # through a fresh bbox and savefig would otherwise fall back to the
+            # rcParam rather than the plate _paint_chart set on the figure.
+            figure.savefig(
+                buffer,
+                format="png",
+                dpi=110,
+                bbox_inches="tight",
+                facecolor=figure.get_facecolor(),
+                edgecolor="none",
+            )
             encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     finally:
         plt.close(figure)
     return f"data:image/png;base64,{encoded}"
+
+
+def _paint_chart(figure: Any, axes: Any, *, title: str, ylabel: str) -> None:
+    """Give a chart an explicit, theme-independent colour scheme.
+
+    Matplotlib's defaults are a white figure with black text and no declared
+    intent, which is why the old charts turned into glaring white rectangles the
+    moment the surrounding page learnt to respect dark mode. Everything with a
+    colour is named here instead: face, title, axis label, ticks, spines, grid.
+    """
+    figure.patch.set_facecolor(CHART_COLORS["plate"])
+    axes.set_facecolor(CHART_COLORS["plate"])
+    axes.set_title(title, color=CHART_COLORS["ink"])
+    axes.set_ylabel(ylabel, color=CHART_COLORS["muted"])
+    axes.tick_params(which="both", colors=CHART_COLORS["muted"])
+    for spine in axes.spines.values():
+        spine.set_color(CHART_COLORS["muted"])
+    axes.grid(True, color=CHART_COLORS["grid"], linewidth=0.8)
+    axes.set_axisbelow(True)
 
 
 def _equity_chart(equity: pd.DataFrame, *, title: str = "Equity") -> str:
@@ -247,10 +321,8 @@ def _equity_chart(equity: pd.DataFrame, *, title: str = "Equity") -> str:
     import matplotlib.pyplot as plt
 
     figure, axes = plt.subplots(figsize=(10, 4))
-    axes.plot(equity.index, equity["equity"], linewidth=1.2, color="#1f4e79")
-    axes.set_title(title)
-    axes.set_ylabel("Account equity ($)")
-    axes.grid(alpha=0.3)
+    axes.plot(equity.index, equity["equity"], linewidth=1.4, color=CHART_COLORS["equity"])
+    _paint_chart(figure, axes, title=title, ylabel="Account equity ($)")
     return _png_data_uri(figure)
 
 
@@ -262,10 +334,12 @@ def _drawdown_chart(equity: pd.DataFrame) -> str:
 
     figure, axes = plt.subplots(figsize=(10, 2.6))
     drawdown = equity["drawdown"].astype("float64") * 100.0
-    axes.fill_between(equity.index, drawdown, 0.0, color="#a4262c", alpha=0.5)
-    axes.set_title("Drawdown")
-    axes.set_ylabel("%")
-    axes.grid(alpha=0.3)
+    # A solid tint plus a solid boundary line, rather than one translucent fill:
+    # the line is the ink that has to clear 3:1, and an alpha would make the
+    # colour that actually reaches the eye a blend nothing can assert against.
+    axes.fill_between(equity.index, drawdown, 0.0, color=CHART_COLORS["drawdown_fill"])
+    axes.plot(equity.index, drawdown, linewidth=1.1, color=CHART_COLORS["drawdown"])
+    _paint_chart(figure, axes, title="Drawdown", ylabel="%")
     return _png_data_uri(figure)
 
 
@@ -293,11 +367,99 @@ def _monthly_table_html(equity: pd.DataFrame) -> str:
             css = "pos" if value >= 0 else "neg"
             cells.append(f'<td class="{css}">{value * 100:.1f}</td>')
         rows.append(f"<tr><th>{year}</th>{''.join(cells)}</tr>")
-    return (
+    return _scroll(
         '<table class="heat"><thead><tr><th>Year</th>'
         f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
     )
 
+
+def _scroll(table_html: str) -> str:
+    """Wrap a wide table so a narrow viewport scrolls it instead of the page.
+
+    Paired with the ``width=device-width`` viewport meta: without the container
+    a thirteen-column heat table drags the whole document sideways on a phone
+    and every other line of prose goes off-screen with it.
+    """
+    return f'<div class="scroll">{table_html}</div>'
+
+
+#: The report's stylesheet — see the module docstring for the three rules it
+#: exists to keep. Every colour is a custom property so the dark block can
+#: restate the palette and nothing else, and so a test can read the palette out
+#: of here rather than being told it a second time.
+#:
+#: ``--plate`` and ``--plate-ink`` are deliberately theme-INVARIANT: they have
+#: to match the colours baked into the chart PNGs, which cannot change with the
+#: viewer's theme. ``--plate-line`` is not invariant — in dark mode the plate
+#: is a light panel on a dark page and gets a rim strong enough to read as a
+#: deliberate frame.
+STYLESHEET = """
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #14181d;
+    --muted: #5b6572;
+    --line: #dfe3e8;
+    --head-bg: #eef1f5; --head-ink: #14181d;
+    --code-bg: #eef1f5; --code-ink: #14181d;
+    --ok-bg: #e4f6ea; --ok-ink: #10633a;
+    --bad-bg: #fdeaea; --bad-ink: #9b1c1c;
+    --empty-bg: #f0f2f5; --empty-ink: #5b6572;
+    --plate: #f2f4f7; --plate-ink: #14181d;
+    --plate-line: #dfe3e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --card: #161b22;
+      --ink: #e6edf3;
+      --muted: #9198a1;
+      --line: #2a313a;
+      --head-bg: #1d232c; --head-ink: #e6edf3;
+      --code-bg: #1d232c; --code-ink: #e6edf3;
+      --ok-bg: #12301f; --ok-ink: #6ee7a5;
+      --bad-bg: #3a1616; --bad-ink: #ff9b9b;
+      --empty-bg: #171c23; --empty-ink: #9198a1;
+      --plate-line: #6b7684;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; margin: 26px 0 6px; letter-spacing: -0.01em; }
+  p { margin: 0 0 10px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+  .banner { padding: 12px 14px; border-radius: 10px; margin: 0 0 14px;
+            font-weight: 600; font-size: 13.5px; }
+  .banner.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .banner.warn { background: var(--bad-bg); color: var(--bad-ink); }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 4px;
+          font-size: 13.5px; background: var(--card); color: var(--ink); }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: right;
+           font-variant-numeric: tabular-nums; }
+  th { background: var(--head-bg); color: var(--head-ink);
+       font-weight: 600; white-space: nowrap; }
+  td:first-child, th:first-child { text-align: left; }
+  table.heat td { text-align: center; min-width: 3.2rem; }
+  table.heat td.pos { background: var(--ok-bg); color: var(--ok-ink); }
+  table.heat td.neg { background: var(--bad-bg); color: var(--bad-ink); }
+  table.heat td.empty { background: var(--empty-bg); color: var(--empty-ink); }
+  .plate { background: var(--plate); color: var(--plate-ink);
+           border: 1px solid var(--plate-line); border-radius: 10px;
+           padding: 10px; margin: 10px 0 14px; }
+  .plate img { display: block; width: 100%; height: auto; }
+  code { background: var(--code-bg); color: var(--code-ink);
+         padding: 1px 5px; border-radius: 4px; font-size: 12.5px;
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  footer { color: var(--muted); font-size: 12px; margin: 26px 0 8px; }
+"""
 
 _HTML_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -305,28 +467,10 @@ _HTML_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Backtest — {label}</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          margin: 2rem auto; max-width: 1000px; padding: 0 1rem; color: #222; }}
-  h1 {{ margin-bottom: 0.2rem; }}
-  .sub {{ color: #666; margin-top: 0; font-size: 0.9rem; }}
-  .banner {{ padding: 0.75rem 1rem; border-radius: 6px; margin: 1rem 0; font-weight: 600; }}
-  .banner.ok {{ background: #e6f4ea; color: #1e4620; }}
-  .banner.warn {{ background: #fdecea; color: #611a15; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92rem; }}
-  th, td {{ border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: right; }}
-  th {{ background: #f4f6f8; }}
-  td:first-child, th:first-child {{ text-align: left; }}
-  table.heat td {{ text-align: center; min-width: 3.2rem; }}
-  table.heat td.pos {{ background: #e6f4ea; }}
-  table.heat td.neg {{ background: #fdecea; }}
-  table.heat td.empty {{ background: #fafafa; }}
-  img {{ width: 100%; height: auto; margin: 0.5rem 0; }}
-  code {{ background: #f4f6f8; padding: 0.1rem 0.3rem; border-radius: 3px; }}
-  footer {{ color: #888; font-size: 0.8rem; margin-top: 2rem; }}
-</style>
+<style>{style}</style>
 </head>
 <body>
+<div class="wrap">
 <h1>Backtest — {label}</h1>
 <p class="sub">{universe} universe ({n_symbols} symbols) &middot; {measured_period}</p>
 <div class="banner {banner_class}">{banner}</div>
@@ -336,9 +480,7 @@ _HTML_TEMPLATE = """<!doctype html>
 
 {full_period_section}
 
-<h2>Equity</h2>
-<img src="{equity_chart}" alt="{equity_alt}">
-<img src="{drawdown_chart}" alt="Drawdown">
+{charts_section}
 
 <h2>Monthly returns (%)</h2>
 {monthly_table}
@@ -358,6 +500,7 @@ _HTML_TEMPLATE = """<!doctype html>
 
 <footer>Generated at {generated_at}. Costs charged per side:
 {slippage_bps} bps slippage plus {spread_atr_frac} x ATR spread.</footer>
+</div>
 </body>
 </html>
 """
@@ -466,9 +609,11 @@ def render_html(
         folds_section = _html_section(
             "Walk-forward folds",
             f"<p>{summary.get('objective', '')}</p>"
-            "<table><thead><tr><th>In-sample</th><th>Out-of-sample</th><th>Chosen parameters"
-            "</th><th>IS PF</th><th>OOS PF</th><th>OOS trades</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table>",
+            + _scroll(
+                "<table><thead><tr><th>In-sample</th><th>Out-of-sample</th><th>Chosen parameters"
+                "</th><th>IS PF</th><th>OOS PF</th><th>OOS trades</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            ),
         )
 
     sensitivity = summary.get("sensitivity") or []
@@ -487,14 +632,29 @@ def render_html(
         sensitivity_section = _html_section(
             "Sensitivity (+/-25%, one parameter at a time)",
             "<p>A result that only works at one setting is a curve fit. Look for a plateau.</p>"
-            "<table><thead><tr><th>Parameter</th><th>Variant</th><th>Value</th>"
-            "<th>Profit factor</th><th>CAGR</th><th>Max DD</th><th>Trades</th></tr></thead>"
-            f"<tbody>{rows}</tbody></table>",
+            + _scroll(
+                "<table><thead><tr><th>Parameter</th><th>Variant</th><th>Value</th>"
+                "<th>Profit factor</th><th>CAGR</th><th>Max DD</th><th>Trades</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            ),
+        )
+
+    charts_section = ""
+    if not equity.empty:
+        # Each chart sits on a "plate" painted the same colour as the PNG itself,
+        # in both themes, so the image never reads as a hole punched in the page.
+        charts_section = (
+            "<h2>Equity</h2>\n"
+            f'<figure class="plate"><img src="{_equity_chart(equity, title=chart_title)}" '
+            f'alt="{equity_alt}"></figure>\n'
+            f'<figure class="plate"><img src="{_drawdown_chart(equity)}" alt="Drawdown">'
+            "</figure>"
         )
 
     stamp = generated_at or datetime.now()
     costs = summary.get("costs") or {}
     return _HTML_TEMPLATE.format(
+        style=STYLESHEET,
         label=summary.get("label", "unlabelled"),
         universe=summary.get("universe", "unknown"),
         n_symbols=summary.get("n_symbols", "?"),
@@ -507,9 +667,7 @@ def render_html(
         headline_title=headline_title,
         headline_table=_html_metric_table(headline),
         full_period_section=full_period_section,
-        equity_alt=equity_alt,
-        equity_chart=_equity_chart(equity, title=chart_title) if not equity.empty else "",
-        drawdown_chart=_drawdown_chart(equity) if not equity.empty else "",
+        charts_section=charts_section,
         monthly_table=_monthly_table_html(equity),
         by_year_section=by_year_section,
         folds_section=folds_section,

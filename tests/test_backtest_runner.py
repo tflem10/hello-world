@@ -270,6 +270,26 @@ def test_html_report_is_self_contained_and_structured(tmp_path, wired):
     assert "Generated at" in html
 
 
+def test_the_written_report_is_legible_in_a_dark_browser(tmp_path, wired):
+    """BUG-051, as it reaches disk.
+
+    ``tests/test_html_contrast.py`` measures the stylesheet; this measures the
+    wiring. The report used to set ``color: #222`` on ``body`` and no
+    background, so a dark-mode browser painted its own near-black canvas behind
+    near-black text and the whole file went invisible. Cheap enough to survive
+    any refactor of how the stylesheet reaches the template.
+    """
+    cfg = runner_cfg(tmp_path)
+    html = (go(cfg, label="dark-mode") / "report.html").read_text()
+
+    assert "@media (prefers-color-scheme: dark)" in html
+    assert "color-scheme: light dark" in html
+    assert "background: var(--bg); color: var(--ink);" in html
+    # The charts sit on a plate painted the same colour as the PNG itself, so
+    # they never read as a hole punched in the page.
+    assert html.count('<figure class="plate">') == 2
+
+
 def test_markdown_report_names_the_headline_and_provenance(tmp_path, wired):
     cfg = runner_cfg(tmp_path)
     directory = go(cfg, label="unit-md")
