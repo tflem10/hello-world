@@ -40,6 +40,23 @@ def test_same_seed_gives_identical_numbers():
     assert a.as_dict() == b.as_dict()
 
 
+def test_the_interval_is_pinned_to_the_values_it_has_always_reported():
+    """Pinned before the max-drawdown loop was vectorised, and unchanged by it.
+
+    The manifest these numbers land in is meant to be diffable between runs and
+    between commits, so a shift in the fourth decimal is a broken report rather
+    than a rounding detail.
+    """
+    result = bootstrap_equity(_noisy_curve(), n_resamples=200, block_days=20, seed=7)
+    assert result.cagr_p5 == pytest.approx(-0.099831921318, abs=1e-12)
+    assert result.cagr_p50 == pytest.approx(0.135790687579, abs=1e-12)
+    assert result.cagr_p95 == pytest.approx(0.444944145781, abs=1e-12)
+    assert result.maxdd_p5 == pytest.approx(0.093988889561, abs=1e-12)
+    assert result.maxdd_p50 == pytest.approx(0.181981069425, abs=1e-12)
+    assert result.maxdd_p95 == pytest.approx(0.336095140202, abs=1e-12)
+    assert result.prob_cagr_le_zero == pytest.approx(0.21)
+
+
 def test_a_different_seed_gives_different_numbers():
     """If the seed did not matter, the RNG would not be the only randomness."""
     eq = _noisy_curve()

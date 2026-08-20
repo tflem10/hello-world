@@ -13,11 +13,10 @@ from datetime import date
 import pandas as pd
 
 from ..config import Config
-from ..data.cache import BarCache
 from ..data.pipeline import load_bars
 from ..data.universe import UNIVERSE_DIR, Symbol, build_universe, read_symbol_file
 from ..logging_setup import get_logger
-from ..strategy.rules import SymbolMeta, fundamentals_ok
+from ..strategy.rules import SymbolMeta
 from .engine import run_backtest
 from .metrics import apply_benchmark, benchmark_equity, compute_metrics
 from .report import bootstrap_extras, build_report, report_dir
@@ -53,7 +52,20 @@ ABLATIONS: dict[str, dict] = {
 
 
 def load_universe_bars(cfg: Config, etf_only: bool = False):
-    """Read bars + metadata for the configured universe straight from the cache."""
+    """Read bars + metadata for the configured universe straight from the cache.
+
+    ``fundamentals_ok`` is deliberately left at ``None`` — "no opinion" — for
+    every symbol. The only fundamentals this system has are a snapshot fetched
+    this week, and stamping today's verdict onto bars back to 2010 conditions
+    the past on the present: a company with negative EPS today would be excluded
+    from the years when its earnings were fine, and vice versa. That is
+    survivorship bias wearing a different hat.
+
+    So the backtest simply does not apply the filter, exactly as it does not
+    apply the earnings blackout it has no history for, and
+    :func:`fundamentals_warnings` states the divergence on the report instead of
+    burying it in a number.
+    """
     if etf_only:
         symbols: list[Symbol] = read_symbol_file(UNIVERSE_DIR / "etfs.csv", source="etfs")
     else:
@@ -66,15 +78,13 @@ def load_universe_bars(cfg: Config, etf_only: bool = False):
             "Run `swing data --backfill` first — it needs network access."
         )
 
-    cache = BarCache(cfg.expand_path(cfg.data.cache_dir))
-    funds = cache.read_fundamentals()
     is_etf = {s.symbol: s.is_etf for s in symbols}
 
     meta = {
         sym: SymbolMeta(
             symbol=sym,
             is_etf=is_etf.get(sym, False),
-            fundamentals_ok=fundamentals_ok(funds.get(sym), cfg.strategy),
+            fundamentals_ok=None,
         )
         for sym in bars
     }
@@ -89,6 +99,29 @@ def load_universe_bars(cfg: Config, etf_only: bool = False):
         len(bars), "ETF universe" if etf_only else "full universe",
     )
     return bars, meta, benchmark
+
+
+def fundamentals_warnings(cfg: Config) -> list[str]:
+    """State the fundamentals filter as a live/backtest divergence.
+
+    The counterpart to the engine's missing-earnings-calendar warning, and
+    deliberately in the same voice: a filter the live scanner applies and the
+    backtest does not makes live take *fewer* trades than the report implies,
+    and a reader who is told about survivorship and earnings but not this one
+    will reasonably assume this one was applied.
+
+    Silent when the filter is switched off in config, because then there is no
+    divergence to report.
+    """
+    if not bool(cfg.strategy.fundamentals.get("enabled", True)):
+        return []
+    return [
+        "the fundamentals filter was NOT applied in this backtest: the only "
+        "fundamentals available are a snapshot of today, and applying today's "
+        "verdict to bars from 2010 would condition the past on the present. "
+        "The live scanner does apply it, which removes some entries — expect "
+        "live to take fewer trades than these results imply."
+    ]
 
 
 def load_earnings(
@@ -231,7 +264,10 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
     apply_benchmark(result.metrics, bench_equity)
     boot_tables, boot_manifest, boot_warnings = bootstrap_extras(cfg, result.equity)
 
-    warnings = list(result.warnings) + earnings_warnings + bench_warnings + boot_warnings
+    warnings = [
+        *result.warnings, *earnings_warnings, *fundamentals_warnings(cfg),
+        *bench_warnings, *boot_warnings,
+    ]
     if etf_only:
         warnings.append(
             "ETF-only universe: no survivorship bias, and no single-stock upside "
@@ -299,7 +335,9 @@ def _run_full(cfg, args, start, end, etf_only: bool) -> None:
                         "universe_size": result.universe_size},
     )
     report.metrics = metrics
-    report.warnings = list(result.warnings) + earnings_warnings + bench_warnings + [
+    report.warnings = [
+        *result.warnings, *earnings_warnings, *fundamentals_warnings(cfg),
+        *bench_warnings,
         "This is an in-sample, full-period run over parameters that were chosen "
         "with knowledge of this whole period. It is reported for context only and "
         "does NOT satisfy the trading gate — only the walk-forward report does."
@@ -320,6 +358,7 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
     bars, meta, benchmark = load_universe_bars(cfg, etf_only=etf_only)
     earnings, earnings_manifest, earnings_warnings = load_earnings(cfg, bars)
     feature_cache: dict = {}
+    panel_cache: dict = {}
     rows = []
     baseline_metrics = None
 
@@ -328,7 +367,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
         log.info("ablation: %s", name)
         result = run_backtest(
             trial, bars, meta=meta, benchmark=benchmark, earnings=earnings,
-            start=start, end=end, label=name, feature_cache=feature_cache,
+            start=start, end=end, label=name,
+            feature_cache=feature_cache, panel_cache=panel_cache,
         )
         m = compute_metrics(result.equity, result.trades, result.exposure,
                             result.open_positions)
@@ -357,7 +397,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
     # The report body needs *a* result; use the baseline run for the curves.
     baseline_result = run_backtest(
         cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
-        start=start, end=end, label="baseline", feature_cache=feature_cache,
+        start=start, end=end, label="baseline",
+        feature_cache=feature_cache, panel_cache=panel_cache,
     )
     report = build_report(
         cfg,
@@ -368,7 +409,8 @@ def _run_ablations(cfg, args, start, end, etf_only: bool) -> None:
         manifest_extra={**earnings_manifest, "etf_only": etf_only,
                         "ablations": table.reset_index().to_dict("records")},
     )
-    report.warnings = list(baseline_result.warnings) + earnings_warnings + [
+    report.warnings = [
+        *baseline_result.warnings, *earnings_warnings, *fundamentals_warnings(cfg),
         "Ablations are run over the full period in-sample. They answer 'what did "
         "this component contribute here?', not 'will it contribute next year'. "
         "A component whose removal barely moves the numbers is a candidate for "
@@ -399,7 +441,8 @@ def _run_sensitivity(cfg, args, start, end, etf_only: bool) -> None:
         extra_tables={"sensitivity": table.set_index("parameter")},
         manifest_extra=dict(earnings_manifest),
     )
-    report.warnings = list(baseline.warnings) + earnings_warnings + [
+    report.warnings = [
+        *baseline.warnings, *earnings_warnings, *fundamentals_warnings(cfg),
         "Read this table for FLATNESS, not for the best cell. If a parameter's "
         "profit factor collapses when it moves 25%, the strategy is balanced on a "
         "knife edge and the backtest is measuring the edge of the knife."

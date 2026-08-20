@@ -17,7 +17,12 @@ from swing.backtest.report import (
     build_report,
     report_dir,
 )
-from swing.backtest.runner import _benchmark_series, load_earnings
+from swing.backtest.runner import (
+    _benchmark_series,
+    fundamentals_warnings,
+    load_earnings,
+    load_universe_bars,
+)
 from swing.backtest.walkforward import (
     apply_overrides,
     grid_points,
@@ -721,6 +726,81 @@ def test_supplying_earnings_silences_the_missing_calendar_warning():
         "no historical earnings calendar" in w for w in with_calendar.warnings
     )
     assert len(with_calendar.segments) == len(without.segments)
+
+
+# ---------------------------------------------------------------------------
+# fundamentals: a live/backtest divergence, not a filter applied to history
+# ---------------------------------------------------------------------------
+def test_backtest_meta_carries_no_fundamentals_verdict(base_config):
+    """Today's snapshot must not be stamped onto 2010's bars.
+
+    The fundamentals cache holds one verdict per symbol, fetched this week.
+    Applying it to every bar in history excludes a company from the years its
+    earnings were fine because they are negative now — the same conditioning of
+    the past on the present that makes survivorship bias a bias.
+    """
+    from swing.data.cache import BarCache
+    from swing.data.provider import Fundamentals
+    from swing.strategy.rules import fundamentals_ok
+
+    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    for sym in ("AAA", "BBB"):
+        cache.write(sym, make_bars(list(np.full(300, 50.0)), start="2020-01-01"))
+    failing = Fundamentals(symbol="AAA", trailing_eps=-1.0, revenue_growth=-0.2)
+    cache.write_fundamentals({"AAA": failing})
+
+    # The snapshot really does carry a negative verdict...
+    assert fundamentals_ok(failing, base_config.strategy) is False
+    # ...and the backtest declines to know it.
+    _bars, meta, _benchmark = load_universe_bars(base_config)
+    assert set(meta) == {"AAA", "BBB"}
+    assert all(m.fundamentals_ok is None for m in meta.values())
+
+
+def test_the_fundamentals_divergence_is_warned_about_like_the_earnings_one():
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    data["strategy"]["fundamentals"]["enabled"] = True
+    warning = fundamentals_warnings(Config(data))
+    assert len(warning) == 1
+    assert "NOT applied in this backtest" in warning[0]
+    assert "fewer trades" in warning[0]
+
+    data["strategy"]["fundamentals"]["enabled"] = False
+    # Nothing to disclaim when the live scanner does not apply it either.
+    assert fundamentals_warnings(Config(data)) == []
+
+
+def test_the_fundamentals_warning_reaches_the_written_report(tmp_path, monkeypatch):
+    """A divergence that stops at the runner is a divergence nobody reads."""
+    import argparse
+
+    from swing.backtest import runner as runner_module
+    from swing.config import Config
+
+    bars = _wf_universe(n_symbols=4, n_bars=1300)
+    benchmark = next(iter(bars.values())).copy()
+    data = _wf_config().as_dict()
+    data["reports"]["dir"] = str(tmp_path / "reports")
+    data["reports"]["bootstrap"] = {"enabled": False}
+    data["strategy"]["fundamentals"]["enabled"] = True
+    cfg = Config(data)
+
+    monkeypatch.setattr(
+        runner_module, "load_universe_bars",
+        lambda cfg, etf_only=False: (bars, None, benchmark),
+    )
+    args = argparse.Namespace(
+        tag=None, start=None, end=None, full=False, ablations=False,
+        sensitivity=False, walk_forward=True, etf_only=False,
+    )
+    runner_module._run_walk_forward(cfg, args, date(2014, 1, 1), None, etf_only=False)
+
+    out = sorted((tmp_path / "reports").glob("*walkforward*"))[-1]
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert any("fundamentals filter was NOT applied" in w for w in manifest["warnings"])
+    assert "fundamentals filter was NOT applied" in (out / "report.md").read_text()
 
 
 # ---------------------------------------------------------------------------

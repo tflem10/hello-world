@@ -157,6 +157,7 @@ class Backtester:
         benchmark: pd.DataFrame | None = None,
         earnings: dict[str, list[date]] | None = None,
         feature_cache: dict | None = None,
+        panel_cache: dict | None = None,
     ):
         self.cfg = cfg
         self.raw_bars = {s: b for s, b in bars.items() if len(b)}
@@ -169,10 +170,30 @@ class Backtester:
         # single feature. Keying the cache on only the feature-relevant params
         # turns a 27-combination sweep into 3 feature passes.
         self.feature_cache = feature_cache if feature_cache is not None else {}
+        # Neither cache is keyed on ``meta``: sharing one across runs whose
+        # SymbolMeta differs would serve the first run's eligibility flags to
+        # the second. Every caller in this package holds meta fixed.
+        #
+        # The panel cache *is* keyed on the bars' content fingerprint, so
+        # sharing one across different bar sets misses rather than lies.
+        self.panel_cache = panel_cache
+        self._data_hash: str | None = None
+
+    @property
+    def data_hash(self) -> str:
+        """Fingerprint of the bars this run consumed. Computed once.
+
+        Stamped on the result for reproducibility *and* used as part of the
+        panel cache key, so the two can never disagree about which bars a run
+        was over.
+        """
+        if self._data_hash is None:
+            self._data_hash = data_fingerprint(self.raw_bars)
+        return self._data_hash
 
     # -- panel construction ------------------------------------------------
-    def _build_panel(self, start: pd.Timestamp | None, end: pd.Timestamp | None):
-        """Compute features per symbol, then align everything onto one date axis."""
+    def _feature_frames(self) -> dict[str, pd.DataFrame]:
+        """Per-symbol feature frames, memoised by feature key."""
         feature_frames: dict[str, pd.DataFrame] = {}
         fkey = feature_key(self.cfg)
         for sym, bars in self.raw_bars.items():
@@ -192,7 +213,78 @@ class Backtester:
 
         if not feature_frames:
             raise ValueError("no symbols produced features; is the cache populated?")
+        return feature_frames
 
+    def _build_panel(self, start: pd.Timestamp | None, end: pd.Timestamp | None):
+        """The (dates x symbols) arrays the loop runs on, for one window.
+
+        With a ``panel_cache`` the full-history panel is built **once per feature
+        key** and every window is a row slice of it — numpy views, so a window
+        costs no allocation at all. The walk-forward asks for 392 panels over
+        three distinct feature keys, and aligning ~960 symbols onto a shared
+        date axis is the most expensive thing it does.
+
+        Without one the panel is built for the requested window directly, which
+        is the same arithmetic: the date axis and the symbol list are properties
+        of the *frames*, not of the window, so restricting the axis first and
+        slicing it afterwards agree row for row.
+        """
+        if self.panel_cache is None:
+            return self._align(self._feature_frames(), start, end)
+
+        fkey = feature_key(self.cfg)
+        cache_key = (fkey, self._bars_key())
+        panel = self.panel_cache.get(cache_key)
+        if panel is None:
+            panel = self._align(self._feature_frames(), None, None)
+            self.panel_cache[cache_key] = panel
+            self._drop_cached_features(fkey)
+        return _slice_panel(panel, start, end)
+
+    def _bars_key(self) -> tuple:
+        """Identity of the bar set a cached panel was built from.
+
+        **Shape is not identity.** Symbol names, bar counts and last dates all
+        survive a re-download that revises prices in the middle of history, so a
+        key built from those alone would hand the revised run a panel computed
+        from the old prices — wrong numbers, no error. :func:`data_fingerprint`
+        (the same hash the report stamps as "the exact bars this run consumed")
+        closes that: a shared cache **misses** on different bars rather than
+        lying about them. It is computed once per run and reused for
+        ``BacktestResult.data_hash``, so the key costs nothing extra.
+
+        The residual is the fingerprint's own: it covers closes, not
+        open/high/low/volume. Two bar sets differing only in those columns are
+        indistinguishable here — exactly as they already are to every report and
+        manifest in this repo.
+        """
+        return (
+            self.data_hash,
+            tuple(
+                (sym, len(self.raw_bars[sym]), self.raw_bars[sym].index[-1])
+                for sym in sorted(self.raw_bars)
+            ),
+        )
+
+    def _drop_cached_features(self, fkey: str) -> None:
+        """Release the frames a freshly cached panel just subsumed.
+
+        The panel holds every column the loop reads, so keeping both doubles the
+        footprint of the most memory-hungry object in the system for no gain
+        (~960 symbols x 4,200 bars). The frames are only ever needed again by a
+        run over a *different* bar set, which no caller in this package does
+        with a shared cache.
+        """
+        for key in [k for k in self.feature_cache if k[1] == fkey]:
+            del self.feature_cache[key]
+
+    def _align(
+        self,
+        feature_frames: dict[str, pd.DataFrame],
+        start: pd.Timestamp | None,
+        end: pd.Timestamp | None,
+    ):
+        """Align per-symbol frames onto one date axis."""
         all_dates = sorted(set().union(*(f.index for f in feature_frames.values())))
         dates = pd.DatetimeIndex(all_dates)
         if start is not None:
@@ -335,18 +427,25 @@ class Backtester:
 
         for i, today in enumerate(dates):
             # -- 1. queued exits fill at the open --------------------------
+            carried_exits: list[tuple[str, str]] = []
             for sym, reason in pending_exits:
                 pos = positions.get(sym)
                 if pos is None:
                     continue
                 price = op[i, pos.col]
                 if not math.isfinite(price):
-                    continue        # no bar today (halt); carry the position
+                    # No bar today (halt): carry the position *and* the order.
+                    # Dropping the order here cancels the exit permanently —
+                    # step 4 never re-queues a time stop once `time_stop_queued`
+                    # is set, so the position would only ever leave through a
+                    # stop or the end of the backtest.
+                    carried_exits.append((sym, reason))
+                    continue
                 fill = self._sell_fill(price, pos.atr_at_entry)
                 cash += pos.shares * fill - commission
                 trades.append(self._close_trade(pos, today, fill, reason, commission))
                 del positions[sym]
-            pending_exits = []
+            pending_exits = carried_exits
 
             # -- 2. queued entries fill at the open ------------------------
             for sym, stop, atr_value, score in pending_entries:
@@ -359,8 +458,13 @@ class Backtester:
                 fill = self._buy_fill(price, atr_value)
                 if stop >= fill:
                     continue        # gapped up through the stop distance; skip
-                equity_now = cash + sum(
-                    p.shares * _last_price(cl, i, p.col) for p in positions.values()
+                # Holdings are marked at LAST NIGHT'S close, not today's: this
+                # order is being filled at the open, and today's close is hours
+                # in the future. Yesterday's close is what the drafted overnight
+                # order was sized against live, so the share counts agree.
+                equity_now = cash + (
+                    sum(p.shares * _last_price(cl, i - 1, p.col) for p in positions.values())
+                    if i else 0.0
                 )
                 size = size_position(
                     entry=fill,
@@ -485,7 +589,14 @@ class Backtester:
             cash += pos.shares * fill - commission
             trades.append(self._close_trade(pos, dates[last], fill, EXIT_EOD, commission))
         if positions:
+            # Every curve describes the same instant, so they all move together:
+            # a final bar reporting a position still open, or cash still tied up
+            # in it, while the trade log shows it closed is a report disagreeing
+            # with itself. Flat is flat — equity is cash, exposure is zero.
             equity_curve[last] = cash
+            cash_curve[last] = cash
+            exposure_curve[last] = 0.0
+            open_count_curve[last] = 0
             positions.clear()
 
         equity = pd.Series(equity_curve, index=dates, name="equity").ffill().fillna(
@@ -499,7 +610,7 @@ class Backtester:
             open_positions=pd.Series(open_count_curve, index=dates, name="open_positions"),
             params=_flatten_params(cfg),
             config_hash=cfg.hash,
-            data_hash=data_fingerprint(self.raw_bars),
+            data_hash=self.data_hash,
             universe_size=len(symbols),
             start=dates[0].date(),
             end=dates[-1].date(),
@@ -529,6 +640,23 @@ class Backtester:
             mfe=mfe,
             costs=pos.entry_costs + commission,
         )
+
+
+def _slice_panel(panel, start: pd.Timestamp | None, end: pd.Timestamp | None):
+    """Row-slice a full-history panel down to ``[start, end]``.
+
+    The date axis is sorted and unique, so ``searchsorted`` reproduces the
+    ``dates >= start`` / ``dates <= end`` masks exactly. The arrays are sliced
+    as numpy **views** — no copy, which is the whole point of caching the panel.
+    """
+    dates, symbols, arrays = panel
+    lo = 0 if start is None else int(dates.searchsorted(start, side="left"))
+    hi = len(dates) if end is None else int(dates.searchsorted(end, side="right"))
+    if hi <= lo:
+        raise ValueError("no bars fall inside the requested backtest window")
+    if lo == 0 and hi == len(dates):
+        return dates, symbols, arrays
+    return dates[lo:hi], symbols, {name: a[lo:hi] for name, a in arrays.items()}
 
 
 def _last_price(closes: np.ndarray, i: int, col: int) -> float:
@@ -613,9 +741,10 @@ def run_backtest(
     end: date | None = None,
     label: str = "",
     feature_cache: dict | None = None,
+    panel_cache: dict | None = None,
 ) -> BacktestResult:
     """Convenience wrapper around :class:`Backtester`."""
     return Backtester(
         cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
-        feature_cache=feature_cache,
+        feature_cache=feature_cache, panel_cache=panel_cache,
     ).run(start=start, end=end, label=label)

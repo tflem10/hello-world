@@ -254,6 +254,32 @@ def drawdown_series(equity: pd.Series) -> pd.Series:
     return equity / peak - 1.0
 
 
+def max_drawdown(equity) -> float:
+    """Deepest peak-to-trough fall, as a positive fraction. Array in, float out.
+
+    The same number :func:`drawdown_stats` reports, without the
+    underwater-streak loop and without building a ``pd.Series`` — the bootstrap
+    calls this once per resample (1,000 curves of ~3,400 points) and never looks
+    at the streak.
+
+    NaNs are **skipped**, exactly as pandas' ``cummax``/``min`` skip them: a gap
+    in a curve is a day without a mark, not a day the strategy fell to nothing.
+    ``np.maximum.accumulate`` would instead poison every point after the gap and
+    report a confident 0.0 — the one answer a drawdown must never be wrong
+    about — so the running peak uses ``np.fmax`` and the minimum ignores NaN.
+    """
+    values = np.asarray(equity, dtype="float64")
+    if len(values) < 2:
+        return 0.0
+    peak = np.fmax.accumulate(values)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dd = values / peak - 1.0
+    observed = dd[~np.isnan(dd)]
+    if not len(observed):
+        return 0.0
+    return max(0.0, float(-observed.min()))
+
+
 def drawdown_stats(equity: pd.Series) -> tuple[float, int]:
     """(max drawdown as a positive fraction, longest days spent below a peak)."""
     if len(equity) < 2:

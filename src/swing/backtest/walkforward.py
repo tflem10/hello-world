@@ -226,7 +226,10 @@ def run_walk_forward(
         "walk-forward: %d windows x %d parameter combinations", len(windows), len(combos)
     )
 
+    # One aligned panel per distinct feature key, shared by every window and
+    # every combination: the windows are row slices of it, not rebuilds.
     feature_cache: dict = {}
+    panel_cache: dict = {}
     warnings: list[str] = []
     chosen: list[dict] = []
     segments: list[BacktestResult] = []
@@ -245,7 +248,7 @@ def run_walk_forward(
             result = run_backtest(
                 trial_cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
                 start=window.is_start, end=window.is_end,
-                label=f"IS{n}", feature_cache=feature_cache,
+                label=f"IS{n}", feature_cache=feature_cache, panel_cache=panel_cache,
             )
             m = compute_metrics(result.equity, result.trades, result.exposure,
                                 result.open_positions)
@@ -277,7 +280,7 @@ def run_walk_forward(
             result = run_backtest(
                 cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
                 start=window.is_start, end=window.is_end, label=f"IS{n}",
-                feature_cache=feature_cache,
+                feature_cache=feature_cache, panel_cache=panel_cache,
             )
             best_metrics = compute_metrics(result.equity, result.trades,
                                            result.exposure, result.open_positions)
@@ -290,7 +293,7 @@ def run_walk_forward(
         oos = run_backtest(
             oos_cfg, bars, meta=meta, benchmark=benchmark, earnings=earnings,
             start=window.oos_start, end=window.oos_end,
-            label=f"OOS{n}", feature_cache=feature_cache,
+            label=f"OOS{n}", feature_cache=feature_cache, panel_cache=panel_cache,
         )
         running_equity = float(oos.equity.iloc[-1])
 
@@ -349,6 +352,7 @@ def parameter_sensitivity(
     meant to be read for *flatness*, not for the best cell.
     """
     feature_cache: dict = {}
+    panel_cache: dict = {}
     rows = []
     for path in paths:
         base_value = _get_path(cfg, path)
@@ -361,7 +365,8 @@ def parameter_sensitivity(
             trial = apply_overrides(cfg, {path: value})
             result = run_backtest(
                 trial, bars, meta=meta, benchmark=benchmark, earnings=earnings,
-                start=start, end=end, label=f"{path}={value}", feature_cache=feature_cache,
+                start=start, end=end, label=f"{path}={value}",
+                feature_cache=feature_cache, panel_cache=panel_cache,
             )
             m = compute_metrics(result.equity, result.trades, result.exposure,
                                 result.open_positions)

@@ -45,7 +45,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import pandas as pd
 
-from .metrics import annualised_return, drawdown_stats
+from .metrics import annualised_return, max_drawdown
 
 # Below this many daily returns the resampled distribution is a description of
 # the noise in a handful of days, not of the strategy. Reporting an interval
@@ -145,16 +145,15 @@ def bootstrap_equity(
     # Each rebuilt curve has the same number of points as the original: the
     # starting equity plus one point per resampled return.
     n_points = n + 1
-    index = pd.RangeIndex(n_points)
 
     cagrs = np.empty(n_resamples, dtype="float64")
     maxdds = np.empty(n_resamples, dtype="float64")
+    path = np.empty(n_points, dtype="float64")
+    path[0] = initial
     for i in range(n_resamples):
-        path = np.empty(n_points, dtype="float64")
-        path[0] = initial
         path[1:] = paths[i]
         cagrs[i] = annualised_return(initial, float(path[-1]), n_points)
-        maxdds[i] = drawdown_stats(pd.Series(path, index=index))[0]
+        maxdds[i] = max_drawdown(path)
 
     c5, c50, c95 = (float(v) for v in np.percentile(cagrs, [5, 50, 95]))
     d5, d50, d95 = (float(v) for v in np.percentile(maxdds, [5, 50, 95]))

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from swing import indicators as ind
 from swing.indicators import (
     adx,
     atr,
@@ -73,6 +74,21 @@ def test_ema_is_seeded_with_an_sma_like_charting_packages():
     )
 
 
+def test_ema_carries_the_last_value_across_a_gap():
+    """A missing bar neither blanks the average nor restarts it: the recursion
+    resumes from where it was, which is what the per-bar loop did."""
+    out = ema(pd.Series([1.0, 2.0, 3.0, np.nan, 5.0]), 2)
+    alpha = 2 / 3
+    third = 1.5 + alpha * (3 - 1.5)
+    assert out.iloc[2] == pytest.approx(third)
+    assert out.iloc[3] == pytest.approx(third)
+    assert out.iloc[4] == pytest.approx(third + alpha * (5 - third))
+
+
+def test_ema_of_a_series_shorter_than_its_length_is_all_nan():
+    assert ema(pd.Series([1.0, 2.0]), 5).isna().all()
+
+
 def test_wilder_smooth_matches_its_definition():
     s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     n = 3
@@ -104,6 +120,30 @@ def test_true_range_picks_the_widest_of_the_three():
     assert tr.iloc[0] == pytest.approx(1.0)     # first bar: H-L
     assert tr.iloc[1] == pytest.approx(2.5)     # |12 - 9.5| beats 12-11
     assert tr.iloc[2] == pytest.approx(3.5)     # |8 - 11.5| beats 9-8
+
+
+def test_true_range_and_atr_survive_an_empty_series():
+    """The module contract is a NaN-padded series, not an exception.
+
+    ``compute_features`` is wrapped in try/except by both callers, so this only
+    bites someone calling the indicator directly — which is exactly who has no
+    stack trace to interpret.
+    """
+    empty = pd.Series(dtype="float64")
+    tr = true_range(empty, empty, empty)
+    assert len(tr) == 0
+    out = atr(empty, empty, empty, 14)
+    assert len(out) == 0
+    # The same guard, one level up: ADX writes to row 0 of its own +DM/-DM.
+    assert len(directional_indicators(empty, empty, empty, 14)) == 0
+    assert len(adx(empty, empty, empty, 14)) == 0
+
+
+def test_true_range_of_a_single_bar_is_its_own_range():
+    """One bar has no prior close, so the fallback is H-L — and the empty-series
+    guard must not have disabled that assignment."""
+    tr = true_range(pd.Series([12.0]), pd.Series([9.0]), pd.Series([10.0]))
+    assert tr.iloc[0] == pytest.approx(3.0)
 
 
 def test_atr_of_a_constant_range_equals_that_range():
@@ -304,6 +344,52 @@ def test_slope_positive_flags_a_rising_line():
     assert bool(out.iloc[3]) is False       # 1.5 < 2.0
 
 
+# ---------------------------------------------------------------------------
+# the module contract
+# ---------------------------------------------------------------------------
+def _calls(series: pd.Series) -> dict:
+    """Every public indicator, called with one series (and its OHLC stand-ins)."""
+    high, low, close = series, series - 1.0, series - 0.5
+    return {
+        "sma": lambda: ind.sma(close, 14),
+        "ema": lambda: ind.ema(close, 14),
+        "wilder_smooth": lambda: ind.wilder_smooth(close, 14),
+        "true_range": lambda: ind.true_range(high, low, close),
+        "atr": lambda: ind.atr(high, low, close, 14),
+        "atr_pct": lambda: ind.atr_pct(high, low, close, 14),
+        "rsi": lambda: ind.rsi(close, 14),
+        "directional_indicators": lambda: ind.directional_indicators(high, low, close, 14),
+        "adx": lambda: ind.adx(high, low, close, 14),
+        "donchian_high": lambda: ind.donchian_high(high, 20),
+        "donchian_low": lambda: ind.donchian_low(low, 20),
+        "rolling_high": lambda: ind.rolling_high(high, 20),
+        "rolling_low": lambda: ind.rolling_low(low, 20),
+        "dollar_volume": lambda: ind.dollar_volume(close, close, 20),
+        "momentum": lambda: ind.momentum(close, 126, skip=5),
+        "macd": lambda: ind.macd(close),
+        "obv": lambda: ind.obv(close, close),
+        "slope_positive": lambda: ind.slope_positive(close, 20),
+    }
+
+
+def test_every_public_indicator_is_covered_by_the_degenerate_input_sweep():
+    """A new indicator has to be added below, or the sweep quietly stops
+    covering the module."""
+    assert set(_calls(pd.Series(dtype="float64"))) == set(ind.__all__)
+
+
+@pytest.mark.parametrize("bars", [0, 1], ids=["empty", "one_bar"])
+@pytest.mark.parametrize("name", sorted(_calls(pd.Series(dtype="float64"))))
+def test_no_indicator_raises_on_a_degenerate_series(name, bars):
+    """Fewer bars than the warm-up needs is a NaN-padded answer, never an
+    exception. ``compute_features`` is wrapped in try/except by both of its
+    callers, so a raise here is only ever seen by a direct caller — who gets a
+    stack trace instead of the empty frame the module promises."""
+    series = pd.Series(np.full(bars, 10.0), dtype="float64")
+    out = _calls(series)[name]()
+    assert len(out) == bars
+
+
 def test_indicators_reject_nonsense_lengths():
     s = pd.Series([1.0, 2.0, 3.0])
     for fn in (sma, ema, rsi):
@@ -320,6 +406,7 @@ def test_no_indicator_looks_ahead():
     cut = 250
     for full, part in (
         (sma(close, 50), sma(close.iloc[:cut], 50)),
+        (ema(close, 20), ema(close.iloc[:cut], 20)),
         (rsi(close, 14), rsi(close.iloc[:cut], 14)),
         (atr(high, low, close, 14), atr(high.iloc[:cut], low.iloc[:cut], close.iloc[:cut], 14)),
         (adx(high, low, close, 14), adx(high.iloc[:cut], low.iloc[:cut], close.iloc[:cut], 14)),

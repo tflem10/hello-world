@@ -122,6 +122,49 @@ def test_no_trade_is_entered_on_the_signal_bar_itself():
     assert result.trades.iloc[0]["entry_date"] > bars.index[200]
 
 
+def _held_and_new(held_close_on_fill_day: float):
+    """Two names: HELD is already open when NEW fills at the open of bar 202.
+
+    HELD breaks out on bar 200 and fills on 201; NEW breaks out one bar later
+    and fills on 202. ``held_close_on_fill_day`` is HELD's *close* on 202 —
+    hours after NEW's order has already been filled and sized.
+    """
+    held = make_bars(
+        [100.0] * 200 + [110.0, 110.0, held_close_on_fill_day, 110.0, 110.0],
+        volume=1_000_000.0,
+    )
+    new = make_bars([100.0] * 201 + [110.0] * 4, volume=1_000_000.0)
+    return {"HELD": held, "NEW": new}
+
+
+def test_entry_sizing_marks_holdings_at_last_nights_close_not_todays():
+    """Sizing at the open cannot see the close of the day it is trading into.
+
+    Equity for the risk budget is cash plus holdings, and if holdings are marked
+    at today's close then a name that triples during the session retroactively
+    enlarges an order that was already filled at the open. The share count must
+    be the one last night's pick sheet would have computed.
+
+    With HELD entered at 110.1094286 x 36 shares out of $10,000, cash is
+    $6,036.06 and HELD's prior close is 110, so the sizing equity is $9,996.06
+    -> budget $199.92 / $5.5522857 of risk per share -> 36 whole shares. Marking
+    HELD at a 300 close instead gives $16,836.06, which buys 54 (cash-capped).
+    """
+    cfg = engine_config()
+    quiet = run_backtest(cfg, _held_and_new(110.0))
+    spike = run_backtest(cfg, _held_and_new(300.0))
+
+    def new_trade(result):
+        rows = result.trades[result.trades["symbol"] == "NEW"]
+        assert len(rows) == 1
+        return rows.iloc[0]
+
+    assert new_trade(quiet)["shares"] == 36
+    # The intraday move in the *other* holding must not reach back into this
+    # order at all: same equity mark, same whole-share answer.
+    assert new_trade(spike)["shares"] == new_trade(quiet)["shares"]
+
+
 # ---------------------------------------------------------------------------
 # exits
 # ---------------------------------------------------------------------------
@@ -162,6 +205,33 @@ def test_time_stop_fires_after_exactly_n_bars():
     assert exit_pos - entry_pos == n_bars
 
 
+def test_a_queued_time_stop_survives_a_missing_bar_on_its_exit_day():
+    """A halt on the exit morning delays the exit; it does not cancel it.
+
+    The queue is cleared every bar and step 4 only ever queues a time stop once,
+    so an exit that cannot fill has to be carried explicitly or the position
+    keeps its slot until a stop or the end of the backtest.
+    """
+    bars = breakout_series(after=[110.0] * 40)
+    # A second, signal-free name holds the date axis open on the day AAA is
+    # missing, which is what a real universe does.
+    calendar = make_bars([50.0] * len(bars), volume=1_000_000.0)
+    cfg = engine_config(strategy__exit__time_stop_days=8)
+
+    clean = run_backtest(cfg, {"AAA": bars, "CAL": calendar})
+    assert len(clean.trades) == 1
+    exit_date = clean.trades.iloc[0]["exit_date"]
+    assert clean.trades.iloc[0]["exit_reason"] == EXIT_TIME
+
+    halted = run_backtest(
+        cfg, {"AAA": bars.drop(index=exit_date), "CAL": calendar}
+    )
+    assert len(halted.trades) == 1
+    t = halted.trades.iloc[0]
+    assert t["exit_reason"] == EXIT_TIME
+    assert t["exit_date"] == bars.index[bars.index.get_loc(exit_date) + 1]
+
+
 def test_time_stop_of_zero_disables_it():
     bars = breakout_series(after=[110.0] * 40)
     cfg = engine_config(strategy__exit__time_stop_days=0)
@@ -188,6 +258,22 @@ def test_open_position_is_closed_at_the_end_of_the_backtest():
     assert len(result.trades) == 1
     assert result.trades.iloc[0]["exit_reason"] == "end_of_backtest"
     assert result.trades.iloc[0]["exit_date"] == bars.index[-1]
+
+
+def test_every_curve_reports_flat_on_the_bar_the_liquidation_happened():
+    """The forced exit is a real fill, so the final bar is a flat day on every
+    curve. Refreshing equity alone leaves the report contradicting itself: one
+    position open, cash still tied up in it, and a trade log saying it closed."""
+    bars = breakout_series(after=[110.0] * 5)
+    cfg = engine_config(strategy__exit__time_stop_days=0)
+    result = run_backtest(cfg, {"AAA": bars})
+
+    assert result.trades.iloc[0]["exit_reason"] == "end_of_backtest"
+    assert int(result.open_positions.iloc[-1]) == 0
+    assert float(result.exposure.iloc[-1]) == 0.0
+    assert float(result.cash.iloc[-1]) == pytest.approx(float(result.equity.iloc[-1]))
+    # The bar before is untouched: it really did hold the position.
+    assert int(result.open_positions.iloc[-2]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +480,96 @@ def test_feature_cache_does_not_change_results():
     b = run_backtest(cfg, bars, feature_cache=shared)
     assert shared                                  # the cache was populated
     assert a.trades.to_csv(index=False) == b.trades.to_csv(index=False)
+
+
+def _windows(bars):
+    """A few overlapping windows, plus the whole history."""
+    index = next(iter(bars.values())).index
+    return [
+        (None, None),
+        (index[0].date(), index[300].date()),
+        (index[200].date(), index[500].date()),
+        (index[400].date(), index[-1].date()),
+    ]
+
+
+def test_the_cached_panel_is_sliced_to_exactly_the_window_it_replaces():
+    """The panel cache must be a pure speed-up: one full-history build per
+    feature key, row-sliced per window, with trades identical to building each
+    window's panel from scratch."""
+    bars = _multi_symbol_universe(n_symbols=5, seed=9)
+    cfg = engine_config()
+    panels: dict = {}
+
+    for start, end in _windows(bars):
+        direct = run_backtest(cfg, bars, start=start, end=end)
+        cached = run_backtest(cfg, bars, start=start, end=end, panel_cache=panels)
+        assert direct.trades.to_csv(index=False) == cached.trades.to_csv(index=False)
+        assert direct.equity.to_csv() == cached.equity.to_csv()
+
+    # One feature key, one panel — every window after the first was a slice.
+    assert len(panels) == 1
+
+
+def test_the_panel_cache_keys_on_the_feature_key_not_the_parameters():
+    """Stop multiples change trades but not a single feature, so they must
+    share one panel; a donchian length must not."""
+    bars = _multi_symbol_universe(n_symbols=3)
+    panels: dict = {}
+    for stop_atr in (1.5, 2.5, 3.5):
+        run_backtest(engine_config(strategy__exit__initial_stop_atr=stop_atr), bars,
+                     panel_cache=panels)
+    assert len(panels) == 1
+
+    run_backtest(engine_config(strategy__entry__donchian_len=30), bars,
+                 panel_cache=panels)
+    assert len(panels) == 2
+
+
+def test_the_panel_cache_releases_the_feature_frames_it_subsumes():
+    """Holding frames and panels for the same feature key doubles the largest
+    allocation in the system to no purpose."""
+    bars = _multi_symbol_universe(n_symbols=3)
+    features: dict = {}
+    panels: dict = {}
+    run_backtest(engine_config(), bars, feature_cache=features, panel_cache=panels)
+    assert panels and not features
+
+
+def test_a_shared_panel_cache_misses_on_revised_bars_instead_of_serving_stale_ones():
+    """Shape is not identity.
+
+    A re-download that revises prices in the middle of history keeps every bar
+    count and every last date. A cache keyed on those alone would hand the
+    revised run a panel built from the *old* prices: wrong trades, no error,
+    and a data hash on the report that says the new bars were used.
+    """
+    original = {"AAA": make_bars([100.0] * 250, volume=1_000_000.0)}
+    revised = {"AAA": make_bars([100.0] * 100 + [200.0] * 150, volume=1_000_000.0)}
+    assert len(revised["AAA"]) == len(original["AAA"])
+    assert revised["AAA"].index[-1] == original["AAA"].index[-1]
+
+    cfg = engine_config()
+    panels: dict = {}
+    first = run_backtest(cfg, original, panel_cache=panels)
+    shared = run_backtest(cfg, revised, panel_cache=panels)
+    alone = run_backtest(cfg, revised)
+
+    assert len(panels) == 2                        # missed, rather than lied
+    assert first.data_hash != shared.data_hash
+    assert shared.data_hash == alone.data_hash
+    assert shared.trades.to_csv(index=False) == alone.trades.to_csv(index=False)
+    assert shared.equity.to_csv() == alone.equity.to_csv()
+
+
+def test_a_window_outside_the_data_still_raises_with_a_cached_panel():
+    bars = _multi_symbol_universe(n_symbols=2)
+    panels: dict = {}
+    run_backtest(engine_config(), bars, panel_cache=panels)
+    with pytest.raises(ValueError, match="no bars"):
+        run_backtest(engine_config(), bars, panel_cache=panels,
+                     start=pd.Timestamp("1990-01-01").date(),
+                     end=pd.Timestamp("1990-12-31").date())
 
 
 def test_earnings_blackout_blocks_entries_around_the_date():

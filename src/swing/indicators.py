@@ -65,6 +65,11 @@ def ema(series: pd.Series, length: int) -> pd.Series:
     not what StockCharts, TradingView or thinkorswim do — they seed with an SMA
     of the first ``length`` bars. On a 200-day EMA that difference is visible
     for hundreds of bars, so we seed explicitly.
+
+    Vectorised exactly as :func:`wilder_smooth` is, and for the same reason: the
+    recursion *is* an EWM, so only the seed has to be supplied by hand. With
+    ``ignore_na=True`` a gap carries the previous value forward, which is what
+    the per-bar loop this replaces did.
     """
     _check_length(length)
     values = series.to_numpy(dtype="float64")
@@ -78,10 +83,10 @@ def ema(series: pd.Series, length: int) -> pd.Series:
         return pd.Series(out, index=series.index)
 
     alpha = 2.0 / (length + 1.0)
-    out[first] = np.nanmean(values[first - length + 1 : first + 1])
-    for i in range(first + 1, len(values)):
-        x = values[i]
-        out[i] = out[i - 1] if np.isnan(x) else out[i - 1] + alpha * (x - out[i - 1])
+    tail = values[first:].copy()
+    tail[0] = np.nanmean(values[first - length + 1 : first + 1])
+    smoothed = pd.Series(tail).ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+    out[first:] = smoothed.to_numpy()
     return pd.Series(out, index=series.index)
 
 
@@ -142,7 +147,10 @@ def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
         axis=1,
     )
     tr = ranges.max(axis=1)
-    tr.iloc[0] = float(high.iloc[0] - low.iloc[0]) if len(high) else np.nan
+    # The guard is on the *assignment*: an empty frame has no row 0 to write to,
+    # and the module contract is a NaN-padded series, never an exception.
+    if len(high):
+        tr.iloc[0] = float(high.iloc[0] - low.iloc[0])
     return tr
 
 
@@ -195,10 +203,10 @@ def directional_indicators(
     minus_dm = pd.Series(
         np.where((down > up) & (down > 0), down, 0.0), index=high.index, dtype="float64"
     )
-    # The first bar has no prior high/low, so it contributes no movement.
-    plus_dm.iloc[0] = np.nan
-    minus_dm.iloc[0] = np.nan
-
+    # The first bar has no prior high or low, so it contributes no movement and
+    # every series below is smoothed from bar 1 onward. Dropping it by slicing
+    # rather than by blanking row 0 is what makes an empty frame a NaN-padded
+    # answer instead of an IndexError.
     tr_s = wilder_smooth(true_range(high, low, close).iloc[1:], length).reindex(high.index)
     plus_s = wilder_smooth(plus_dm.iloc[1:], length).reindex(high.index)
     minus_s = wilder_smooth(minus_dm.iloc[1:], length).reindex(high.index)

@@ -15,6 +15,7 @@ from swing.backtest.metrics import (
     drawdown_series,
     drawdown_stats,
     exit_reason_table,
+    max_drawdown,
     monthly_returns,
     trade_stats,
     yearly_table,
@@ -75,6 +76,44 @@ def test_drawdown_is_never_reported_as_negative_zero():
     max_dd, _ = drawdown_stats(_equity([100, 101, 102]))
     assert max_dd == 0.0
     assert not np.signbit(max_dd)
+
+
+def test_the_array_max_drawdown_agrees_with_drawdown_stats_exactly():
+    """The bootstrap calls the array version 1,000 times per report, so the two
+    must not be allowed to drift into two definitions of drawdown."""
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        n = int(rng.integers(2, 400))
+        path = 100.0 * np.cumprod(1.0 + rng.normal(0.0003, 0.02, n))
+        assert max_drawdown(path) == drawdown_stats(_equity(path))[0]
+
+    assert max_drawdown(np.array([100.0, 200.0, 150.0, 180.0, 250.0])) == pytest.approx(
+        0.25
+    )
+    assert max_drawdown(np.array([100.0, 110.0])) == 0.0
+    assert max_drawdown(np.array([100.0])) == 0.0        # nothing to fall from
+
+
+def test_the_array_max_drawdown_skips_gaps_instead_of_reporting_zero():
+    """A day without a mark is not a day the strategy fell to nothing.
+
+    A running peak from ``np.maximum.accumulate`` poisons every point after a
+    NaN and then reports a confident 0.0 — the one answer a drawdown must never
+    be wrong about, because 0.0 reads as "never lost anything".
+    """
+    gapped = np.array([100.0, 110.0, np.nan, 90.0, 120.0])
+    assert max_drawdown(gapped) == pytest.approx(1.0 - 90.0 / 110.0)     # 0.1818
+    assert max_drawdown(gapped) == drawdown_stats(_equity(gapped))[0]
+
+    rng = np.random.default_rng(1)
+    for _ in range(50):
+        n = int(rng.integers(2, 300))
+        path = 100.0 * np.cumprod(1.0 + rng.normal(0.0003, 0.02, n))
+        path[rng.integers(0, n, size=int(rng.integers(1, max(2, n // 5))))] = np.nan
+        assert max_drawdown(path) == drawdown_stats(_equity(path))[0]
+
+    assert max_drawdown(np.array([np.nan, np.nan])) == 0.0
+    assert max_drawdown(np.array([np.nan, 100.0, 80.0])) == pytest.approx(0.2)
 
 
 # ---------------------------------------------------------------------------
