@@ -32,6 +32,13 @@ OK, WARN, FAIL, SKIP = "ok", "warn", "FAIL", "skip"
 # Symbols used for probes: one liquid ETF that every provider carries.
 PROBE_SYMBOL = "SPY"
 
+# Statuses that mean "we are refusing you" rather than "no such data". They are
+# only readable that way because PROBE_SYMBOL certainly exists: a 404 for an
+# arbitrary ticker is a delisting, a 404 for SPY is a bot wall turning this
+# client away. Same code, opposite meanings — which is why the provider records
+# the status and this probe, not the provider, draws the conclusion.
+REFUSAL_STATUSES = (401, 403, 404, 405, 429, 451)
+
 
 @dataclass
 class Check:
@@ -107,6 +114,18 @@ def probe_provider(cfg: Config, name: str) -> tuple[bool, str]:
 
     frame = bars.get(PROBE_SYMBOL)
     if frame is None or not len(frame):
+        # "No bars" reads as "the symbol is missing" and sends you looking in
+        # the wrong place. Say which of the two refusals this actually was.
+        if getattr(provider, "blocked", False):
+            return False, "reachable but blocked by bot protection (JavaScript challenge)"
+        status = getattr(provider, "http_status", {}).get(PROBE_SYMBOL)
+        if status in REFUSAL_STATUSES:
+            return False, (
+                f"reachable but HTTP {status} for {PROBE_SYMBOL} — refusing this "
+                "client (bot wall), not the symbol"
+            )
+        if status is not None:
+            return False, f"reachable but HTTP {status} for {PROBE_SYMBOL}"
         return False, "reachable but returned no bars for " + PROBE_SYMBOL
     return True, f"{len(frame)} bars, latest {frame.index[-1].date()}"
 
@@ -261,8 +280,20 @@ def _check_gate(cfg: Config, report: Report) -> None:
     from .backtest.gate import check_gate
 
     status = check_gate(cfg)
-    if status.passed:
+    if status.passed and not status.reasons:
         report.add("backtest gate", OK, "PASS — scan will emit picks")
+        return
+
+    if status.passed:
+        # A pass can still carry a caveat: a validation that has aged out, or a
+        # gate switched off in config. Both change what PASS means, and doctor
+        # printing a bare "ok" is how they stay unnoticed for a year.
+        disabled = not bool(cfg.backtest.gate.get("enabled", True))
+        report.add(
+            "backtest gate", WARN, "PASS — " + status.reasons[0][:100],
+            fix=("set [backtest.gate] enabled = true   # picks are unvalidated "
+                 "without it" if disabled else "swing backtest --walk-forward"),
+        )
         return
 
     reason = status.reasons[0] if status.reasons else "blocked"

@@ -8,6 +8,7 @@ missing optional dependency, a provider outage mid-scan.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -102,6 +103,15 @@ class FakeClient:
                               "fundamental": {"eps": 5.0,
                                               "totalRevenueChangeInPercent": 12.0}}]}
         )
+
+
+class PartialFailureClient(FakeClient):
+    """Serves the symbols it was given candles for and raises on the rest."""
+
+    def get_price_history_every_day(self, symbol, **kw):
+        if symbol not in self._candles:
+            raise RuntimeError("history unavailable")
+        return super().get_price_history_every_day(symbol, **kw)
 
 
 def _candles(n: int = 5, start_ms: int = 1_600_000_000_000):
@@ -227,23 +237,74 @@ def test_empty_history_yields_no_symbol_not_an_exception(schwab_config):
     assert provider.daily_bars(["AAA"], date(2020, 1, 1), date(2030, 1, 1)) == {}
 
 
-def test_history_failure_falls_back_to_yfinance(schwab_config, monkeypatch):
-    from datetime import date
+@pytest.fixture
+def no_yfinance_bars(monkeypatch):
+    """Any attempt to source *bars* from yfinance is a test failure.
 
+    The cache is stamped with the configured provider, so yfinance bars handed
+    back from here would be written under a ``schwab`` stamp and the cache's own
+    provider check would wave them through — two adjustment bases in one series,
+    with nothing left to detect it.
+    """
     from swing.data import yfinance_provider
 
-    called = {}
+    def _explode(self, symbols, start, end):
+        raise AssertionError("yfinance was asked for bars under a schwab stamp")
 
-    def fake_daily_bars(self, symbols, start, end):
-        called["hit"] = tuple(symbols)
-        return {"AAA": pd.DataFrame()}
+    monkeypatch.setattr(yfinance_provider.YFinanceProvider, "daily_bars", _explode)
 
-    monkeypatch.setattr(yfinance_provider.YFinanceProvider, "daily_bars", fake_daily_bars)
+
+def test_history_failure_returns_nothing_rather_than_yfinance_bars(
+    schwab_config, no_yfinance_bars, caplog
+):
+    """Bars are the one call that does not degrade to the fallback.
+
+    An empty result is recoverable — the scan runs on cached history and says
+    so. A silently substituted price series is not.
+    """
+    from datetime import date
 
     provider = SchwabProvider(schwab_config)
     provider._client = FakeClient(fail="history")
-    provider.daily_bars(["AAA"], date(2020, 1, 1), date(2030, 1, 1))
-    assert called["hit"] == ("AAA",)
+
+    with caplog.at_level(logging.WARNING, logger="swing.data.schwab"):
+        assert provider.daily_bars(["AAA"], date(2020, 1, 1), date(2030, 1, 1)) == {}
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1                    # one line, not one per symbol
+    message = warnings[0].getMessage()
+    assert "yfinance" in message and "schwab" in message
+
+
+def test_an_expired_token_costs_bars_but_not_the_run(
+    schwab_config, no_yfinance_bars, caplog
+):
+    """The Friday-night expiry: no client at all, so no bars and no substitute."""
+    from datetime import date
+
+    provider = SchwabProvider(schwab_config)      # no token on disk
+
+    with caplog.at_level(logging.WARNING, logger="swing.data.schwab"):
+        assert provider.daily_bars(["AAA", "BBB"], date(2020, 1, 1), date(2030, 1, 1)) == {}
+
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_symbols_schwab_can_serve_survive_a_partial_failure(
+    schwab_config, no_yfinance_bars, caplog
+):
+    """Partial Schwab data is still one adjustment basis; padding it would not be."""
+    from datetime import date
+
+    provider = SchwabProvider(schwab_config)
+    provider._client = PartialFailureClient(candles={"AAA": _candles(4)})
+
+    with caplog.at_level(logging.WARNING, logger="swing.data.schwab"):
+        bars = provider.daily_bars(["AAA", "BBB"], date(2020, 1, 1), date(2030, 1, 1))
+
+    assert set(bars) == {"AAA"}
+    assert len(bars["AAA"]) == 4
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +357,26 @@ def test_fundamental_percentages_are_converted_to_fractions(schwab_config):
     fundamentals = provider.fundamentals(["AAA"])["AAA"]
     assert fundamentals.trailing_eps == 5.0
     assert fundamentals.revenue_growth == pytest.approx(0.12)   # 12.0% -> 0.12
+
+
+def test_fundamentals_still_fall_back_when_the_client_is_unusable(
+    schwab_config, monkeypatch
+):
+    """Only bars are load-bearing for the cache. The advisory calls still degrade.
+
+    Fundamentals feed a *soft* filter: no data means "no opinion", so falling
+    back keeps the filter's evidence as good as it can be. Nothing here is
+    written into the bar cache, so nothing here can splice a price series.
+    """
+    from swing.data import yfinance_provider
+
+    called = {}
+    monkeypatch.setattr(
+        yfinance_provider.YFinanceProvider, "fundamentals",
+        lambda self, symbols: called.setdefault("hit", tuple(symbols)) or {},
+    )
+    SchwabProvider(schwab_config).fundamentals(["AAA"])      # no token on disk
+    assert called["hit"] == ("AAA",)
 
 
 def test_earnings_always_come_from_yfinance(schwab_config, monkeypatch):

@@ -141,6 +141,125 @@ def test_a_reachable_provider_that_returns_nothing_is_not_ok(doc_config, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# the probe itself
+# ---------------------------------------------------------------------------
+def test_the_probe_reports_a_bot_wall_as_a_block_not_as_missing_bars(
+    doc_config, monkeypatch
+):
+    """A provider that knows it was refused says so, or you debug the wrong thing."""
+
+    class Blocked:
+        name = "stooq"
+        blocked = True
+
+        def __init__(self, cfg):
+            pass
+
+        def daily_bars(self, symbols, start, end):
+            return {}
+
+    from swing.data import provider as provider_module
+
+    monkeypatch.setattr(provider_module, "get_provider", Blocked)
+    reachable, detail = doctor.probe_provider(doc_config, "stooq")
+
+    assert reachable is False
+    assert "blocked" in detail
+
+
+def test_the_probe_reads_a_refusal_status_as_a_wall_not_a_missing_symbol(
+    doc_config, monkeypatch
+):
+    """The shape the live wall actually takes for this client: a bare 404.
+
+    SPY certainly exists, so a 404 for it is about who is asking, not about the
+    ticker — and the detail has to say which, or the operator goes hunting for a
+    delisting that never happened.
+    """
+
+    class Refused:
+        name = "stooq"
+        http_status = {"SPY": 404}
+
+        def __init__(self, cfg):
+            pass
+
+        def daily_bars(self, symbols, start, end):
+            return {}
+
+    from swing.data import provider as provider_module
+
+    monkeypatch.setattr(provider_module, "get_provider", Refused)
+    reachable, detail = doctor.probe_provider(doc_config, "stooq")
+
+    assert reachable is False
+    assert "404" in detail and "bot wall" in detail
+
+
+def test_the_probe_and_the_real_provider_agree_about_a_refusal(doc_config, monkeypatch):
+    """The two halves wired together: the provider records, the probe concludes.
+
+    Every other test in this section fakes the provider, so all of them would
+    keep passing if the attribute were renamed on one side only. This one runs
+    the real StooqProvider with nothing but `requests.get` stubbed out.
+    """
+    import requests
+
+    class FakeResponse:
+        status_code = 404
+        text = ""
+
+    monkeypatch.setattr(
+        requests, "get", lambda url, params=None, timeout=None: FakeResponse()
+    )
+
+    reachable, detail = doctor.probe_provider(doc_config, "stooq")
+    assert reachable is False
+    assert "404" in detail and "bot wall" in detail
+
+
+def test_the_probe_does_not_call_a_server_error_a_bot_wall(doc_config, monkeypatch):
+    """A 500 is the provider being broken, not the provider refusing us."""
+
+    class Broken:
+        name = "stooq"
+        http_status = {"SPY": 500}
+
+        def __init__(self, cfg):
+            pass
+
+        def daily_bars(self, symbols, start, end):
+            return {}
+
+    from swing.data import provider as provider_module
+
+    monkeypatch.setattr(provider_module, "get_provider", Broken)
+    reachable, detail = doctor.probe_provider(doc_config, "stooq")
+
+    assert reachable is False
+    assert "500" in detail and "bot wall" not in detail
+
+
+def test_the_probe_still_says_no_bars_when_that_is_all_it_knows(doc_config, monkeypatch):
+    class Empty:
+        name = "yfinance"
+
+        def __init__(self, cfg):
+            pass
+
+        def daily_bars(self, symbols, start, end):
+            return {}
+
+    from swing.data import provider as provider_module
+
+    monkeypatch.setattr(provider_module, "get_provider", Empty)
+    reachable, detail = doctor.probe_provider(doc_config, "yfinance")
+
+    assert reachable is False
+    assert "no bars" in detail
+
+
+# ---------------------------------------------------------------------------
 # cache checks
 # ---------------------------------------------------------------------------
 def test_empty_cache_warns_with_the_backfill_command(doc_config):
@@ -188,6 +307,46 @@ def test_a_missing_gate_report_warns_rather_than_fails(doc_config):
     check = _check(doctor.build_report(doc_config, offline=True), "backtest gate")
     assert check.status == doctor.WARN
     assert "walk-forward" in check.fix
+
+
+def test_a_clean_pass_is_reported_as_ok(doc_config, monkeypatch):
+    from swing.backtest import gate as gate_module
+
+    monkeypatch.setattr(gate_module, "check_gate",
+                        lambda cfg: gate_module.GateStatus(passed=True))
+    check = _check(doctor.build_report(doc_config, offline=True), "backtest gate")
+    assert check.status == doctor.OK
+    assert "PASS" in check.detail
+
+
+def test_a_pass_that_carries_a_caveat_warns_instead_of_going_quiet(
+    doc_config, monkeypatch
+):
+    """An aged-out validation still passes on its numbers. Silence would bury it."""
+    from swing.backtest import gate as gate_module
+
+    monkeypatch.setattr(
+        gate_module, "check_gate",
+        lambda cfg: gate_module.GateStatus(
+            passed=True, reasons=["this validation is 400 days old (generated 2025-07-14)"]
+        ),
+    )
+    check = _check(doctor.build_report(doc_config, offline=True), "backtest gate")
+
+    assert check.status == doctor.WARN
+    assert "PASS" in check.detail and "400 days old" in check.detail
+    assert "walk-forward" in check.fix
+
+
+def test_a_gate_switched_off_in_config_is_not_reported_as_a_clean_pass(doc_config):
+    """`enabled = false` passes everything; doctor has to say why it passed."""
+    data = doc_config.as_dict()
+    data["backtest"]["gate"]["enabled"] = False
+    check = _check(doctor.build_report(Config(data), offline=True), "backtest gate")
+
+    assert check.status == doctor.WARN
+    assert "disabled" in check.detail
+    assert "enabled = true" in check.fix
 
 
 def test_the_config_hash_is_reported(doc_config):

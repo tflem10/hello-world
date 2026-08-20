@@ -43,6 +43,20 @@ UNSORTED_CSV = """Date,Open,High,Low,Close,Volume
 #: A 200 response whose body is a sentence, not a CSV.
 LIMIT_BODY = "Exceeded the daily hits limit"
 
+#: What the endpoint actually serves today: HTTP 200, a JavaScript bot wall.
+CHALLENGE_BODY = (
+    "<!DOCTYPE html>\n<html><head><title>stooq.com</title>\n"
+    "<script>var c=Date.now();</script></head>\n"
+    "<body><noscript>Verification requires JavaScript.</noscript></body></html>\n"
+)
+
+#: The same wall without a doctype, and with the sentence well past the first
+#: couple of hundred characters — the marker has to be searched for, not peeked at.
+CHALLENGE_BODY_LATE = (
+    "<meta charset='utf-8'>\n" + ("<!-- padding -->\n" * 40)
+    + "<p>This page requires JavaScript to verify your browser.</p>\n"
+)
+
 #: Header present, one row truncated mid-line, and no OHLC columns at all.
 MALFORMED_CSV = "Date,Something,Else\n2024-01-02,1,2\n"
 
@@ -246,6 +260,123 @@ def test_limit_warning_fires_again_on_the_next_run(provider, monkeypatch, caplog
         r for r in caplog.records if "daily hits limit" in r.getMessage()
     ]
     assert len(limit_warnings) == 2
+
+
+# ---------------------------------------------------------------------------
+# the bot wall
+# ---------------------------------------------------------------------------
+def test_the_bot_wall_is_named_once_per_run(provider, monkeypatch, caplog):
+    """"No bars" sends you looking at the symbol; "blocked" sends you at stooq.
+
+    The wall answers every symbol identically, so this is one line per run for
+    the same reason the rate limit is.
+    """
+    monkeypatch.setattr(
+        StooqProvider, "_fetch_csv",
+        canned(dict.fromkeys(["AAA", "BBB", "CCC"], CHALLENGE_BODY)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="swing.data.stooq"):
+        bars = provider.daily_bars(["AAA", "BBB", "CCC"], START, END)
+
+    assert bars == {}
+    blocked = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "blocking automated clients" in r.getMessage()
+    ]
+    assert len(blocked) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(CHALLENGE_BODY, id="doctype-first-line"),
+        pytest.param(CHALLENGE_BODY_LATE, id="sentence-further-down"),
+    ],
+)
+def test_a_challenge_body_is_recognised_and_recorded(provider, monkeypatch, body):
+    """``blocked`` is what `swing doctor` reads to explain the empty result."""
+    monkeypatch.setattr(StooqProvider, "_fetch_csv", canned({"AAA": body}))
+
+    assert provider.daily_bars(["AAA"], START, END) == {}
+    assert provider.blocked is True
+
+
+def test_an_ordinary_empty_symbol_is_not_reported_as_blocked(provider, monkeypatch):
+    monkeypatch.setattr(StooqProvider, "_fetch_csv", canned({"AAA": "No data"}))
+
+    assert provider.daily_bars(["AAA"], START, END) == {}
+    assert provider.blocked is False
+
+
+def canned_status(status: int, body: str = ""):
+    """Build a ``requests.get`` replacement answering with one status code."""
+
+    class FakeResponse:
+        status_code = status
+        text = body
+
+    def fake_get(url, params=None, timeout=None):
+        return FakeResponse()
+
+    return fake_get
+
+
+def test_a_refused_status_is_recorded_even_though_no_body_arrives(provider, monkeypatch):
+    """The wall's other shape: a bare 404, with nothing to sniff.
+
+    Body markers cannot see this one — the fetch never gets past the status
+    line — so the status itself is what has to be kept.
+    """
+    import requests
+
+    monkeypatch.setattr(requests, "get", canned_status(404))
+
+    assert provider._fetch_csv("SPY", START, END) is None
+    assert provider.http_status["SPY"] == 404
+
+
+def test_a_refused_symbol_is_still_just_absent(provider, monkeypatch):
+    """Bar semantics do not change: a non-200 leaves the symbol out, silently."""
+    import requests
+
+    monkeypatch.setattr(requests, "get", canned_status(404))
+
+    assert provider.daily_bars(["AAA"], START, END) == {}
+    assert provider.blocked is False          # a status code is not evidence of a wall
+    assert provider.http_status == {"AAA": 404}
+
+
+def test_a_served_symbol_records_no_status(provider, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(requests, "get", canned_status(200, GOOD_CSV))
+
+    assert set(provider.daily_bars(["AAA"], START, END)) == {"AAA"}
+    assert provider.http_status == {}
+
+
+def test_recorded_statuses_are_cleared_at_the_start_of_a_run(provider, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(requests, "get", canned_status(429))
+    provider.daily_bars(["AAA"], START, END)
+    assert provider.http_status == {"AAA": 429}
+
+    monkeypatch.setattr(requests, "get", canned_status(200, GOOD_CSV))
+    provider.daily_bars(["AAA"], START, END)
+    assert provider.http_status == {}
+
+
+def test_the_blocked_flag_is_cleared_at_the_start_of_a_run(provider, monkeypatch):
+    """Per-run, like the rate-limit flag: a wall that lifts must show as lifted."""
+    monkeypatch.setattr(StooqProvider, "_fetch_csv", canned({"AAA": CHALLENGE_BODY}))
+    provider.daily_bars(["AAA"], START, END)
+    assert provider.blocked is True
+
+    monkeypatch.setattr(StooqProvider, "_fetch_csv", canned({"AAA": GOOD_CSV}))
+    assert set(provider.daily_bars(["AAA"], START, END)) == {"AAA"}
+    assert provider.blocked is False
 
 
 # ---------------------------------------------------------------------------

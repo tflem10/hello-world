@@ -14,11 +14,24 @@ import pandas as pd
 
 from ..config import Config
 from ..logging_setup import get_logger
-from .cache import BarCache, ProviderMismatch
-from .provider import DataProvider, get_provider
+from .cache import BarCache, ProviderMismatch, merge_bars
+from .provider import DataProvider, get_provider, normalize_bars
 from .universe import Symbol, build_universe
 
 log = get_logger("swing.data.pipeline")
+
+#: How far a re-fetched close may differ from the cached close for the same day
+#: before the series is treated as re-based rather than revised. A dividend
+#: re-adjustment moves every prior close by 0.3-0.6% and a split moves them by
+#: multiples, so 0.1% sits well under the smallest event worth catching and
+#: well over parquet round-trip noise.
+REBASE_TOLERANCE = 0.001
+
+#: Above this share of empty responses, "no data" means the provider is having
+#: an outage, not that the symbols are delisted — and marking them absent would
+#: hide them from every scan for `absent_retry_days`. Not a config key on
+#: purpose: it is a floor under a footgun, not a preference to tune.
+OUTAGE_ABSENT_FRACTION = 0.20
 
 
 def _cache(cfg: Config) -> BarCache:
@@ -104,7 +117,17 @@ def backfill(
         counts[sym] = len(bars)
     cache.clear_absent(list(fetched))
     absent = sorted(set(missing) - set(fetched))
-    if absent:
+    if absent and len(absent) > OUTAGE_ABSENT_FRACTION * len(missing):
+        # Epidemic absence is a provider outage wearing a delisting's clothes.
+        # Recording it would make the *next* run skip these symbols too, so one
+        # bad five minutes costs the universe a week of invisibility.
+        log.warning(
+            "%d of %d symbols returned no data (%.0f%%) — treating that as a "
+            "provider outage, not %d delistings; nothing marked absent, so the "
+            "next run retries them",
+            len(absent), len(missing), 100.0 * len(absent) / len(missing), len(absent),
+        )
+    elif absent:
         cache.mark_absent(absent, when=today)
         log.warning(
             "%d symbols returned no data (delisted, renamed, or provider hiccup); "
@@ -161,18 +184,104 @@ def update(
 
     provider = provider or get_provider(cfg)
     # One window covering the oldest stale symbol keeps this to a few batched
-    # requests instead of one request per symbol. Overlap is harmless: merge
-    # prefers fresh rows, which is also how vendor revisions get picked up.
+    # requests instead of one request per symbol. The overlap is not just
+    # harmless, it is the detector: rows for days the cache already holds are
+    # what reveal a vendor re-adjustment before it can be grafted on.
     oldest = min(stale.values())
     start = oldest - timedelta(days=5)
     log.info("updating %d symbols from %s", len(stale), start)
 
     fetched = provider.daily_bars(sorted(stale), start, as_of)
     counts: dict[str, int] = {}
+    rebased: list[str] = []
     for sym, bars in fetched.items():
-        merged = cache.upsert(sym, bars)
+        fresh = normalize_bars(bars)
+        cached = cache.read(sym)
+        drift, when = _overlap_drift(cached, fresh)
+        if drift > REBASE_TOLERANCE:
+            log.warning(
+                "%s: re-fetched closes disagree with the cache by %.2f%% on %s — "
+                "the vendor re-based the whole series (dividend or split), so "
+                "merging this window would splice two price paths; re-downloading "
+                "its full history instead",
+                sym, drift * 100.0, when,
+            )
+            rebased.append(sym)
+            continue
+        merged = merge_bars(cached, fresh)
+        cache.write(sym, merged)
         counts[sym] = len(merged)
+
+    if rebased:
+        counts.update(_redownload(cfg, cache, provider, rebased, as_of))
     return counts
+
+
+def _overlap_drift(cached: pd.DataFrame, fresh: pd.DataFrame) -> tuple[float, date | None]:
+    """Largest relative close disagreement on days both frames carry.
+
+    ``(0.0, None)`` when they share no day: no overlap is no evidence, and the
+    house rule is that a data path degrades rather than refuses.
+    """
+    if not len(cached) or not len(fresh):
+        return 0.0, None
+    overlap = cached.index.intersection(fresh.index)
+    if not len(overlap):
+        return 0.0, None
+
+    old = cached.loc[overlap, "close"]
+    diff = (fresh.loc[overlap, "close"] - old).abs() / old
+    diff = diff.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
+    worst = diff.idxmax()
+    return float(diff.loc[worst]), worst.date()
+
+
+def _redownload(
+    cfg: Config,
+    cache: BarCache,
+    provider: DataProvider,
+    symbols: list[str],
+    as_of: date,
+) -> dict[str, int]:
+    """Replace whole histories for symbols whose adjustment basis moved.
+
+    Only the symbols that actually diverged pay for this, which is what keeps a
+    corporate action costing one full download rather than a nightly re-backfill
+    of the universe.
+    """
+    start = date.fromisoformat(str(cfg.data.history_start))
+    log.info("re-downloading %d re-based symbol(s) from %s", len(symbols), start)
+    full = provider.daily_bars(sorted(symbols), start, as_of)
+
+    counts: dict[str, int] = {}
+    for sym in sorted(symbols):
+        bars = normalize_bars(full[sym]) if sym in full else None
+        if bars is None or not len(bars):
+            # A stale cache on one consistent basis still produces usable
+            # indicators; a spliced one does not. Leave it and retry tomorrow.
+            log.warning(
+                "%s: full re-download returned no bars; leaving the cached "
+                "history on its old basis rather than splicing", sym,
+            )
+            continue
+        cache.write(sym, bars)
+        counts[sym] = len(bars)
+    return counts
+
+
+def clear_absent(cfg: Config, symbols: list[str] | None = None) -> list[str]:
+    """Forget that ``symbols`` (or every symbol) ever came back empty.
+
+    The escape hatch for the negative cache: the outage guard in :func:`backfill`
+    stops it filling up during a bad night, and this empties it when something
+    got in there anyway. Returns the symbols actually cleared.
+    """
+    cache = _cache(cfg)
+    known = cache.read_absent()
+    targets = [s.upper() for s in symbols] if symbols else sorted(known)
+    cleared = [s for s in targets if s in known]
+    cache.clear_absent(cleared)
+    return cleared
 
 
 def refresh_earnings(

@@ -8,10 +8,18 @@ What it does not give you: fundamentals. The Trader API is a trading API, so
 :meth:`fundamentals` falls back to yfinance rather than returning nothing and
 silently switching off the fundamental filter for the whole universe.
 
-Everything degrades rather than fails. If the token has expired or schwab-py
-is not installed, each method logs the reason and falls back to yfinance, so a
-Friday-night token expiry produces a warning in the pick sheet instead of a
-missing pick sheet.
+Quotes, earnings dates and fundamentals degrade rather than fail: if the token
+has expired or schwab-py is not installed, each logs the reason and falls back
+to yfinance, so a Friday-night token expiry produces a warning in the pick
+sheet instead of a missing pick sheet.
+
+**Bars are the exception, deliberately.** The bar cache is stamped with the
+*configured* provider name, so yfinance bars returned from here would be
+written under a ``schwab`` stamp and the cache's own provider check would wave
+them through — two adjustment bases spliced into one series with nothing left
+to detect it. :meth:`daily_bars` therefore returns what Schwab gave it and
+nothing else; an empty result degrades to "the scan runs on cached history and
+says so", which is recoverable, unlike a corrupted cache.
 """
 
 from __future__ import annotations
@@ -65,10 +73,12 @@ class SchwabProvider:
     def daily_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, pd.DataFrame]:
+        """Schwab candles only — never the fallback's. See the module docstring."""
         try:
             client = self.client
         except (SchwabNotConfigured, Exception) as exc:
-            return self._fall_back("price history", exc).daily_bars(symbols, start, end)
+            self._no_bar_fallback(exc, len(symbols), len(symbols))
+            return {}
 
         out: dict[str, pd.DataFrame] = {}
         failures = 0
@@ -82,13 +92,22 @@ class SchwabProvider:
             if frame is not None and len(frame):
                 out[symbol] = frame
 
-        if failures and not out:
-            return self._fall_back(
-                "price history", RuntimeError(f"{failures} symbol(s) failed")
-            ).daily_bars(symbols, start, end)
         if failures:
-            log.warning("Schwab returned no history for %d symbol(s)", failures)
+            self._no_bar_fallback(
+                RuntimeError(f"{failures} symbol(s) failed"), failures, len(symbols)
+            )
         return out
+
+    def _no_bar_fallback(self, exc: Exception, failed: int, asked: int) -> None:
+        """One warning per call: bars are missing, and they will stay missing."""
+        log.warning(
+            "Schwab price history unavailable for %d of %d symbol(s) (%s). Bars do "
+            "NOT fall back to yfinance: this cache is stamped 'schwab' and the two "
+            "sources adjust prices differently, so substituted bars would splice "
+            "two price series into one undetectably. The scan runs on cached "
+            "history instead — fix the source with: swing auth",
+            failed, asked, exc,
+        )
 
     def _history_for(self, client, symbol: str, start: date, end: date):
         response = client.get_price_history_every_day(

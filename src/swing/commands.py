@@ -28,8 +28,16 @@ def cmd_universe(args: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_data(args: argparse.Namespace, cfg: Config) -> int:
     from .data.cache import ProviderMismatch
-    from .data.pipeline import backfill, cache_status, update
+    from .data.pipeline import backfill, cache_status, clear_absent, update
 
+    if args.clear_absent is not None:
+        cleared = clear_absent(cfg, args.clear_absent)
+        if cleared:
+            print(f"cleared {len(cleared)} symbol(s) from the absent list: "
+                  + ", ".join(cleared))
+        else:
+            print("no symbols were marked absent; nothing to clear")
+        return 0
     if args.status or not (args.backfill or args.update):
         print(cache_status(cfg))
         return 0

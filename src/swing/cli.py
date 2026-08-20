@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--update", action="store_true", help="fetch only missing recent bars")
     sp.add_argument("--symbols", nargs="*", help="limit to these symbols")
     sp.add_argument("--status", action="store_true", help="print cache coverage")
+    sp.add_argument("--clear-absent", nargs="*", metavar="SYM", default=None,
+                    help="forget symbols marked absent (all of them if none named)")
 
     # -- backtest -----------------------------------------------------------
     sp = sub.add_parser("backtest", help="run the backtester and write a report")

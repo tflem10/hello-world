@@ -144,7 +144,8 @@ swing positions           # what the journal thinks you hold
 
 Update `[account] equity` whenever your balance moves meaningfully. Everything
 is sized off that number, and `swing execute` blocks when it drifts more than
-20% from the broker's own figure.
+20% from the broker's own figure. It is not part of the config hash, so this
+costs you nothing at the gate.
 
 ## Monthly / after any strategy change
 
@@ -156,6 +157,15 @@ swing backtest --walk-forward     # re-validate; the gate is bound to the config
 Any edit to `[account]`, `[universe]`, `[strategy]` or `[backtest]` changes the
 config hash, which re-locks the gate until you re-run the walk-forward. This is
 deliberate: it makes "just nudge the stop and see" cost something.
+
+Three `[account]` keys are exempt — `equity`, `stale_equity_tolerance_pct` and
+`currency` (`HASH_EXCLUDED_ACCOUNT_KEYS` in `src/swing/config.py`). Backtests
+size from `[backtest] initial_equity`, never from `account.equity`, so a report
+is byte-identical whatever your balance says. **Recording a deposit no longer
+re-locks the gate**, which is the point: leaving `equity` stale to avoid a
+25-minute re-run corrupted every live share count. The rest of `[account]` —
+`risk_pct`, `max_position_pct`, `max_concurrent_positions` — stays hashed,
+because those do change the trades.
 
 ### Closing the earnings gap in the backtest
 
@@ -243,20 +253,64 @@ scan warns "data refresh failed" and the sheet is based on yesterday's prices.
 - Try `uv pip install --python .venv/bin/python -U yfinance` — breakage is
   usually fixed upstream within days.
 - If you have Schwab approved, set `[data] provider = "schwab"`.
-- Otherwise set `[data] provider = "stooq"` — a free daily CSV source that
-  needs no key. **Delete `data/cache/` and re-backfill when you switch**: the
-  cache does not record which provider wrote a file, so mixing sources splices
-  two adjustment bases into one series and manufactures a price jump out of
-  nothing. Stooq bars are split-adjusted but **not dividend-adjusted**, so
-  numbers from a long backtest drift from yfinance's; it also publishes no
-  earnings dates or fundamentals, so those soft filters fail open. Fine for
-  keeping the nightly scan alive, not a substitute for re-validating on
-  yfinance or Schwab data.
+- **The stooq fallback does not currently work.** Stooq now fronts its CSV
+  endpoint with a bot wall, and what it answers depends on what it takes you
+  for: our `requests` client gets a bare **HTTP 404 for `spy.us`** — a symbol
+  that plainly exists — while a browser-shaped client gets HTTP 200 and a
+  JavaScript challenge page. `swing doctor` names whichever one it hit:
+
+  ```
+  [warn] provider:stooq   reachable but HTTP 404 for SPY — refusing this client (bot wall), not the symbol
+  [warn] provider:stooq   reachable but blocked by bot protection (JavaScript challenge)
+  ```
+
+  Either way there is no working second source behind yfinance right now.
+  Restoring one means adding a keyed provider (Tiingo, Alpha Vantage), not
+  working around the wall.
+- If stooq ever answers again, `[data] provider = "stooq"` still works, and the
+  old caveats still apply: **delete `data/cache/` and re-backfill when you
+  switch** (the cache is stamped with one provider and refuses the other), stooq
+  bars are split-adjusted but **not dividend-adjusted** so long backtests drift
+  from yfinance's, and it publishes no earnings dates or fundamentals, so those
+  soft filters fail open.
+
+### Symbols went missing from the scan
+
+Symbols that come back empty are recorded in `data/cache/absent.json` and
+skipped for `[data] absent_retry_days` (7), so a delisted ticker is not
+re-requested every night. A provider having a bad five minutes looks identical
+from here, so `swing data --backfill` refuses to record the list at all when
+more than 20% of what it asked for comes back empty — it logs an outage warning
+instead and retries everything next run.
+
+If a name you know is live is being skipped anyway:
+
+```bash
+swing data --clear-absent BK CTRA     # forget these
+swing data --clear-absent             # forget all of them
+swing data --backfill                 # then re-download
+```
+
+### The update re-downloaded a symbol's whole history
+
+Expected, and the point. The nightly update fetches a few days of overlap with
+what the cache already holds and compares the closes. A dividend or a split
+makes the vendor restate the *entire* series, so those overlapping days come
+back on a new basis; merging them would leave a step at the boundary and every
+indicator with a lookback across it would be computed on a price path that
+never existed. More than 0.1% disagreement and that symbol — only that symbol —
+is re-downloaded from `[data] history_start`. The log names it and the
+divergence. Several a night around ex-dividend dates is normal; the whole
+universe at once means the provider re-based everything, and it is worth
+checking a chart before trusting tonight's sheet.
 
 ### The Schwab token expired
 
-Data falls back to yfinance and the pick sheet carries a warning. Order
-placement does **not** fall back — `swing execute` refuses outright. Run
+Quotes, earnings dates and fundamentals fall back to yfinance and the pick sheet
+carries a warning. **Bars do not fall back** — the cache is stamped `schwab`, so
+yfinance bars written into it would splice two adjustment bases into one series
+with nothing left to detect it. The scan runs on cached history and says so.
+Order placement does not fall back either: `swing execute` refuses outright. Run
 `swing auth`.
 
 ### An order was rejected
@@ -342,7 +396,7 @@ instructions is the variant the backtest actually validated.
 |---|---|
 | `config.toml` | every setting. Secrets. chmod 600, gitignored. |
 | `data/cache/bars/*.parquet` | price history. Safe to delete; re-backfill. |
-| `data/cache/absent.json` | symbols that returned nothing, skipped for a week |
+| `data/cache/absent.json` | symbols that returned nothing, skipped for a week. Empty it with `swing data --clear-absent` |
 | your `[data] earnings_calendar` CSV | optional; the backtest reads it and records it in the report manifest |
 | `reports/YYYY-MM-DD-walkforward/` | the report the gate reads |
 | `reports/scan-YYYY-MM-DD/` | pick sheet, renderings, drafted order JSON |

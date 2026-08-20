@@ -113,17 +113,32 @@ def test_backfill_skips_symbols_already_cached(base_config):
     assert len(provider.bar_calls) == 1     # second call had nothing to fetch
 
 
+def _universe_of(cfg: Config, n: int) -> Config:
+    """A config whose universe is ``n`` symbols (the regime symbol joins them).
+
+    Wide enough that one dead ticker stays under the outage threshold: above it,
+    empty responses mean "the provider is down" and nothing is recorded at all
+    (tests/test_pipeline.py owns that boundary).
+    """
+    data = cfg.as_dict()
+    data["universe"]["extra_symbols"] = [f"S{i:02d}" for i in range(n)]
+    return Config(data)
+
+
 def test_symbols_that_return_nothing_are_not_re_requested(base_config):
     """A delisted ticker must not be re-downloaded every night."""
-    provider = FakeProvider(bars={"AAA": trending_bars(n=100)})   # BBB, SPY absent
-    backfill(base_config, provider=provider)
-    assert set(provider.bar_calls[0][0]) == {"AAA", "BBB", "SPY"}
+    cfg = _universe_of(base_config, 9)                       # + SPY = 10 requested
+    served = [f"S{i:02d}" for i in range(8)] + ["SPY"]
+    provider = FakeProvider(bars={s: trending_bars(n=100) for s in served})
 
-    backfill(base_config, provider=provider)
+    backfill(cfg, provider=provider)
+    assert "S08" in provider.bar_calls[0][0]
+
+    backfill(cfg, provider=provider)
     assert len(provider.bar_calls) == 1
 
     # ...but the skip expires, so a provider outage is not permanent.
-    cache = BarCache(base_config.expand_path(base_config.data.cache_dir))
+    cache = BarCache(cfg.expand_path(cfg.data.cache_dir))
     assert cache.absent_symbols(retry_after_days=0) == set()
 
 
@@ -177,13 +192,17 @@ def test_coverage_handles_small_and_empty_caches(tmp_path, n):
 
 def test_update_does_not_re_request_known_absent_symbols(base_config):
     """The nightly update must not hammer the provider for dead tickers."""
-    provider = FakeProvider(bars={"AAA": trending_bars(n=100, start="2020-01-01")})
-    last = provider._bars["AAA"].index[-1].date()
+    cfg = _universe_of(base_config, 9)                       # + SPY = 10 requested
+    served = [f"S{i:02d}" for i in range(8)] + ["SPY"]
+    provider = FakeProvider(
+        bars={s: trending_bars(n=100, start="2020-01-01") for s in served}
+    )
+    last = provider._bars["SPY"].index[-1].date()
 
-    update(base_config, provider=provider, as_of=last)
+    update(cfg, provider=provider, as_of=last)
     calls_after_first = len(provider.bar_calls)
 
-    update(base_config, provider=provider, as_of=last)
+    update(cfg, provider=provider, as_of=last)
     assert len(provider.bar_calls) == calls_after_first
 
 

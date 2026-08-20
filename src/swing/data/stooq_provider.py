@@ -1,9 +1,21 @@
 """Free daily data via Stooq's CSV endpoint — the fallback when yfinance breaks.
 
-yfinance is the default, and it is the least reliable link in the chain: Yahoo's
-endpoints are undocumented and change without notice. Stooq publishes a plain,
-stable CSV download (``/q/d/l/?s=aapl.us&i=d``) with no API key and no approval
-wait, which makes it a good second source to fail over to.
+**This fallback is currently unavailable.** Stooq now fronts ``/q/d/l/`` with a
+bot wall, and the wall answers differently depending on what it thinks you are:
+a browser-shaped client gets HTTP 200 with an HTML JavaScript challenge instead
+of CSV, while the plain ``requests`` client this module uses gets a bare HTTP
+404 — for ``spy.us``, which certainly exists. Both shapes are detected, by
+different means: the challenge page by body markers (:data:`CHALLENGE_MARKERS`),
+the bare refusal by :attr:`StooqProvider.http_status`, since a status code
+carries no evidence on its own. The provider degrades correctly either way (no
+bars, no exception), but there is no working second source behind yfinance
+today. Treat this module as the shape a fallback takes, not as one you can rely
+on; restoring redundancy means a keyed source (Tiingo, Alpha Vantage) rather
+than working around a wall the operator put up on purpose.
+
+The rest of this docstring describes what the endpoint used to serve, and still
+would if it answered: a plain CSV download (``/q/d/l/?s=aapl.us&i=d``) with no
+API key and no approval wait.
 
 What you give up, stated rather than hidden
 -------------------------------------------
@@ -53,6 +65,16 @@ RATE_LIMIT_MARKER = "exceeded the daily hits limit"
 #: Body a valid-looking but empty symbol/date window comes back with.
 NO_DATA_MARKERS = ("no data", "brak danych")
 
+#: One of the two shapes the bot wall takes: HTTP 200, an HTML page carrying a
+#: JavaScript challenge, no CSV anywhere in it. Sniffed out of the body for the
+#: same reason the rate limit is — the status code says nothing is wrong. The
+#: other shape is a bare non-200; see :attr:`StooqProvider.http_status`.
+CHALLENGE_MARKERS = ("<!doctype", "<html", "requires javascript")
+
+#: How much of the body to search for :data:`CHALLENGE_MARKERS`. The doctype is
+#: on line one; the "requires JavaScript" sentence sits further into the page.
+CHALLENGE_SCAN_CHARS = 2000
+
 #: How many calendar days of history :meth:`quotes` asks for. Long enough to
 #: clear a long weekend plus a holiday, short enough to stay cheap.
 QUOTE_LOOKBACK_DAYS = 7
@@ -70,6 +92,15 @@ class StooqProvider:
         # bury the one line that matters.
         self._limit_warned = False
         self._no_extras_logged = False
+        #: True once this run has seen the bot wall's challenge page. Public
+        #: because `swing doctor` reports "blocked" rather than "no bars".
+        self.blocked = False
+        #: Symbol -> HTTP status for every non-200 answer this run. Recorded as
+        #: fact, not judged: a 404 for an arbitrary ticker means "no such
+        #: symbol", while a 404 for one that certainly exists means the server
+        #: is refusing *us*. Only a caller who knows the symbol is real can tell
+        #: those apart, which is why the diagnosis lives in `swing doctor`.
+        self.http_status: dict[str, int] = {}
 
     # -- bars --------------------------------------------------------------
     def daily_bars(
@@ -78,6 +109,8 @@ class StooqProvider:
         symbols = [s.upper() for s in symbols]
         out: dict[str, pd.DataFrame] = {}
         self._limit_warned = False
+        self.blocked = False
+        self.http_status = {}
 
         for sym in symbols:
             try:
@@ -120,6 +153,10 @@ class StooqProvider:
                 time.sleep(self.pause)
 
         if resp.status_code != 200:
+            # Bar semantics are unchanged — the symbol is simply absent. The
+            # status is kept only so a caller that knows the symbol is real can
+            # tell a refusal from a delisting.
+            self.http_status[symbol] = resp.status_code
             log.debug("stooq HTTP %s for %s", resp.status_code, symbol)
             return None
         return resp.text
@@ -151,6 +188,17 @@ class StooqProvider:
             return None
         if any(marker in head for marker in NO_DATA_MARKERS):
             log.debug("stooq has no data for %s", symbol)
+            return None
+        body_head = text[:CHALLENGE_SCAN_CHARS].lower()
+        if any(marker in body_head for marker in CHALLENGE_MARKERS):
+            if not self.blocked:
+                self.blocked = True
+                log.warning(
+                    "stooq is blocking automated clients: a JavaScript challenge "
+                    "page came back with HTTP 200 instead of CSV. This is not a "
+                    "missing symbol — the fallback provider is unavailable for "
+                    "every symbol this run"
+                )
             return None
 
         try:
