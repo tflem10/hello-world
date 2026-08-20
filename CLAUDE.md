@@ -22,7 +22,7 @@ swing scan --dry-run                    # a pick sheet, nothing sent
 swing journal add|exit|stop|show        # record manual fills, ratchet stops, read the log
 ```
 
-Tests are fast (~20s, 471 of them) and hermetic. Run the full suite after any
+Tests are fast (~20s, 589 of them) and hermetic. Run the full suite after any
 change: it layers `config.example.toml` under its fixtures, so editing that
 file breaks tests far away from it.
 
@@ -54,6 +54,12 @@ reporting, data-source and operational knobs under `[data]`, `[reports]`,
 `[execution]`, `[alerts]`, `[schedule]` instead — see `[data]
 earnings_calendar` and `[reports.bootstrap]`, both deliberately placed to keep
 the hash stable.
+
+Three `[account]` keys are excluded (`HASH_EXCLUDED_ACCOUNT_KEYS` in
+config.py): `equity`, `stale_equity_tolerance_pct` and `currency`. Backtests
+size from `backtest.initial_equity`, so recording a deposit cannot move an
+out-of-sample number and no longer re-locks the gate. The rest of `[account]`
+— `risk_pct`, `max_position_pct`, `max_concurrent_positions` — still does.
 
 ## Conventions
 

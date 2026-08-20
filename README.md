@@ -250,7 +250,7 @@ docs/
   indicator-research.md     every default traced to evidence or an ablation
   schwab-setup.md           developer account → first live quote
   runbook.md                daily/weekly operation and failure recovery
-tests/                      471 tests, no network
+tests/                      589 tests, no network
 ```
 
 ---
