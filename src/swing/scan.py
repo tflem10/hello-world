@@ -128,7 +128,12 @@ def run_scan(
 
     # -- 3. regime ---------------------------------------------------------
     regime_symbol = str(cfg.strategy.regime.get("symbol", "SPY")).upper()
-    benchmark = bars.get(regime_symbol) or load_bars(cfg, [regime_symbol]).get(regime_symbol)
+    # `bars.get(...) or ...` is a ValueError here: pandas refuses to take the
+    # truth value of a DataFrame, and the benchmark is in `bars` whenever it is
+    # also in the universe (SPY ships in data/universe/etfs.csv).
+    benchmark = bars.get(regime_symbol)
+    if benchmark is None:
+        benchmark = load_bars(cfg, [regime_symbol]).get(regime_symbol)
     regime_ok, regime_note = _evaluate_regime(cfg, benchmark, as_of_ts, warnings)
 
     # -- 4. holdings -------------------------------------------------------
@@ -570,7 +575,11 @@ def _parse_date(value: str) -> date | None:
 def _gate_note(gate, force: bool) -> str:
     if gate.passed:
         checks = ", ".join(f"{name} {actual:.2f}" for name, actual, _, _ in gate.checked)
-        return f"cleared ({checks})" if checks else (gate.reasons[0] if gate.reasons else "")
+        # A gate can pass and still have something to say — a report old enough
+        # to be worth re-running is the case that exists today. Saying only
+        # "cleared" would hide it.
+        note = f"cleared ({checks})" if checks else ""
+        return "; ".join(part for part in (note, *gate.reasons) if part)
     prefix = "OVERRIDDEN with --force: " if force else ""
     return prefix + "; ".join(gate.reasons)
 

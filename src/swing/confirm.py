@@ -80,12 +80,20 @@ def run_confirm(
     counts = {STATUS_CONFIRMED: 0, STATUS_ADJUSTED: 0, STATUS_INVALIDATED: 0}
     stale_quotes = False
 
-    for pick in sheet.picks:
+    # Re-size in rank order against a decrementing balance, exactly as
+    # `scan._size_and_draft` does. Sizing every pick against the full cash
+    # balance lets two gapped-down picks each grow into money the other one is
+    # already spending; the best-ranked pick gets the cash first.
+    cash_left = sheet.available_cash
+    for pick in sorted(sheet.picks, key=lambda p: p.rank):
         quote = quotes.get(pick.symbol)
         if quote is None:
+            # No quote: the overnight order stands as written, so its cash is
+            # still spoken for.
+            cash_left -= pick.notional
             continue
         stale_quotes = stale_quotes or quote.stale
-        _apply_quote(cfg, sheet, pick, quote)
+        cash_left -= _apply_quote(cfg, sheet, pick, quote, max(cash_left, 0.0))
         counts[pick.status] = counts.get(pick.status, 0) + 1
 
     if stale_quotes:
@@ -130,8 +138,15 @@ def run_confirm(
     return 0
 
 
-def _apply_quote(cfg: Config, sheet: PickSheet, pick, quote: Quote) -> None:
-    """Re-classify one pick against a fresh quote, re-sizing where appropriate."""
+def _apply_quote(
+    cfg: Config, sheet: PickSheet, pick, quote: Quote, cash_left: float
+) -> float:
+    """Re-classify one pick against a fresh quote, re-sizing where appropriate.
+
+    ``cash_left`` is the cash the better-ranked picks have not already claimed.
+    Returns the dollars this pick commits after re-classification, so the caller
+    can hand the remainder to the next one.
+    """
     s = cfg.strategy
     price = float(quote.price)
     pick.confirm_price = price
@@ -145,21 +160,18 @@ def _apply_quote(cfg: Config, sheet: PickSheet, pick, quote: Quote) -> None:
     max_pct = float(cfg.execution.get("max_quote_drift_pct", 0.03))
 
     if abs(drift_atr) > max_atr or abs(drift_pct) > max_pct:
-        pick.status = STATUS_INVALIDATED
-        pick.shares = 0
-        pick.orders = {}
         direction = "gapped up" if drift > 0 else "gapped down"
-        pick.confirm_note = (
+        return _cancel(
+            pick,
             f"CANCELLED — {price:.2f} {direction} {drift_pct:+.1%} "
             f"({drift_atr:+.2f} ATR) from the {reference:.2f} reference; "
-            f"limit is {max_atr:g} ATR / {max_pct:.0%}"
+            f"limit is {max_atr:g} ATR / {max_pct:.0%}",
         )
-        return
 
     if abs(drift_pct) < 0.002:
         pick.status = STATUS_CONFIRMED
         pick.confirm_note = f"confirmed at {price:.2f} ({drift_pct:+.2%})"
-        return
+        return pick.notional
 
     # Re-size against the new price so the dollar risk stays put.
     stop = rules.initial_stop(price, pick.atr, s)
@@ -169,17 +181,14 @@ def _apply_quote(cfg: Config, sheet: PickSheet, pick, quote: Quote) -> None:
         equity=sheet.equity,
         risk_pct=float(cfg.account.risk_pct),
         max_position_pct=float(cfg.account.max_position_pct),
-        available_cash=sheet.available_cash,
+        available_cash=cash_left,
     )
     if not size.affordable:
-        pick.status = STATUS_INVALIDATED
-        pick.shares = 0
-        pick.orders = {}
-        pick.confirm_note = (
+        return _cancel(
+            pick,
             f"CANCELLED — at {price:.2f} the position no longer sizes: "
-            f"{size.notes[0] if size.notes else size.limit.value}"
+            f"{size.notes[0] if size.notes else size.limit.value}",
         )
-        return
 
     old_shares = pick.shares
     pick.status = STATUS_ADJUSTED
@@ -209,10 +218,28 @@ def _apply_quote(cfg: Config, sheet: PickSheet, pick, quote: Quote) -> None:
         for name, order in pick.orders.items():
             validate_order(order, path=f"{pick.symbol}.{name}")
     except OrderValidationError as exc:
-        pick.status = STATUS_INVALIDATED
-        pick.shares = 0
-        pick.orders = {}
-        pick.confirm_note = f"CANCELLED — re-drafted order failed validation: {exc}"
+        return _cancel(pick, f"CANCELLED — re-drafted order failed validation: {exc}")
+
+    return pick.notional
+
+
+def _cancel(pick, note: str) -> float:
+    """Strike a pick: no shares, no order, and no dollars left claimed.
+
+    ``scan._size_and_draft`` reports zeros for everything it did not take, and
+    a cancelled pick still carrying last night's notional would keep that cash
+    spoken for — both on the sheet and in the balance handed to the next pick.
+    Returns the dollars committed, which is none.
+    """
+    pick.status = STATUS_INVALIDATED
+    pick.shares = 0
+    pick.orders = {}
+    pick.notional = 0.0
+    pick.risk_dollars = 0.0
+    pick.risk_pct = 0.0
+    pick.equity_pct = 0.0
+    pick.confirm_note = note
+    return 0.0
 
 
 def _rewrite_orders(out_dir: Path, sheet: PickSheet) -> None:

@@ -246,6 +246,16 @@ log_dir = "~/.swing/logs"
 [reports]
 dir = "reports"
 open_in_browser = false
+# How old a passing walk-forward report may get before the scan says so. The
+# gate re-locks when the config changes; nothing re-locks it as time passes,
+# so a 2026 validation would otherwise still be opening the gate in 2028 over a
+# cache that has churned every night since. This is a WARNING on the pick sheet,
+# not a block — a stale validation is a reason to re-run the walk-forward, not a
+# reason to have no picks tonight. 0 = never warn.
+#
+# Lives under [reports] rather than [backtest] on purpose: a knob in a
+# hash-covered section would re-lock every user's gate (see Config.hash).
+max_walkforward_age_days = 90
 
   [reports.bootstrap]
   # Circular block-bootstrap confidence intervals on the walk-forward

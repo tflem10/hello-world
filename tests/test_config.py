@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import pytest
 
-from swing.config import Config, ConfigError, load_config
+from swing.config import EXAMPLE_CONFIG_PATH, Config, ConfigError, load_config
 
 
 def test_example_config_loads():
@@ -32,6 +34,52 @@ def test_hash_is_stable_and_ignores_alert_settings():
     assert Config(data).hash == base
     data["account"]["risk_pct"] = 0.03
     assert Config(data).hash != base
+
+
+def test_hash_ignores_the_account_balance_but_not_the_risk_settings():
+    """Recording a deposit must not re-lock the gate.
+
+    Backtests size from `backtest.initial_equity`; `account.equity` cannot move
+    a single out-of-sample number, so hashing it made every balance edit cost a
+    walk-forward re-run that could only reproduce the same report. The keys that
+    *do* change the trades stay in.
+    """
+    cfg = load_config()
+    base = cfg.hash
+
+    for key, value in (
+        ("equity", float(cfg.account.equity) * 3 + 1_000.0),
+        ("stale_equity_tolerance_pct", 0.05),
+        ("currency", "EUR"),
+    ):
+        data = cfg.as_dict()
+        data["account"][key] = value
+        assert Config(data).hash == base, key
+
+    for key, value in (
+        ("risk_pct", 0.03),
+        ("max_position_pct", 0.50),
+        ("max_concurrent_positions", 9),
+    ):
+        data = cfg.as_dict()
+        data["account"][key] = value
+        assert Config(data).hash != base, key
+
+
+def test_the_report_age_limit_is_outside_every_hashed_section():
+    """A knob under [account]/[universe]/[strategy]/[backtest] re-locks the gate
+    for every user — so the walk-forward staleness limit lives under [reports]."""
+    example = tomllib.loads(EXAMPLE_CONFIG_PATH.read_text())
+    assert example["reports"]["max_walkforward_age_days"] == 90
+    assert all(
+        "max_walkforward_age_days" not in example[section]
+        for section in ("account", "universe", "strategy", "backtest")
+    )
+
+    cfg = load_config()
+    data = cfg.as_dict()
+    data["reports"]["max_walkforward_age_days"] = 7
+    assert Config(data).hash == cfg.hash
 
 
 def test_user_config_layers_over_example(tmp_path):

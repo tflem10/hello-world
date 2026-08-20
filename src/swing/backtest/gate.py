@@ -10,12 +10,18 @@ hand-tuned parameter set go straight to your phone.
 The gate is a floor, not an endorsement. Clearing it means the numbers met the
 minimums you wrote down before looking; it says nothing about whether the
 strategy will work next year.
+
+Age is said out loud but not enforced: a report older than ``[reports]
+max_walkforward_age_days`` still opens the gate and carries a warning into the
+pick sheet, because a stale validation is a reason to re-run the walk-forward,
+not a reason to have no picks tonight.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 from ..config import Config
@@ -136,8 +142,42 @@ def check_gate(cfg: Config) -> GateStatus:
         reasons.append(f"out-of-sample Sharpe {sharpe:.2f} is below {min_sharpe:g}")
 
     passed = all(item[3] for item in checks)
+
+    # Staleness is a warning, never a block: the numbers in this report did
+    # clear the thresholds, and locking the only validated config out of the
+    # scan would leave the user with no picks and no way to get any tonight.
+    stale = _staleness_warning(cfg, manifest)
+    if stale:
+        reasons.append(stale)
+        log.warning("%s", stale)
+
     return GateStatus(
         passed=passed, reasons=reasons, report_path=path, metrics=metrics, checked=checks
+    )
+
+
+def _staleness_warning(cfg: Config, manifest: dict) -> str:
+    """How old the validation is, if that is worth saying. '' otherwise.
+
+    The gate re-locks when the *config* changes, but nothing re-locks it as
+    time passes and the cache underneath it churns nightly. A report from two
+    years ago says nothing about the strategy you are trading tonight.
+    """
+    max_age = int(cfg.reports.get("max_walkforward_age_days", 90) or 0)
+    if max_age <= 0:
+        return ""
+    stamp = str(manifest.get("generated_at", ""))
+    try:
+        generated = datetime.fromisoformat(stamp).date()
+    except ValueError:
+        return ""
+    age = (date.today() - generated).days
+    if age <= max_age:
+        return ""
+    return (
+        f"this validation is {age} days old (generated {generated}; the limit is "
+        f"{max_age} days). The gate still passes on its numbers, but the data "
+        "underneath has moved on — re-run `swing backtest --walk-forward`."
     )
 
 

@@ -21,6 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config.toml"
 EXAMPLE_CONFIG_PATH = REPO_ROOT / "config.example.toml"
 
+#: ``[account]`` keys that cannot change a backtested outcome. Backtests size
+#: from ``backtest.initial_equity``, never ``account.equity``, so hashing these
+#: would re-lock the gate on every deposit while the report they invalidate is
+#: byte-identical. The rest of ``[account]`` — risk_pct, max_position_pct,
+#: max_concurrent_positions — stays hashed: those do change the trades.
+HASH_EXCLUDED_ACCOUNT_KEYS = ("equity", "stale_equity_tolerance_pct", "currency")
+
 
 class ConfigError(RuntimeError):
     """Raised when the configuration is missing or structurally invalid."""
@@ -92,12 +99,19 @@ class Config(Section):
 
         Alerts, SMTP credentials and schedule times do not change trade
         outcomes, so they are excluded — otherwise flipping an email address
-        would invalidate a perfectly good backtest.
+        would invalidate a perfectly good backtest. Same reasoning inside
+        ``[account]``: see :data:`HASH_EXCLUDED_ACCOUNT_KEYS`, which is why
+        recording a deposit no longer re-locks the gate.
         """
         relevant = {
             k: self._data.get(k)
             for k in ("account", "universe", "strategy", "backtest")
         }
+        account = relevant.get("account")
+        if isinstance(account, dict):
+            relevant["account"] = {
+                k: v for k, v in account.items() if k not in HASH_EXCLUDED_ACCOUNT_KEYS
+            }
         blob = json.dumps(relevant, sort_keys=True, default=str).encode()
         return hashlib.sha256(blob).hexdigest()[:12]
 

@@ -108,6 +108,17 @@ class HoldingAction:
     detail: str
 
 
+def _known_fields(cls, payload: dict) -> Any:
+    """Build ``cls`` from stored JSON, ignoring keys this version doesn't know.
+
+    Sheets outlive the code that wrote them: ``swing confirm`` and ``swing
+    execute`` read yesterday's file, which may have been written before or
+    after an upgrade. An unrecognised key is not a reason to refuse to load a
+    day's picks — the sheet-level fields already read this tolerantly.
+    """
+    return cls(**{k: v for k, v in payload.items() if k in cls.__dataclass_fields__})
+
+
 @dataclass
 class PickSheet:
     as_of: str
@@ -170,9 +181,11 @@ class PickSheet:
             swing_version=payload.get("swing_version", ""),
             warnings=payload.get("warnings", []),
         )
-        sheet.picks = [Pick(**p) for p in payload.get("picks", [])]
-        sheet.watch = [Pick(**p) for p in payload.get("watch", [])]
-        sheet.holdings = [HoldingAction(**h) for h in payload.get("holdings", [])]
+        sheet.picks = [_known_fields(Pick, p) for p in payload.get("picks", [])]
+        sheet.watch = [_known_fields(Pick, p) for p in payload.get("watch", [])]
+        sheet.holdings = [
+            _known_fields(HoldingAction, h) for h in payload.get("holdings", [])
+        ]
         return sheet
 
     # -- rendering ---------------------------------------------------------
