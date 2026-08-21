@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import math
 import tomllib
 import warnings
 from dataclasses import MISSING, dataclass, field, fields, replace
@@ -36,6 +37,8 @@ from typing import Any, get_args, get_origin
 __all__ = [
     "MAX_LOOKBACK_BARS",
     "MAX_MOMENTUM_LOOKBACK_BARS",
+    "MAX_TUNING_COMBINATIONS",
+    "TUNABLE_PARAMS",
     "AccountCfg",
     "AlertsCfg",
     "BacktestCfg",
@@ -76,6 +79,37 @@ MAX_MOMENTUM_LOOKBACK_BARS = 250
 
 #: The momentum window the ranking blend reaches furthest back for.
 _MOMENTUM_LOOKBACK_BARS = 126
+
+#: The only parameters a walk-forward tuning grid may name.
+#:
+#: The probability that a backtest is overfitted rises with the number of
+#: trials, so this list is short on purpose and is the thing a research change
+#: has to argue past. It is mirrored by
+#: :data:`swing.backtest.walkforward.TUNING_GRID`, whose keys must stay
+#: identical to these (a test pins the pair together).
+TUNABLE_PARAMS: tuple[str, ...] = (
+    "atr_stop_mult",
+    "chandelier_mult",
+    "donchian_window",
+    "volume_mult",
+)
+
+#: The most parameter combinations one ``[backtest.tuning_grid]`` may ask for.
+#:
+#: Every combination is simulated over every symbol in every walk-forward fold,
+#: so the bill is combinations x folds x symbols; the default grid spends 81 of
+#: this budget. The cap is a cost ceiling first and an honesty ceiling second —
+#: a grid that searches harder buys in-sample fit with out-of-sample credibility.
+MAX_TUNING_COMBINATIONS = 512
+
+#: What each tunable candidate must be, before its range is checked. Mirrors the
+#: annotation the matching :class:`StrategyCfg` field carries.
+_TUNABLE_TYPES: dict[str, type] = {
+    "atr_stop_mult": float,
+    "chandelier_mult": float,
+    "donchian_window": int,
+    "volume_mult": float,
+}
 
 
 class ConfigError(ValueError):
@@ -158,6 +192,34 @@ def _hhmm(value: str, section: str, key: str) -> None:
         section,
         key,
     )
+
+
+def _check_tunable_value(name: str, value: Any, key: str) -> None:
+    """Hold one tuning-grid candidate to the constraint ``[strategy]`` puts on it.
+
+    The walk-forward writes the value it picks straight into
+    :class:`StrategyCfg`, so a candidate the strategy would refuse is not a
+    smaller mistake for being offered rather than configured — it is the same
+    mistake, discovered several hundred simulations later. The wording is kept
+    identical to the ``[strategy]`` check on purpose; a test asserts the two
+    accept and refuse exactly the same values.
+    """
+    if name == "atr_stop_mult":
+        _positive(value, "backtest", key, "initial stop distance in ATRs")
+    elif name == "chandelier_mult":
+        _positive(value, "backtest", key, "trailing stop distance in ATRs")
+    elif name == "volume_mult":
+        _positive(value, "backtest", key, "breakout volume vs its average, a multiple")
+    else:  # donchian_window
+        _at_least(value, 2, "backtest", key, "a lookback window in bars")
+        _require(
+            value <= MAX_LOOKBACK_BARS,
+            f"backtest.{key} (a lookback window in bars) must be at most {MAX_LOOKBACK_BARS}, "
+            f"but it is {value}. Longer than that and the window never fills from the history "
+            f"swing fetches, so every scan would come back empty.",
+            "backtest",
+            key,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -568,6 +630,14 @@ class BacktestCfg:
     #: fixed, comparable capital base. Sized on a real $100 account, whole-share
     #: rounding would reject nearly every entry and the run would prove nothing.
     initial_equity: float = 10_000.0
+    #: Candidate values the walk-forward may choose between, one list per
+    #: parameter, written as a ``[backtest.tuning_grid]`` table. ``None`` — the
+    #: default — means the standard grid in
+    #: :data:`swing.backtest.walkforward.TUNING_GRID`, so an absent section
+    #: reproduces every report written before this knob existed. Naming only
+    #: some of :data:`TUNABLE_PARAMS` is allowed and means the rest are not
+    #: tuned at all: they keep their ``[strategy]`` value in every fold.
+    tuning_grid: dict[str, tuple[Any, ...]] | None = None
 
     def __post_init__(self) -> None:
         _coerce(self)
@@ -618,6 +688,95 @@ class BacktestCfg:
             "the reference capital the backtest trades with — below $100 whole-share rounding "
             "rejects almost every entry, so the run would measure nothing",
         )
+        self._check_tuning_grid()
+
+    def _check_tuning_grid(self) -> None:
+        """Validate ``[backtest.tuning_grid]`` and store it in a canonical order.
+
+        This table decides what the walk-forward tuner is *allowed* to choose,
+        which makes a mistake here quieter than most: a misspelled parameter or
+        a value the strategy cannot take does not crash a run, it silently runs
+        a different experiment and reports it as this one. So the parameter
+        list is closed, every candidate faces the same limits ``[strategy]``
+        imposes, and the combination count is capped.
+
+        Key order is normalised to :data:`TUNABLE_PARAMS` rather than left as
+        written, because the tuner breaks ties on the grid's own ordering: two
+        config files listing the same candidates in a different order would
+        otherwise be able to select different parameters from identical data.
+        """
+        grid = self.tuning_grid
+        if grid is None:
+            return
+        if not isinstance(grid, dict):
+            raise ConfigError(
+                "backtest.tuning_grid must be a table of parameter names and their candidate "
+                "values, written as a [backtest.tuning_grid] section holding lines like "
+                f"`atr_stop_mult = [1.5, 2.0, 2.5]`, but it is {grid!r}. "
+                f"{_where('backtest', 'tuning_grid')}"
+            )
+
+        unknown = sorted(set(grid) - set(TUNABLE_PARAMS))
+        if unknown:
+            raise ConfigError(
+                f"backtest.tuning_grid names {', '.join(repr(u) for u in unknown)}, which the "
+                f"walk-forward cannot tune. The only tunable parameters are "
+                f"{', '.join(TUNABLE_PARAMS)}. {_where('backtest', 'tuning_grid')}"
+            )
+        if not grid:
+            raise ConfigError(
+                "backtest.tuning_grid is empty, so the walk-forward would have nothing to choose "
+                "between and every fold would simply run the [strategy] values. List candidates "
+                f"for at least one of {', '.join(TUNABLE_PARAMS)}, or delete the section "
+                f"altogether to use the standard grid. {_where('backtest', 'tuning_grid')}"
+            )
+
+        canonical = {
+            name: self._check_tuning_candidates(name, grid[name])
+            for name in TUNABLE_PARAMS
+            if name in grid
+        }
+        combinations = math.prod(len(values) for values in canonical.values())
+        _require(
+            combinations <= MAX_TUNING_COMBINATIONS,
+            f"backtest.tuning_grid asks for {combinations} parameter combinations, but at most "
+            f"{MAX_TUNING_COMBINATIONS} are allowed. Every combination is simulated over every "
+            f"symbol in every walk-forward fold, so the cost is combinations x folds x symbols; "
+            f"shorten one of the lists.",
+            "backtest",
+            "tuning_grid",
+        )
+        object.__setattr__(self, "tuning_grid", canonical)
+
+    @staticmethod
+    def _check_tuning_candidates(name: str, raw: Any) -> tuple[Any, ...]:
+        """Validate one parameter's candidate list and return it as a tuple."""
+        key = f"tuning_grid.{name}"
+        if isinstance(raw, str) or not isinstance(raw, list | tuple):
+            raise ConfigError(
+                f"backtest.{key} must be a list of candidate values written like "
+                f"[1.5, 2.0, 2.5], but it is {raw!r}. {_where('backtest', key)}"
+            )
+        if not raw:
+            raise ConfigError(
+                f"backtest.{key} is an empty list, so the walk-forward would have no value to "
+                f"choose for {name}. Give it at least one candidate, or drop the line to leave "
+                f"{name} out of the grid entirely. {_where('backtest', key)}"
+            )
+        values = tuple(
+            _coerce_value(value, _TUNABLE_TYPES[name], "BacktestCfg", key) for value in raw
+        )
+        for value in values:
+            _check_tunable_value(name, value, key)
+        repeated = sorted({value for value in values if values.count(value) > 1})
+        if repeated:
+            raise ConfigError(
+                f"backtest.{key} lists {', '.join(str(v) for v in repeated)} more than once. "
+                f"A repeated candidate is simulated again for the same answer, and the report's "
+                f"candidate count would overstate how wide the search really was. "
+                f"{_where('backtest', key)}"
+            )
+        return values
 
 
 @dataclass(frozen=True)

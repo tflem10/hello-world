@@ -8,6 +8,7 @@ input produces a readable sentence rather than a stack trace.
 from __future__ import annotations
 
 import dataclasses
+import math
 import tomllib
 from datetime import date, timedelta
 from pathlib import Path
@@ -17,6 +18,8 @@ import pytest
 from swing.config import (
     MAX_LOOKBACK_BARS,
     MAX_MOMENTUM_LOOKBACK_BARS,
+    MAX_TUNING_COMBINATIONS,
+    TUNABLE_PARAMS,
     AccountCfg,
     AlertsCfg,
     BacktestCfg,
@@ -282,6 +285,175 @@ def test_backtest_initial_equity_explains_why_it_has_a_floor() -> None:
     message = str(excinfo.value)
     assert "at least 100" in message
     assert "whole-share" in message  # says why, not just what
+
+
+# ---------------------------------------------------------------------------
+# [backtest.tuning_grid] — what the walk-forward is allowed to choose from
+# ---------------------------------------------------------------------------
+
+
+def test_the_tuning_grid_is_unset_by_default() -> None:
+    """Unset means the standard grid, so an old config keeps its old meaning."""
+    assert BacktestCfg().tuning_grid is None
+    assert Config().backtest.tuning_grid is None
+
+
+def test_a_tuning_grid_loads_from_a_file(tmp_path: Path) -> None:
+    cfg = load_config(
+        _write(
+            tmp_path / "c.toml",
+            "[backtest.tuning_grid]\natr_stop_mult = [1.5, 2.5, 4.0]\ndonchian_window = [15, 30]\n",
+        )
+    )
+    assert cfg.backtest.tuning_grid == {
+        "atr_stop_mult": (1.5, 2.5, 4.0),
+        "donchian_window": (15, 30),
+    }
+
+
+def test_a_tuning_grid_may_name_only_some_of_the_tunable_parameters() -> None:
+    """The rest are simply not tuned; they keep their [strategy] value."""
+    cfg = BacktestCfg(tuning_grid={"atr_stop_mult": [1.5, 2.0]})
+    assert set(cfg.tuning_grid) == {"atr_stop_mult"}
+
+
+def test_tuning_grid_keys_are_stored_in_a_canonical_order() -> None:
+    """The tuner breaks ties on grid order, so file order must not decide anything.
+
+    Two configs listing the same candidates in a different order have to search
+    them in the same sequence, or identical data could select different
+    parameters depending on how someone typed their TOML.
+    """
+    first = BacktestCfg(tuning_grid={"volume_mult": [1.0, 1.3], "atr_stop_mult": [1.5, 2.0]})
+    second = BacktestCfg(tuning_grid={"atr_stop_mult": [1.5, 2.0], "volume_mult": [1.0, 1.3]})
+    assert list(first.tuning_grid) == list(second.tuning_grid) == ["atr_stop_mult", "volume_mult"]
+
+
+def test_tuning_grid_values_are_coerced_the_way_strategy_values_are() -> None:
+    cfg = BacktestCfg(tuning_grid={"atr_stop_mult": [2, 3], "donchian_window": [20.0, 25]})
+    assert cfg.tuning_grid["atr_stop_mult"] == (2.0, 3.0)
+    assert all(isinstance(v, float) for v in cfg.tuning_grid["atr_stop_mult"])
+    assert cfg.tuning_grid["donchian_window"] == (20, 25)
+    assert all(isinstance(v, int) for v in cfg.tuning_grid["donchian_window"])
+
+
+def test_a_tuning_grid_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid="atr_stop_mult")
+    assert "must be a table of parameter names" in str(excinfo.value)
+
+
+def test_a_tuning_grid_naming_an_untunable_parameter_lists_the_valid_ones() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid={"adx_min": [15.0, 20.0]})
+    message = str(excinfo.value)
+    assert "'adx_min'" in message
+    assert "cannot tune" in message
+    for name in TUNABLE_PARAMS:
+        assert name in message
+
+
+def test_an_empty_tuning_grid_is_refused() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid={})
+    message = str(excinfo.value)
+    assert "is empty" in message
+    assert "nothing to choose between" in message
+
+
+def test_an_empty_candidate_list_is_refused() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid={"volume_mult": []})
+    assert "backtest.tuning_grid.volume_mult is an empty list" in str(excinfo.value)
+
+
+def test_a_candidate_list_that_is_not_a_list_is_refused() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid={"atr_stop_mult": 2.0})
+    assert "must be a list of candidate values" in str(excinfo.value)
+
+
+def test_a_repeated_candidate_is_refused() -> None:
+    """A duplicate is a wasted simulation and a candidate count that overstates."""
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid={"atr_stop_mult": [1.5, 2.0, 1.5]})
+    assert "more than once" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("grid", "expected"),
+    [
+        ({"atr_stop_mult": [1.5, -1.0]}, "must be greater than 0"),
+        ({"atr_stop_mult": [0.0]}, "must be greater than 0"),
+        ({"chandelier_mult": [0.0]}, "must be greater than 0"),
+        ({"volume_mult": [-0.5]}, "must be greater than 0"),
+        ({"donchian_window": [1]}, "must be at least 2"),
+        ({"donchian_window": [MAX_LOOKBACK_BARS + 1]}, f"at most {MAX_LOOKBACK_BARS}"),
+        ({"donchian_window": [20.5]}, "must be a whole number"),
+        ({"atr_stop_mult": ["2.0"]}, "written without quotes"),
+        ({"atr_stop_mult": [True]}, "not true or false"),
+    ],
+)
+def test_a_candidate_the_strategy_would_refuse_is_refused_here(grid, expected: str) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(tuning_grid=grid)
+    message = str(excinfo.value)
+    assert expected in message
+    # And it points at the grid, not at [strategy], because that is where the
+    # value was actually written.
+    assert "backtest.tuning_grid." in message
+
+
+@pytest.mark.parametrize("name", TUNABLE_PARAMS)
+@pytest.mark.parametrize("value", [-1.0, 0.0, 1, 2, 2.5, 15, MAX_LOOKBACK_BARS, 400, 1000.0])
+def test_the_grid_accepts_exactly_what_the_strategy_section_accepts(name: str, value) -> None:
+    """Drift guard. The tuner writes its pick straight into StrategyCfg, so a
+    value one of them takes and the other refuses is a bug in whichever is
+    lagging — the point of the grid is to offer legal parameters."""
+
+    def accepted(build) -> bool:
+        try:
+            build()
+        except ConfigError:
+            return False
+        return True
+
+    strategy_ok = accepted(lambda: StrategyCfg(**{name: value}))
+    grid_ok = accepted(lambda: BacktestCfg(tuning_grid={name: [value]}))
+    assert strategy_ok == grid_ok, f"{name}={value!r}: strategy {strategy_ok}, grid {grid_ok}"
+
+
+def test_a_grid_at_the_combination_ceiling_is_accepted() -> None:
+    cfg = BacktestCfg(
+        tuning_grid={
+            "atr_stop_mult": [round(1.0 + 0.1 * i, 1) for i in range(8)],
+            "chandelier_mult": [round(2.0 + 0.1 * i, 1) for i in range(8)],
+            "donchian_window": list(range(10, 18)),
+            "volume_mult": [round(1.0 + 0.1 * i, 1) for i in range(1)],
+        }
+    )
+    assert math.prod(len(v) for v in cfg.tuning_grid.values()) == MAX_TUNING_COMBINATIONS
+
+
+def test_a_grid_past_the_combination_ceiling_names_the_count_and_the_ceiling() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        BacktestCfg(
+            tuning_grid={
+                "atr_stop_mult": [round(1.0 + 0.1 * i, 1) for i in range(9)],
+                "chandelier_mult": [round(2.0 + 0.1 * i, 1) for i in range(8)],
+                "donchian_window": list(range(10, 18)),
+            }
+        )
+    message = str(excinfo.value)
+    assert "576" in message  # the count it asked for
+    assert str(MAX_TUNING_COMBINATIONS) in message  # and the ceiling it broke
+    assert "combinations x folds x symbols" in message  # and why the ceiling exists
+
+
+def test_a_tuning_grid_survives_a_round_trip_through_dataclasses_replace() -> None:
+    """``dataclasses.replace`` re-runs validation, which ablations rely on."""
+    cfg = BacktestCfg(tuning_grid={"atr_stop_mult": [1.5, 2.0]})
+    assert dataclasses.replace(cfg, is_years=2).tuning_grid == cfg.tuning_grid
 
 
 def test_dates_may_be_written_as_strings(tmp_path: Path) -> None:

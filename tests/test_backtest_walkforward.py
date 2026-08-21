@@ -24,13 +24,16 @@ from swing.backtest.walkforward import (
     TUNING_GRID,
     Window,
     grid_points,
+    is_default_grid,
     make_windows,
     objective_key,
+    resolve_grid,
     run_walkforward,
     sensitivity_table,
     stitch_returns,
     with_params,
 )
+from swing.config import TUNABLE_PARAMS
 from test_backtest_engine import ramp_bars, spike_volume
 
 SMALL_GRID = {"atr_stop_mult": (1.5, 2.5), "donchian_window": (15, 25)}
@@ -49,6 +52,40 @@ def test_tuning_grid_is_exactly_the_frozen_specification():
         "donchian_window": (15, 20, 25),
         "volume_mult": (1.0, 1.3, 1.6),
     }
+
+
+def test_the_grid_tunes_exactly_the_parameters_config_calls_tunable():
+    """Drift guard: ``[backtest.tuning_grid]`` re-specifies *these* four keys."""
+    assert tuple(TUNING_GRID) == TUNABLE_PARAMS
+
+
+def test_an_absent_grid_resolves_to_the_default_byte_for_byte():
+    """The whole point of the knob's default: nothing about a plain run changes."""
+    assert resolve_grid(None) == TUNING_GRID
+    assert list(grid_points(resolve_grid(None))) == list(grid_points())
+    assert is_default_grid(None)
+
+
+def test_a_grid_that_spells_the_default_out_is_the_default():
+    spelled_out = {name: list(values) for name, values in TUNING_GRID.items()}
+    assert is_default_grid(spelled_out)
+    assert resolve_grid(spelled_out) == TUNING_GRID
+
+
+def test_a_grid_that_differs_anywhere_is_not_the_default():
+    for changed in (
+        {**TUNING_GRID, "atr_stop_mult": (1.5, 2.0, 2.5, 3.0)},  # one more candidate
+        {**TUNING_GRID, "volume_mult": (1.0, 1.3)},  # one fewer
+        {**TUNING_GRID, "donchian_window": (15, 20, 30)},  # one different
+        {"atr_stop_mult": (1.5, 2.0, 2.5)},  # a subset
+    ):
+        assert not is_default_grid(changed), changed
+
+
+def test_resolve_grid_follows_a_replaced_default(monkeypatch):
+    """Read at call time, not bound at import — ablations and tests swap it."""
+    monkeypatch.setattr("swing.backtest.walkforward.TUNING_GRID", {"volume_mult": (1.0,)})
+    assert resolve_grid(None) == {"volume_mult": (1.0,)}
 
 
 def test_grid_has_eighty_one_points_in_a_stable_order():
@@ -331,6 +368,122 @@ def test_chosen_parameters_come_from_the_grid(tmp_path):
         assert set(fold.params) == set(SMALL_GRID)
         for name, value in fold.params.items():
             assert value in SMALL_GRID[name]
+
+
+# ---------------------------------------------------------------------------
+# the configured grid
+# ---------------------------------------------------------------------------
+
+#: Deliberately disjoint from TUNING_GRID: every value here is one the default
+#: grid does not contain, so "did the config reach the tuner?" is answerable by
+#: looking at a single evaluated point.
+CONFIG_GRID = {"atr_stop_mult": (4.0, 5.0), "donchian_window": (11, 13)}
+
+
+def test_a_configured_grid_is_the_grid_the_tuner_searches(tmp_path):
+    """The hypothesis this knob exists for: offer the tuner wider stops.
+
+    Spies on every in-sample evaluation and checks the tuner was handed exactly
+    the configured points — not the default ones, and not the two mixed.
+    """
+    cfg = wf_cfg(tmp_path, backtest={"tuning_grid": CONFIG_GRID})
+    evaluated: list[tuple] = []
+
+    result = run_walkforward(
+        wf_universe(),
+        ramp_bars(n=1500),
+        cfg,
+        start=date(2021, 6, 1),
+        end=date(2025, 5, 31),
+        on_is_evaluation=lambda _w, params, _r: evaluated.append(tuple(sorted(params.items()))),
+    )
+
+    assert result.folds
+    expected = {tuple(sorted(p.items())) for p in grid_points(CONFIG_GRID)}
+    assert set(evaluated) == expected
+    assert len(evaluated) == len(result.folds) * 4
+    # Not one default-only value was ever tried.
+    for params in evaluated:
+        values = dict(params)
+        assert values["atr_stop_mult"] not in TUNING_GRID["atr_stop_mult"]
+        assert values["donchian_window"] not in TUNING_GRID["donchian_window"]
+    # And the parameters that won a fold are from the configured grid.
+    for fold in result.folds:
+        assert set(fold.params) == set(CONFIG_GRID)
+        for name, value in fold.params.items():
+            assert value in CONFIG_GRID[name]
+
+
+def test_an_explicit_grid_argument_beats_the_configured_one(tmp_path):
+    """Tests pass ``grid=`` to stay small; that must still win over config."""
+    cfg = wf_cfg(tmp_path, backtest={"tuning_grid": CONFIG_GRID})
+    evaluated: list[tuple] = []
+
+    run_walkforward(
+        wf_universe(n=500),
+        ramp_bars(n=500),
+        cfg,
+        start=date(2021, 6, 1),
+        end=date(2023, 5, 31),
+        grid=SMALL_GRID,
+        on_is_evaluation=lambda _w, params, _r: evaluated.append(tuple(sorted(params.items()))),
+    )
+    assert set(evaluated) == {tuple(sorted(p.items())) for p in grid_points(SMALL_GRID)}
+
+
+def test_configuring_a_grid_and_passing_it_produce_the_same_run(tmp_path):
+    """The config route is plumbing, not a second implementation."""
+    kwargs = {"start": date(2021, 6, 1), "end": date(2025, 5, 31)}
+    bars, spy = wf_universe(), ramp_bars(n=1500)
+
+    passed = run_walkforward(bars, spy, wf_cfg(tmp_path), grid=CONFIG_GRID, **kwargs)
+    configured = run_walkforward(
+        bars, spy, wf_cfg(tmp_path, backtest={"tuning_grid": CONFIG_GRID}), **kwargs
+    )
+
+    assert [f.params for f in passed.folds] == [f.params for f in configured.folds]
+    pd.testing.assert_frame_equal(passed.trades, configured.trades)
+    pd.testing.assert_frame_equal(passed.equity, configured.equity)
+
+
+def test_leaving_the_grid_unset_picks_the_same_parameters_as_spelling_it_out(tmp_path, monkeypatch):
+    """Default equivalence where it counts: the parameters each fold selects.
+
+    ``SMALL_GRID`` stands in for the 81-point default so this runs in seconds;
+    the property under test is that ``tuning_grid`` absent and ``tuning_grid``
+    set to the default are the same run, not that any particular grid is.
+    """
+    monkeypatch.setattr("swing.backtest.walkforward.TUNING_GRID", SMALL_GRID)
+    kwargs = {"start": date(2021, 6, 1), "end": date(2025, 5, 31)}
+    bars, spy = wf_universe(), ramp_bars(n=1500)
+
+    unset = run_walkforward(bars, spy, wf_cfg(tmp_path), **kwargs)
+    spelled_out = run_walkforward(
+        bars, spy, wf_cfg(tmp_path, backtest={"tuning_grid": SMALL_GRID}), **kwargs
+    )
+
+    assert unset.folds
+    assert [f.params for f in unset.folds] == [f.params for f in spelled_out.folds]
+    pd.testing.assert_frame_equal(unset.trades, spelled_out.trades)
+    pd.testing.assert_frame_equal(unset.equity, spelled_out.equity)
+
+
+def test_an_unconfigured_run_still_searches_the_default_grid(tmp_path, monkeypatch):
+    """Default equivalence at the run level, on a stand-in for the 81-point grid."""
+    monkeypatch.setattr("swing.backtest.walkforward.TUNING_GRID", SMALL_GRID)
+    cfg = wf_cfg(tmp_path)
+    assert cfg.backtest.tuning_grid is None
+    evaluated: list[tuple] = []
+
+    run_walkforward(
+        wf_universe(n=500),
+        ramp_bars(n=500),
+        cfg,
+        start=date(2021, 6, 1),
+        end=date(2023, 5, 31),
+        on_is_evaluation=lambda _w, params, _r: evaluated.append(tuple(sorted(params.items()))),
+    )
+    assert set(evaluated) == {tuple(sorted(p.items())) for p in grid_points(SMALL_GRID)}
 
 
 def test_concatenated_out_of_sample_record_is_the_headline(tmp_path):

@@ -22,6 +22,7 @@ than to eliminate it, because it cannot be eliminated with the data available.
 4. [Cash, shares and portfolio accounting](#4-cash-shares-and-portfolio-accounting)
    — incl. [4.1 Reference capital](#41-reference-capital)
 5. [Walk-forward design](#5-walk-forward-design)
+   — incl. [the candidate values (`[backtest.tuning_grid]`)](#the-candidate-values-backtesttuning_grid)
 6. [Parameter sensitivity (±25%)](#6-parameter-sensitivity-25)
 7. [Survivorship bias](#7-survivorship-bias)
 8. [The haircut convention and the deployment decision rule](#8-the-haircut-convention-and-the-deployment-decision-rule)
@@ -355,6 +356,73 @@ The IS tuning stage is restricted to a small, pre-declared grid over:
 `strategy.volume_mult`. That is four parameters. Adding a fifth should require an explicit argument
 in this document.
 
+Note the consequence for those four settings: **setting them under `[strategy]` does not affect a
+walk-forward run.** The tuner overwrites them in every fold. They still drive `swing scan` and any
+`--no-walkforward` run, but a walk-forward result is a function of the grid, not of those four
+config values.
+
+#### The candidate values (`[backtest.tuning_grid]`)
+
+The *parameter list* above is frozen. The *candidate values* are not, because freezing them makes a
+whole class of research question unanswerable: "does this strategy whipsaw because a 2-ATR stop is
+too tight for a 16-day median hold?" cannot be tested by a tuner that is only ever offered 1.5, 2.0
+and 2.5.
+
+| | |
+|---|---|
+| Config key | `[backtest.tuning_grid]`, one list per parameter |
+| Default | absent — which means exactly the grid below, so every report predating the knob reproduces unchanged |
+| Tunable keys | `atr_stop_mult`, `chandelier_mult`, `donchian_window`, `volume_mult`, and nothing else |
+| Ceiling | **512 combinations** (`swing.config.MAX_TUNING_COMBINATIONS`); the default grid spends 81 |
+| Recorded in | `summary.json["tuning_grid"]`, always, for walk-forward runs |
+
+```toml
+[backtest.tuning_grid]
+atr_stop_mult   = [1.5, 2.0, 2.5, 3.0, 3.5]   # the wider-stops hypothesis
+chandelier_mult = [2.5, 3.0, 3.5]
+donchian_window = [15, 20, 25]
+volume_mult     = [1.0, 1.3, 1.6]
+```
+
+Rules, all enforced at config load with a plain-English refusal:
+
+- Only the four tunable parameters may appear. Naming any other setting is refused and the message
+  lists the four.
+- Each list must be non-empty and free of repeats (a repeat is a wasted simulation and inflates the
+  candidate count the report shows).
+- Every candidate must satisfy the same limits `[strategy]` puts on that field — positive
+  multipliers; `donchian_window` a whole number ≥ 2 and ≤ `MAX_LOOKBACK_BARS` (380). The tuner writes
+  its pick straight into `StrategyCfg`, so an illegal candidate is the same mistake as an illegal
+  config value, just discovered several hundred simulations later.
+- The lists must multiply out to at most 512 combinations. The cost is
+  **combinations × folds × symbols**, so the ceiling is a wall-clock guard as much as a
+  methodological one.
+- Naming only some of the four is allowed. The rest are then *not tuned at all* and keep their
+  `[strategy]` value in every fold — which is how you isolate one parameter's effect.
+- Key order in the file does not matter: the grid is normalised to a canonical order, because the
+  selection objective breaks ties on grid order and two files listing the same candidates must not
+  be able to select different parameters from identical data.
+
+**The honesty caveat, which runs opposite to the intuition.** A wider grid does not produce a
+better-validated strategy; it produces a *worse-validated* one at the same headline number. Each
+fold makes its selection from more candidates, so the number of trials rises, and with it the
+probability that the winning cell won on in-sample noise — Bailey et al.'s probability of backtest
+overfitting is increasing in the trial count, and the walk-forward split does not neutralise this.
+It bounds the damage (the OOS year is still untouched) without removing it, because the OOS years
+are then scored on parameters that were selected more aggressively. Going from 81 to 405
+combinations means **a wider grid's out-of-sample result deserves more scepticism than a narrower
+one's, not less** — and if a widened grid is what turns a failing gate into a passing one, the
+honest reading is that the gate was passed by searching harder, not by finding an edge.
+
+Two mechanisms keep this visible rather than deniable:
+
+- `summary.json["tuning_grid"]` records the grid actually searched on every walk-forward run, so a
+  report can never be read as having used the default when it did not. A `--no-walkforward` run
+  records `{}`, because it tunes nothing.
+- `config_hash` covers the grid whenever it is not the default, so a widened-grid report is never
+  confused with a standard one. An absent grid and one that spells the default out hash identically,
+  since they are the same experiment — which is what keeps every pre-existing report comparable.
+
 ### The selection objective, verbatim
 
 Every walk-forward report carries the objective in `summary.json["objective"]`, so the rule that
@@ -363,7 +431,7 @@ picked each fold's parameters is readable next to its results. The string is
 
 > In-sample selection maximises profit factor among parameter sets with at least 8 in-sample trades
 > (sets below that floor rank last whatever their ratio), breaking ties by more trades, then by
-> shallower maximum drawdown, then by the frozen grid order. A parameter set with no losing trades
+> shallower maximum drawdown, then by the order the tuning grid lists them in. A parameter set with no losing trades
 > at all reports the 9999.0 profit-factor sentinel rather than a measurement, so it is ranked as 0.0
 > and wins only on trade count and drawdown. Profit factor is used because it is the quantity the
 > deployment gate tests.
@@ -380,8 +448,9 @@ Two details in there are load-bearing:
   eligible, so a fold in which nothing clears the floor still selects *something* rather than
   failing.
 
-The grid is 81 combinations (3 × 3 × 3 × 3) evaluated per fold, and ties resolve to the first grid
-point, so selection is deterministic.
+The default grid is 81 combinations (3 × 3 × 3 × 3) evaluated per fold, and ties resolve to the
+first grid point, so selection is deterministic. A run that configures its own grid resolves ties
+the same way, against that grid's canonical order.
 
 ### Sample-size honesty
 
@@ -647,6 +716,7 @@ Beyond the identity triple, the keys a reader is most likely to need:
 | `initial_equity` | the reference capital the run traded (§4.1) |
 | `earnings_blackout_simulated` | whether the run could apply a historical earnings blackout (§11, limitation 7) |
 | `objective` | the selection rule quoted in §5; `""` for a non-walk-forward run |
+| `tuning_grid` | the candidate values the tuner was actually offered (§5); `{}` for a non-walk-forward run, which tunes nothing. A grid other than the default also changes `config_hash` |
 | `oos` | the headline metric block — the concatenated OOS curve. **For a non-walk-forward run this is a copy of `full_period`**, so the presence of an `oos` block says nothing about whether the run was walk-forward |
 | `full_period` | in-sample-contaminated context (§5, rule 4) |
 | `by_year`, `windows`, `sensitivity`, `costs` | per-year metrics, per-fold detail, the ±25% table (§6), and the cost settings |

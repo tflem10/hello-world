@@ -23,12 +23,24 @@ concatenation is done on **returns**, not on dollar levels: the stitched curve
 compounds each fold's daily returns onto the previous fold's ending equity.
 Stitching dollar levels would inject a fake jump at every seam.
 
-THE TUNING GRID (frozen, Contract 11 amendment)
-------------------------------------------------
+THE TUNING GRID (Contract 11 amendment)
+----------------------------------------
 ``atr_stop_mult`` x ``chandelier_mult`` x ``donchian_window`` x ``volume_mult``
-= 3 x 3 x 3 x 3 = 81 combinations per fold. Nothing else is tuned. The list is
-frozen precisely so it cannot quietly grow when results disappoint — every
-parameter added to a grid buys in-sample performance and sells honesty.
+= 3 x 3 x 3 x 3 = 81 combinations per fold, and nothing else is tuned: the
+**parameter list** is frozen precisely so it cannot quietly grow when results
+disappoint — every parameter added to a grid buys in-sample performance and
+sells honesty.
+
+The **candidate values** are not frozen, because a research question like "does
+this strategy whipsaw because a 2-ATR stop is too tight for a 16-day hold?" is
+unanswerable if the tuner can only be offered stops someone chose in advance.
+``[backtest.tuning_grid]`` re-specifies them (see
+:data:`swing.config.TUNABLE_PARAMS`), an absent section means exactly
+:data:`TUNING_GRID`, and every report records the grid it actually used. The
+honesty cost is real and runs the other way from the intuition: a wider grid
+makes more in-sample choices per fold, so its out-of-sample record deserves
+*more* scepticism, not less. :data:`swing.config.MAX_TUNING_COMBINATIONS` caps
+how far that can be pushed in one run.
 
 THE OBJECTIVE (documented, as Contract 11 requires)
 ----------------------------------------------------
@@ -40,7 +52,8 @@ Rank in-sample results by:
    a profit factor computed from three trades is a rumour, not a measurement.
 2. tiebreak on **more trades** (more evidence for the same edge),
 3. then on **shallower maximum drawdown**,
-4. then on the grid's own fixed ordering, so the choice is reproducible.
+4. then on the grid's own ordering, so the choice is reproducible. (Config
+   grids are normalised to a canonical key order for exactly this reason.)
 
 Profit factor rather than CAGR or Sharpe because it is the quantity the gate in
 :mod:`swing.backtest.gate` actually tests, and tuning on one thing while gating
@@ -83,8 +96,10 @@ __all__ = [
     "WalkForwardResult",
     "Window",
     "grid_points",
+    "is_default_grid",
     "make_windows",
     "objective_key",
+    "resolve_grid",
     "run_walkforward",
     "sensitivity_table",
     "stitch_returns",
@@ -93,7 +108,13 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: FROZEN (Contract 11 amendment). Do not add parameters to this dict.
+#: The default grid, used whenever ``[backtest.tuning_grid]`` is absent.
+#:
+#: The **keys** are frozen (Contract 11 amendment): do not add parameters to
+#: this dict, and keep them identical to :data:`swing.config.TUNABLE_PARAMS`.
+#: The **values** may be re-specified per run in config; this dict is what an
+#: unconfigured run gets, so changing it here silently rewrites the meaning of
+#: every report that did not name its own grid.
 TUNING_GRID: dict[str, tuple[Any, ...]] = {
     "atr_stop_mult": (1.5, 2.0, 2.5),
     "chandelier_mult": (2.5, 3.0, 3.5),
@@ -108,9 +129,9 @@ OBJECTIVE_DESCRIPTION = (
     "In-sample selection maximises profit factor among parameter sets with at least "
     f"{MIN_IS_TRADES} in-sample trades (sets below that floor rank last whatever their "
     "ratio), breaking ties by more trades, then by shallower maximum drawdown, then by "
-    "the frozen grid order. A parameter set with no losing trades at all reports the "
-    "9999.0 profit-factor sentinel rather than a measurement, so it is ranked as 0.0 and "
-    "wins only on trade count and drawdown. Profit factor is used because it is the "
+    "the order the tuning grid lists them in. A parameter set with no losing trades at all "
+    "reports the 9999.0 profit-factor sentinel rather than a measurement, so it is ranked as "
+    "0.0 and wins only on trade count and drawdown. Profit factor is used because it is the "
     "quantity the deployment gate tests."
 )
 
@@ -204,6 +225,28 @@ def make_windows(start: date, end: date, *, is_years: int = 3, oos_years: int = 
 # ---------------------------------------------------------------------------
 # the grid
 # ---------------------------------------------------------------------------
+
+
+def resolve_grid(grid: dict[str, Sequence[Any]] | None = None) -> dict[str, tuple[Any, ...]]:
+    """The grid a run will actually search: ``grid``, or :data:`TUNING_GRID`.
+
+    Reads the module-level default at call time rather than binding it at
+    import, so a caller (or a test) that replaces :data:`TUNING_GRID` gets the
+    replacement.
+    """
+    if grid is None:
+        return dict(TUNING_GRID)
+    return {name: tuple(values) for name, values in grid.items()}
+
+
+def is_default_grid(grid: dict[str, Sequence[Any]] | None) -> bool:
+    """True when ``grid`` searches exactly what an unconfigured run searches.
+
+    An absent grid and one that spells the default out are the same experiment,
+    and reports of the same experiment should stay comparable — see
+    :func:`swing.backtest.runner.config_hash`.
+    """
+    return resolve_grid(grid) == resolve_grid(None)
 
 
 def grid_points(grid: dict[str, tuple[Any, ...]] | None = None) -> Iterator[dict[str, Any]]:
@@ -387,8 +430,10 @@ def run_walkforward(
         start: first date of the first in-sample stretch. Defaults to
             ``cfg.backtest.start``.
         end: last usable date. Defaults to ``cfg.backtest.end`` or the last bar.
-        grid: override the tuning grid. Tests use this to keep runs small;
-            production must leave it at the frozen :data:`TUNING_GRID`.
+        grid: the candidate values to search. Precedence: this argument, then
+            ``cfg.backtest.tuning_grid``, then :data:`TUNING_GRID`. Tests pass
+            it directly to keep runs small; a real run should express its grid
+            in config so the report can record it.
         progress: optional sink for one-line progress messages.
         on_is_evaluation: optional hook fired for every **in-sample**
             evaluation, with the window, the parameters and the raw result.
@@ -419,7 +464,10 @@ def run_walkforward(
         )
         return _empty_walkforward(initial_equity)
 
-    combos = list(grid_points(grid))
+    # An explicit argument wins, then whatever config asked for, then the
+    # default. Resolving here rather than only in the runner means no caller can
+    # accidentally search the default grid while its config says otherwise.
+    combos = list(grid_points(resolve_grid(cfg.backtest.tuning_grid if grid is None else grid)))
     folds: list[FoldResult] = []
 
     for number, window in enumerate(windows, start=1):
@@ -429,7 +477,7 @@ def run_walkforward(
                 f"({len(combos)} combinations)"
             )
         # One cache per fold: every symbol's tuning-independent Series is built
-        # once and reused across all 81 combinations and the OOS run.
+        # once and reused across every combination and the OOS run.
         cache = SignalCache()
 
         best_params: dict[str, Any] | None = None

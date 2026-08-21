@@ -32,6 +32,11 @@ Three hashes answer "what exactly produced this?":
 * ``data_hash``   — SHA-256 over each symbol's (last bar date, row count). Cheap
   to compute, and it changes the moment the underlying data does.
 
+``summary.json`` additionally spells out ``tuning_grid``: the candidate values
+the walk-forward was allowed to choose between, whether or not they came from
+config. A hash tells you two reports differ; this tells you *how* the search
+differed, which is the thing most likely to explain a flattering number.
+
 ABLATIONS
 ---------
 Contract 11's amendment: a run whose label starts with ``ablate`` writes its own
@@ -71,6 +76,8 @@ from swing.backtest.gate import ABLATION_PREFIX, latest_path
 from swing.backtest.metrics import by_year_table, compute_metrics
 from swing.backtest.walkforward import (
     OBJECTIVE_DESCRIPTION,
+    is_default_grid,
+    resolve_grid,
     run_walkforward,
     sensitivity_table,
 )
@@ -113,6 +120,8 @@ def _plain(value: Any) -> Any:
         return str(value)
     if isinstance(value, tuple | list):
         return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in sorted(value.items())}
     if is_dataclass(value) and not isinstance(value, type):
         return {k: _plain(v) for k, v in sorted(asdict(value).items())}
     return value
@@ -124,6 +133,13 @@ def config_hash(cfg: Config) -> str:
     Deliberately *not* the whole config: account size, alert channels and broker
     credentials do not change what the strategy would have done, and including
     them would make every report look different on a different machine.
+
+    ``backtest.tuning_grid`` is included only when it differs from the default
+    grid. What the hash answers is "were these two reports run under the same
+    rules?", and a config that leaves the grid unset, a config that spells the
+    default out, and every report written before the knob existed are all the
+    same rules — so they keep the same hash. Any other grid changes it, because
+    changing what the tuner may choose changes the experiment.
     """
     payload = {
         section: {
@@ -132,6 +148,8 @@ def config_hash(cfg: Config) -> str:
         }
         for section in ("strategy", "backtest", "gates")
     }
+    if is_default_grid(cfg.backtest.tuning_grid):
+        payload["backtest"].pop("tuning_grid", None)
     payload["account"] = {
         "max_positions": cfg.account.max_positions,
         "risk_pct": cfg.account.risk_pct,
@@ -473,6 +491,14 @@ def run_backtest(
         cfg, account=replace(cfg.account, equity=float(cfg.backtest.initial_equity))
     )
 
+    # The candidate values the tuner will actually be offered: whatever
+    # [backtest.tuning_grid] asked for, else the default. Recorded in the
+    # summary so no report can be read as having searched the default grid when
+    # it searched a wider one — a widened grid makes more in-sample choices per
+    # fold, which is a reason to trust the out-of-sample number *less*, and that
+    # has to be visible next to the number it bought.
+    tuning_grid = resolve_grid(cfg.backtest.tuning_grid)
+
     summary: dict[str, Any] = {
         "label": run_label,
         "universe": universe,
@@ -490,6 +516,11 @@ def run_backtest(
             "spread_atr_frac": float(cfg.backtest.spread_atr_frac),
         },
         "objective": OBJECTIVE_DESCRIPTION if walkforward else "",
+        # Empty for a non-walk-forward run, which tunes nothing at all — the
+        # same reason ``objective`` is empty there.
+        "tuning_grid": (
+            {name: list(values) for name, values in tuning_grid.items()} if walkforward else {}
+        ),
     }
 
     # --- full period with the configured parameters (always run) -----------
@@ -520,6 +551,7 @@ def run_backtest(
             is_etf=is_etf,
             start=run_start,
             end=effective_end,
+            grid=tuning_grid,
             progress=emit,
         )
         summary["oos"] = wf.metrics

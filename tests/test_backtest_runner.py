@@ -22,6 +22,7 @@ from conftest import build_config
 from swing.backtest import runner
 from swing.backtest.gate import check, latest_path
 from swing.backtest.runner import ABLATION_PREFIX, config_hash, data_hash, run_backtest
+from swing.backtest.walkforward import TUNING_GRID
 from swing.universe import Instrument
 from test_backtest_engine import ramp_bars, spike_volume
 
@@ -474,6 +475,46 @@ def test_config_hash_tracks_gate_and_cost_changes(tmp_path):
     assert config_hash(base) != config_hash(build_config(tmp_path, backtest={"slippage_bps": 25.0}))
 
 
+#: ``config_hash`` of the shipping defaults, recorded from the code as it stood
+#: before ``[backtest.tuning_grid]`` existed. Every backtest report in the repo
+#: carries this string; if the knob had leaked into the hash, none of them would
+#: be comparable with a run made today.
+SHIPPING_CONFIG_HASH = "c6782f8db70ba7e61d4715dcf5f32f7c0c269a66ea8d0d02362ef38c0cf46f48"
+
+
+def test_the_shipping_config_still_hashes_to_what_it_always_did(tmp_path):
+    assert config_hash(build_config(tmp_path)) == SHIPPING_CONFIG_HASH, (
+        "config_hash for the default configuration changed. If you deliberately changed a "
+        "[strategy], [backtest] or [gates] default, update this digest and expect every existing "
+        "report to stop matching. If you did not, something has leaked into the hash and every "
+        "report written before your change is no longer comparable with one written after it."
+    )
+
+
+def test_an_unset_or_default_tuning_grid_does_not_move_the_hash(tmp_path):
+    """Same rules, same hash: the knob's default must be invisible to provenance."""
+    base = build_config(tmp_path)
+    spelled_out = build_config(
+        tmp_path, backtest={"tuning_grid": {k: list(v) for k, v in TUNING_GRID.items()}}
+    )
+    assert base.backtest.tuning_grid is None
+    assert config_hash(spelled_out) == config_hash(base) == SHIPPING_CONFIG_HASH
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        {"atr_stop_mult": [1.5, 2.0, 2.5, 3.0, 3.5]},  # the wider-stops hypothesis
+        {**{k: list(v) for k, v in TUNING_GRID.items()}, "volume_mult": [1.0, 1.3]},  # narrower
+        {"atr_stop_mult": [1.5, 2.0, 2.5]},  # a strict subset of the default
+    ],
+)
+def test_a_custom_tuning_grid_changes_the_hash(tmp_path, grid):
+    """A different search is a different experiment, and must not look identical."""
+    base = build_config(tmp_path)
+    assert config_hash(build_config(tmp_path, backtest={"tuning_grid": grid})) != config_hash(base)
+
+
 def test_data_hash_changes_when_the_data_does():
     bars = fake_universe()
     first = data_hash(bars)
@@ -536,6 +577,64 @@ def test_a_walkforward_run_writes_windows_and_opens_the_gate(tmp_path, monkeypat
     verdict = check(cfg)
     assert verdict.report_path == directory
     assert isinstance(verdict.passed, bool)
+
+
+def test_a_walkforward_summary_records_the_grid_it_actually_searched(tmp_path, wf_wired):
+    """A report must never be readable as having searched the default when it did not."""
+    cfg = runner_cfg(tmp_path, backtest={"is_years": 1, "oos_years": 1})
+    directory = go(
+        cfg, label="recorded", walkforward=True, start=date(2021, 6, 1), end=date(2025, 5, 31)
+    )
+    summary = json.loads((directory / "summary.json").read_text())
+    # ``wf_wired`` stands in a two-parameter grid for the 81-point default; the
+    # summary reports the grid the tuner was handed, not the one in the source.
+    assert summary["tuning_grid"] == {"atr_stop_mult": [1.5, 2.5], "donchian_window": [15, 25]}
+
+
+def test_a_configured_tuning_grid_reaches_the_run_and_the_report(tmp_path, wf_wired):
+    """End to end: config -> tuner -> chosen parameters -> summary.json."""
+    grid = {"atr_stop_mult": [4.0, 5.0], "donchian_window": [11, 13]}
+    cfg = runner_cfg(tmp_path, backtest={"is_years": 1, "oos_years": 1, "tuning_grid": grid})
+    directory = go(
+        cfg, label="configured", walkforward=True, start=date(2021, 6, 1), end=date(2025, 5, 31)
+    )
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["tuning_grid"] == grid
+    assert summary["windows"]
+    for fold in summary["windows"]:
+        assert set(fold["params"]) == {"atr_stop_mult", "donchian_window"}
+        assert fold["params"]["atr_stop_mult"] in grid["atr_stop_mult"]
+        assert fold["params"]["donchian_window"] in grid["donchian_window"]
+    # And the report says it was a different experiment from the standard run.
+    assert summary["config_hash"] != SHIPPING_CONFIG_HASH
+
+
+def test_two_runs_of_a_configured_grid_are_byte_identical(tmp_path, wf_wired):
+    """AC9 still holds with the new key in the payload."""
+    cfg = runner_cfg(
+        tmp_path,
+        backtest={"is_years": 1, "oos_years": 1, "tuning_grid": {"atr_stop_mult": [1.5, 3.0]}},
+    )
+    kwargs = {"walkforward": True, "start": date(2021, 6, 1), "end": date(2025, 5, 31)}
+    first = go(cfg, label="once", **kwargs)
+    second = go(cfg, label="twice", **kwargs)
+
+    assert (first / "trades.csv").read_bytes() == (second / "trades.csv").read_bytes()
+    assert (first / "equity.csv").read_bytes() == (second / "equity.csv").read_bytes()
+    payloads = [json.loads((d / "summary.json").read_text()) for d in (first, second)]
+    for payload in payloads:
+        payload.pop("label")  # the one legitimate difference between the two
+    assert payloads[0] == payloads[1]
+    assert payloads[0]["tuning_grid"] == {"atr_stop_mult": [1.5, 3.0]}
+
+
+def test_a_non_walkforward_run_records_no_tuning_grid(tmp_path, wired):
+    """Nothing was tuned, so the grid block is empty — like ``objective``."""
+    directory = go(runner_cfg(tmp_path), label="untuned", walkforward=False)
+    summary = json.loads((directory / "summary.json").read_text())
+    assert summary["tuning_grid"] == {}
+    assert summary["objective"] == ""
 
 
 def test_a_non_walkforward_run_is_marked_ineligible(tmp_path, wired):

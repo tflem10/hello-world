@@ -137,6 +137,36 @@ oos_years = 1                   # out-of-sample years per fold
 # capital base the reported CAGR and drawdown are measured against.
 initial_equity = 10000.0        # must be at least 100
 
+# The candidate values each walk-forward fold may choose between, one list per
+# parameter. Leave this out — the default — and every fold searches exactly the
+# grid below, which is what every existing report used. The default form, as a
+# single line:
+#
+# tuning_grid = { atr_stop_mult = [1.5, 2.0, 2.5], chandelier_mult = [2.5, 3.0, 3.5], donchian_window = [15, 20, 25], volume_mult = [1.0, 1.3, 1.6] }
+#
+# The same thing as a section, which is easier to edit. Uncomment to use it,
+# and note that setting `atr_stop_mult` etc. under [strategy] does NOT affect a
+# walk-forward run: the tuner overwrites those four per fold, so this table is
+# the only way to change what it may pick.
+#
+# [backtest.tuning_grid]
+# atr_stop_mult   = [1.5, 2.0, 2.5]     # initial stop distance in ATRs
+# chandelier_mult = [2.5, 3.0, 3.5]     # trailing stop distance in ATRs
+# donchian_window = [15, 20, 25]        # breakout lookback in bars (>= 2)
+# volume_mult     = [1.0, 1.3, 1.6]     # breakout volume vs its average
+#
+# Rules: only those four parameters may be tuned; each list must be non-empty
+# with no repeats; each value must satisfy the same limits [strategy] puts on
+# it; and the lists must multiply out to at most 512 combinations, because
+# every combination is simulated over every symbol in every fold. Naming only
+# some of the four is allowed — the rest simply are not tuned and keep their
+# [strategy] value.
+#
+# Read a widened grid's result with MORE scepticism, not less: more candidates
+# means more in-sample choices per fold, which is more opportunity to fit noise.
+# The grid actually used is recorded in summary.json, and a non-default grid
+# changes `config_hash` so its reports are never confused with the standard run.
+
 
 [gates]
 # The bar the OUT-OF-SAMPLE backtest must clear before `swing scan` will emit
