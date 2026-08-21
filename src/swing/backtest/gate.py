@@ -20,6 +20,7 @@ not a reason to have no picks tonight.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -141,6 +142,29 @@ def check_gate(cfg: Config) -> GateStatus:
     if not ok:
         reasons.append(f"out-of-sample Sharpe {sharpe:.2f} is below {min_sharpe:g}")
 
+    # The alternative to running this strategy is not cash, it is the index, so
+    # a profit factor of 1.8 earns nothing if buy-and-hold beat it over the same
+    # window. A report with no benchmark leaves this unanswerable, and an
+    # unanswered criterion is a failed one — 0.0 is a *passing* excess CAGR, so
+    # anything the gate cannot read must not be folded into a number.
+    excess = _as_optional_float(metrics.get("excess_cagr"))
+    min_excess = float(gate.get("min_excess_cagr", 0.0))
+    if excess is None:
+        checks.append(("excess_cagr", float("nan"), min_excess, False))
+        reasons.append(
+            "this report has no buy-and-hold comparison (excess_cagr is absent), "
+            "so the gate cannot tell whether the strategy beat the index. Cache "
+            "the benchmark symbol and re-run `swing backtest --walk-forward`."
+        )
+    else:
+        ok = excess >= min_excess
+        checks.append(("excess_cagr", excess, min_excess, ok))
+        if not ok:
+            reasons.append(
+                f"out-of-sample excess CAGR {excess:+.2%} vs buy-and-hold is "
+                f"below {min_excess:+.2%}"
+            )
+
     passed = all(item[3] for item in checks)
 
     # Staleness is a warning, never a block: the numbers in this report did
@@ -192,3 +216,19 @@ def _as_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _as_optional_float(value) -> float | None:
+    """A finite number, or ``None`` for absent, null or non-finite input.
+
+    The counterpart to :func:`_as_float` for thresholds whose floor a zero would
+    *clear*. Folding an unreadable metric into 0.0 there would pass the check on
+    a number nobody computed; keeping it unreadable makes the caller say so.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None

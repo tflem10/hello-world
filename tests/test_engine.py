@@ -12,7 +12,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from swing.backtest.engine import EXIT_GAP, EXIT_TIME, EXIT_TRAIL, run_backtest
+from swing.backtest.engine import (
+    EXIT_EOD,
+    EXIT_GAP,
+    EXIT_REGIME,
+    EXIT_TIME,
+    EXIT_TRAIL,
+    run_backtest,
+)
 
 from .conftest import breakout_series, engine_config, make_bars, trending_bars
 
@@ -406,6 +413,103 @@ def test_missing_benchmark_degrades_to_no_filter_with_a_warning():
     bars = breakout_series(after=[110.0] * 30)
     result = run_backtest(engine_config(strategy__regime__enabled=True), {"AAA": bars})
     assert result.n_trades >= 1
+    assert any("regime" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# regime exit (strategy.regime.exit_on_regime_off)
+# ---------------------------------------------------------------------------
+def _regime_flip_bars():
+    """AAA is long and quiet when the benchmark crosses under its 200-SMA.
+
+    AAA breaks out on bar 200 (filling at 201) and then sits at 110, far above
+    both its initial stop and its trail. The benchmark ramps 200 -> 400 for 210
+    bars and then collapses to 150, which is the first bar it closes below its
+    200-SMA — so bar 210 is the cross and bar 211 is the next open.
+    """
+    bars = breakout_series(after=[110.0] * 30)
+    bench = make_bars(list(np.linspace(200.0, 400.0, 210)) + [150.0] * 21, volume=1e8)
+    return bars, bench
+
+
+def _regime_exit_config(**overrides):
+    """Regime filter on, regime exit on, time stop off so only one rule can fire."""
+    return engine_config(
+        strategy__regime__enabled=True,
+        strategy__regime__exit_on_regime_off=True,
+        strategy__exit__time_stop_days=0,
+        **overrides,
+    )
+
+
+def test_regime_exit_closes_an_open_position_at_the_next_open():
+    bars, bench = _regime_flip_bars()
+    result = run_backtest(_regime_exit_config(), {"AAA": bars}, benchmark=bench)
+
+    assert len(result.trades) == 1
+    t = result.trades.iloc[0]
+    assert t["entry_date"] == bars.index[201]
+    assert t["exit_reason"] == EXIT_REGIME
+    assert t["exit_date"] == bars.index[211]
+    # Filled at bar 211's open (110) less slippage and the spread proxy — not at
+    # the close of the bar the regime turned off, which would be look-ahead.
+    assert t["exit_price"] == pytest.approx(109.8905714, abs=1e-6)
+
+
+def test_the_regime_exit_is_off_by_default_and_the_position_rides_through():
+    """Same fixture, option unset: the pin that the default changes nothing."""
+    bars, bench = _regime_flip_bars()
+    cfg = engine_config(strategy__regime__enabled=True, strategy__exit__time_stop_days=0)
+    result = run_backtest(cfg, {"AAA": bars}, benchmark=bench)
+
+    t = result.trades.iloc[0]
+    assert t["exit_reason"] == EXIT_EOD
+    assert t["exit_date"] == bars.index[-1]
+
+
+def test_a_regime_exit_with_no_bar_at_the_next_open_is_carried():
+    bars, bench = _regime_flip_bars()
+    halted = bars.drop(bars.index[211])
+    # QUIET never breaks out, so it takes no trade — it is here only to keep the
+    # halted date on the panel's date axis. Without it the date would vanish
+    # from the run entirely and AAA would never miss an open.
+    quiet = make_bars([50.0] * len(bars), volume=1_000_000.0)
+
+    result = run_backtest(
+        _regime_exit_config(), {"AAA": halted, "QUIET": quiet}, benchmark=bench
+    )
+
+    assert len(result.trades) == 1
+    t = result.trades.iloc[0]
+    assert t["symbol"] == "AAA"
+    assert t["exit_reason"] == EXIT_REGIME
+    assert t["exit_date"] == bars.index[212]
+
+
+def test_a_regime_exit_and_a_stop_on_the_same_bar_close_the_position_once():
+    bars, bench = _regime_flip_bars()
+    closes = list(bars["close"])
+    # The regime turns off on bar 210. AAA then collapses to 80 on bar 211,
+    # whose low is far through the stop: the queued exit fills first, at the
+    # open, and the stop must not close an already-closed position.
+    crash = make_bars(closes[:211] + [80.0] * (len(closes) - 211), volume=1_000_000.0)
+
+    result = run_backtest(_regime_exit_config(), {"AAA": crash}, benchmark=bench)
+
+    assert len(result.trades) == 1
+    t = result.trades.iloc[0]
+    assert t["exit_reason"] == EXIT_REGIME
+    assert t["exit_date"] == crash.index[211]
+    assert t["exit_price"] == pytest.approx(109.8905714, abs=1e-6)
+
+
+def test_a_missing_benchmark_never_force_closes_the_book():
+    """Degrading to "no regime filter" must not degrade to "sell everything"."""
+    bars, _ = _regime_flip_bars()
+    result = run_backtest(_regime_exit_config(), {"AAA": bars})
+
+    t = result.trades.iloc[0]
+    assert t["exit_reason"] == EXIT_EOD
     assert any("regime" in w for w in result.warnings)
 
 

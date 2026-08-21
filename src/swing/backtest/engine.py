@@ -24,7 +24,8 @@ Within a day the sequence is:
 3. stops are tested against the day's bar — a gap through the stop fills at the
    **open**, not at the stop price, because that is what actually happens
 4. survivors ratchet their Chandelier trail against today's close
-5. the time stop and tomorrow's entry signals are evaluated on the close
+5. the time stop, the regime exit and tomorrow's entry signals are evaluated on
+   the close
 
 Costs
 -----
@@ -57,6 +58,7 @@ EXIT_STOP = "stop"
 EXIT_GAP = "gap_through_stop"
 EXIT_TRAIL = "trailing_stop"
 EXIT_TIME = "time_stop"
+EXIT_REGIME = "regime_off"
 EXIT_EOD = "end_of_backtest"
 
 
@@ -122,7 +124,7 @@ class _Position:
     highest_high: float = 0.0
     bars_held: int = 0
     entry_costs: float = 0.0
-    time_stop_queued: bool = False
+    exit_queued: bool = False
 
 
 @dataclass
@@ -436,9 +438,9 @@ class Backtester:
                 if not math.isfinite(price):
                     # No bar today (halt): carry the position *and* the order.
                     # Dropping the order here cancels the exit permanently —
-                    # step 4 never re-queues a time stop once `time_stop_queued`
-                    # is set, so the position would only ever leave through a
-                    # stop or the end of the backtest.
+                    # step 4 never queues a second exit once `exit_queued` is
+                    # set, so the position would only ever leave through a stop
+                    # or the end of the backtest.
                     carried_exits.append((sym, reason))
                     continue
                 fill = self._sell_fill(price, pos.atr_at_entry)
@@ -522,7 +524,11 @@ class Backtester:
                     trades.append(self._close_trade(pos, today, fill, reason, commission))
                     del positions[sym]
 
-            # -- 4. ratchet trails on today's close; queue time stops ------
+            # -- 4. ratchet trails on today's close; queue close-based exits --
+            # The regime is read on today's close, like every other exit signal
+            # here, and fills at tomorrow's open. `regime` is all-True when the
+            # benchmark is missing, so a missing SPY cannot force-close the book.
+            regime_exit = rules.regime_exit_due(bool(regime[i]), cfg)
             for sym, pos in positions.items():
                 today_close = cl[i, pos.col]
                 today_atr = atr_a[i, pos.col]
@@ -533,9 +539,20 @@ class Backtester:
                         pos.stop, rules.chandelier_stop(pos.highest_close, today_atr, s)
                     )
                 pos.bars_held += 1
-                if time_stop > 0 and pos.bars_held >= time_stop and not pos.time_stop_queued:
-                    pos.time_stop_queued = True
-                    pending_exits.append((sym, EXIT_TIME))
+                if pos.exit_queued:
+                    continue
+                # The time stop is checked first on purpose: when both fire on
+                # the same bar the position leaves at the same open either way,
+                # and keeping its label means the exit table stays comparable
+                # across a run with the regime exit on and one without.
+                if time_stop > 0 and pos.bars_held >= time_stop:
+                    reason = EXIT_TIME
+                elif regime_exit:
+                    reason = EXIT_REGIME
+                else:
+                    continue
+                pos.exit_queued = True
+                pending_exits.append((sym, reason))
 
             # -- 5. mark to market -----------------------------------------
             held_value = sum(

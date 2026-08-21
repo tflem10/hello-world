@@ -91,6 +91,54 @@ def test_user_config_layers_over_example(tmp_path):
     assert cfg.strategy.exit.chandelier_atr == 3.0
 
 
+def test_deleting_a_grid_axis_restores_the_shipped_default(tmp_path):
+    """Layering cuts both ways: the example config sits UNDER config.toml, so a
+    key deleted there comes back rather than going away. Deleting a walk-forward
+    grid axis to disable it hands that axis straight back to the optimiser,
+    which then overrides the value the user meant to fix, in every window."""
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[backtest.walk_forward.grid]\n'
+        '"strategy.entry.donchian_len" = [20]\n'
+    )
+    grid = load_config(p)["backtest"]["walk_forward"]["grid"]
+
+    assert grid["strategy.entry.donchian_len"] == [20]
+    assert "strategy.exit.chandelier_atr" in grid
+    assert grid["strategy.exit.chandelier_atr"] == [2.5, 3.0, 4.0]
+
+
+def test_pinning_a_grid_axis_to_one_value_survives_the_layering(tmp_path):
+    """The supported way to neutralise an axis, and the one the annotation in
+    config.example.toml points at."""
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[backtest.walk_forward.grid]\n'
+        '"strategy.exit.chandelier_atr" = [99.0]\n'
+    )
+    grid = load_config(p)["backtest"]["walk_forward"]["grid"]
+    assert grid["strategy.exit.chandelier_atr"] == [99.0]
+
+
+def test_gate_thresholds_are_inside_the_hashed_backtest_section():
+    """The opposite placement rule to [reports] and [data]: a gate threshold
+    MUST re-lock the gate. A report validated against a floor that is no longer
+    in force has not been validated against the floor now being applied, so
+    moving [backtest.gate] out of the hash would let the two drift apart."""
+    example = tomllib.loads(EXAMPLE_CONFIG_PATH.read_text())
+    assert example["backtest"]["gate"]["min_excess_cagr"] == 0.0
+
+    cfg = load_config()
+    for key, value in (
+        ("min_excess_cagr", -0.05),
+        ("min_profit_factor", 2.0),
+        ("enabled", False),
+    ):
+        data = cfg.as_dict()
+        data["backtest"]["gate"][key] = value
+        assert Config(data).hash != cfg.hash, key
+
+
 def test_validation_rejects_absurd_risk(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("[account]\nrisk_pct = 0.5\n")

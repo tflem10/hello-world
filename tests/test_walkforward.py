@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from datetime import date
 
 import numpy as np
@@ -18,6 +20,7 @@ from swing.backtest.report import (
     report_dir,
 )
 from swing.backtest.runner import (
+    ABLATIONS,
     _benchmark_series,
     fundamentals_warnings,
     load_earnings,
@@ -25,11 +28,13 @@ from swing.backtest.runner import (
 )
 from swing.backtest.walkforward import (
     apply_overrides,
+    effective_grid,
     grid_points,
     make_windows,
     objective_value,
     run_walk_forward,
 )
+from swing.config import load_config
 
 from .conftest import engine_config, make_bars
 
@@ -194,6 +199,64 @@ def test_disabling_optimisation_uses_config_defaults_everywhere():
     assert all(params == {} for params in result.chosen_params)
 
 
+def test_the_effective_grid_is_logged_axis_by_axis_before_the_windows(caplog):
+    """The grid that ran is not the grid in config.toml — the example config
+    layers underneath it — so a user who pinned or deleted an axis has to be
+    able to read what was actually searched off the run itself."""
+    bars = _wf_universe(n_symbols=2, n_bars=900)
+    with caplog.at_level(logging.INFO, logger="swing.walkforward"):
+        run_walk_forward(_wf_config(), bars)
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "swing.walkforward"]
+    header = next(m for m in messages if m.startswith("walk-forward:"))
+    assert "2 parameter combinations" in header
+    assert "1 grid axes" in header
+    assert "  grid axis strategy.exit.initial_stop_atr = [1.5, 2.5]" in messages
+    first_window = next(m for m in messages if m.startswith("window 1/"))
+    assert messages.index(header) < messages.index(first_window)
+
+
+def test_optimisation_switched_off_resolves_to_an_empty_grid(caplog):
+    from swing.config import Config
+
+    cfg = _wf_config()
+    assert effective_grid(cfg) == {"strategy.exit.initial_stop_atr": [1.5, 2.5]}
+
+    data = cfg.as_dict()
+    data["backtest"]["walk_forward"]["optimize"] = False
+    off = Config(data)
+    assert effective_grid(off) == {}
+
+    with caplog.at_level(logging.INFO, logger="swing.walkforward"):
+        run_walk_forward(off, _wf_universe(n_symbols=2, n_bars=900))
+    messages = [r.getMessage() for r in caplog.records if r.name == "swing.walkforward"]
+    header = next(m for m in messages if m.startswith("walk-forward:"))
+    # An empty grid is still one run of the config as written, not zero runs:
+    # `grid_points({})` yields a single no-op point. A count of 0 here would
+    # mean the windows executed nothing at all.
+    assert "1 parameter combinations" in header
+    assert "0 grid axes" in header
+    assert any("runs the config as written" in m for m in messages)
+
+
+def test_pinning_an_axis_to_one_value_is_how_you_neutralise_it():
+    """Deleting an axis from config.toml restores the shipped default and the
+    optimiser overrides the setting anyway; a one-value axis cannot."""
+    from swing.config import Config
+
+    data = _wf_config().as_dict()
+    data["backtest"]["walk_forward"]["grid"] = {
+        "strategy.exit.chandelier_atr": [99.0],
+        "strategy.entry.donchian_len": [15, 20],
+    }
+    grid = effective_grid(Config(data))
+
+    assert list(grid) == ["strategy.entry.donchian_len", "strategy.exit.chandelier_atr"]
+    assert all(
+        point["strategy.exit.chandelier_atr"] == 99.0 for point in grid_points(grid)
+    )
+
+
 def test_walk_forward_is_deterministic():
     bars = _wf_universe()
     cfg = _wf_config()
@@ -250,6 +313,19 @@ def _gate_config(tmp_path, **gate_overrides):
     return Config(data)
 
 
+# Clears every threshold in _gate_config, benchmark comparison included: a real
+# walk-forward writes excess_cagr whenever the benchmark had bars, and a report
+# without it fails the gate on its own. Tests override the one number they are
+# about, so a failure names the criterion under test.
+_CLEARING_METRICS = {
+    "profit_factor": 1.8,
+    "max_drawdown": 0.20,
+    "n_trades": 60,
+    "sharpe": 0.9,
+    "excess_cagr": 0.04,
+}
+
+
 def _write_fake_report(cfg, metrics_overrides: dict, config_hash: str | None = None):
     """Write a minimal walk-forward manifest the gate can read."""
     import pandas as pd
@@ -295,8 +371,7 @@ def test_gate_blocks_when_no_report_exists(tmp_path):
 
 def test_gate_passes_when_metrics_clear_the_thresholds(tmp_path):
     cfg = _gate_config(tmp_path)
-    _write_fake_report(cfg, {"profit_factor": 1.8, "max_drawdown": 0.20,
-                             "n_trades": 60, "sharpe": 0.9})
+    _write_fake_report(cfg, dict(_CLEARING_METRICS))
     status = check_gate(cfg)
     assert status.passed, status.describe()
     assert status.report_path is not None
@@ -309,13 +384,12 @@ def test_gate_passes_when_metrics_clear_the_thresholds(tmp_path):
         ({"max_drawdown": 0.60}, "drawdown"),
         ({"n_trades": 5}, "trades"),
         ({"sharpe": 0.1}, "Sharpe"),
+        ({"excess_cagr": -0.024}, "buy-and-hold"),
     ],
 )
 def test_gate_blocks_on_each_individual_threshold(tmp_path, overrides, expected):
     cfg = _gate_config(tmp_path)
-    base = {"profit_factor": 1.8, "max_drawdown": 0.20, "n_trades": 60, "sharpe": 0.9}
-    base.update(overrides)
-    _write_fake_report(cfg, base)
+    _write_fake_report(cfg, {**_CLEARING_METRICS, **overrides})
     status = check_gate(cfg)
     assert not status.passed
     assert any(expected in r for r in status.reasons), status.describe()
@@ -324,11 +398,7 @@ def test_gate_blocks_on_each_individual_threshold(tmp_path, overrides, expected)
 def test_gate_blocks_when_the_config_changed_since_validation(tmp_path):
     """Editing a strategy parameter must re-lock the gate."""
     cfg = _gate_config(tmp_path)
-    _write_fake_report(
-        cfg,
-        {"profit_factor": 1.8, "max_drawdown": 0.20, "n_trades": 60, "sharpe": 0.9},
-        config_hash="deadbeefcafe",
-    )
+    _write_fake_report(cfg, dict(_CLEARING_METRICS), config_hash="deadbeefcafe")
     status = check_gate(cfg)
     assert not status.passed
     assert "hash" in status.reasons[0]
@@ -336,8 +406,7 @@ def test_gate_blocks_when_the_config_changed_since_validation(tmp_path):
 
 def test_an_infinite_profit_factor_does_not_pass_the_gate(tmp_path):
     cfg = _gate_config(tmp_path)
-    _write_fake_report(cfg, {"profit_factor": float("inf"), "max_drawdown": 0.10,
-                             "n_trades": 60, "sharpe": 0.9})
+    _write_fake_report(cfg, {**_CLEARING_METRICS, "profit_factor": float("inf")})
     status = check_gate(cfg)
     assert not status.passed
 
@@ -366,10 +435,110 @@ def test_gate_ignores_non_walk_forward_reports(tmp_path):
     assert not check_gate(cfg).passed
 
 
+def test_the_gate_blocks_a_strategy_that_loses_to_buy_and_hold(tmp_path):
+    """Profit factor and Sharpe say nothing about the alternative.
+
+    A run with pf 1.81 and Sharpe 0.64 that trailed SPY by 2.4% CAGR cleared
+    every other threshold; the excess-CAGR floor is the one that notices.
+    """
+    cfg = _gate_config(tmp_path)
+    _write_fake_report(cfg, {**_CLEARING_METRICS, "excess_cagr": -0.024})
+    status = check_gate(cfg)
+    assert not status.passed
+    assert any("buy-and-hold" in r for r in status.reasons), status.describe()
+    assert ("excess_cagr", -0.024, 0.0, False) in status.checked
+    assert "[FAIL] excess_cagr" in status.describe()
+
+
+def test_a_negative_excess_threshold_accepts_deliberate_underperformance(tmp_path):
+    """Trading return for a shallower drawdown is a real choice — but it has to
+    be written down in config before the report is read, not after."""
+    # Each half writes its own report: [backtest.gate] is inside the hashed
+    # [backtest] section, so editing a threshold re-locks the gate and reusing
+    # one report across both configs would block on the hash, not the number.
+    lenient = _gate_config(tmp_path / "lenient", min_excess_cagr=-0.05)
+    _write_fake_report(lenient, {**_CLEARING_METRICS, "excess_cagr": -0.024})
+    assert check_gate(lenient).passed, check_gate(lenient).describe()
+
+    strict = _gate_config(tmp_path / "strict", min_excess_cagr=0.0)
+    _write_fake_report(strict, {**_CLEARING_METRICS, "excess_cagr": -0.024})
+    assert not check_gate(strict).passed
+
+
+@pytest.mark.parametrize(
+    "excess",
+    [pytest.param(None, id="null"), pytest.param("absent", id="absent")],
+)
+def test_a_report_with_no_benchmark_comparison_cannot_pass_the_gate(tmp_path, excess):
+    """Fail closed. Benchmark bars missing at report time means the comparison
+    was never made, and 0.0 — what an unreadable metric would coerce to — is a
+    *passing* excess CAGR, so coercing it would open the gate on nothing."""
+    cfg = _gate_config(tmp_path)
+    out = _write_fake_report(cfg, {**_CLEARING_METRICS, "excess_cagr": None})
+    if excess == "absent":
+        manifest = json.loads((out / "manifest.json").read_text())
+        del manifest["metrics"]["excess_cagr"]
+        (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+    status = check_gate(cfg)
+    assert not status.passed
+    assert any("no buy-and-hold comparison" in r for r in status.reasons)
+    assert any("re-run `swing backtest --walk-forward`" in r for r in status.reasons)
+    assert [name for name, *_ in status.checked].count("excess_cagr") == 1
+
+    # ...and no threshold, however lenient, answers a question never asked.
+    lenient = _gate_config(tmp_path / "lenient", min_excess_cagr=-9.0)
+    _write_fake_report(lenient, {**_CLEARING_METRICS, "excess_cagr": None})
+    assert not check_gate(lenient).passed
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("inf"), id="plus_inf"),
+        pytest.param(float("-inf"), id="minus_inf"),
+        pytest.param(float("nan"), id="nan"),
+    ],
+)
+def test_a_non_finite_excess_cagr_cannot_pass_the_gate(tmp_path, value):
+    """A literal Infinity or NaN in the manifest is not a number to compare.
+
+    `Report.write` stringifies non-finite floats, but `json` round-trips
+    `Infinity` and `NaN` happily, so a hand-edited manifest — or one written by
+    anything else — can carry the real thing. `+inf >= threshold` is true for
+    every threshold there is, so reading it unguarded would open the gate on a
+    number nobody computed. It fails, and it says why.
+    """
+    cfg = _gate_config(tmp_path)
+    out = _write_fake_report(cfg, dict(_CLEARING_METRICS))
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["metrics"]["excess_cagr"] = value
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+    # The gate must be reading a float, not the string "inf" the report writer
+    # would have produced — otherwise this test proves nothing about +inf.
+    on_disk = json.loads(manifest_path.read_text())["metrics"]["excess_cagr"]
+    assert isinstance(on_disk, float) and not math.isfinite(on_disk)
+
+    status = check_gate(cfg)
+    assert not status.passed, status.describe()
+    assert any("no buy-and-hold comparison" in r for r in status.reasons)
+    assert "[FAIL] excess_cagr" in status.describe()
+
+    # ...and no threshold, however lenient, rescues it either.
+    lenient = _gate_config(tmp_path / "lenient", min_excess_cagr=-9.0)
+    lenient_out = _write_fake_report(lenient, dict(_CLEARING_METRICS))
+    lenient_manifest = lenient_out / "manifest.json"
+    payload = json.loads(lenient_manifest.read_text())
+    payload["metrics"]["excess_cagr"] = value
+    lenient_manifest.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    assert not check_gate(lenient).passed
+
+
 def test_gate_status_describe_is_readable(tmp_path):
     cfg = _gate_config(tmp_path)
-    _write_fake_report(cfg, {"profit_factor": 1.8, "max_drawdown": 0.20,
-                             "n_trades": 60, "sharpe": 0.9})
+    _write_fake_report(cfg, dict(_CLEARING_METRICS))
     text = check_gate(cfg).describe()
     assert "PASS" in text and "profit_factor" in text
 
@@ -845,6 +1014,8 @@ def test_the_walk_forward_runner_writes_benchmark_bootstrap_and_earnings(
     manifest = json.loads((out / "manifest.json").read_text())
 
     assert manifest["bootstrap"]["n_resamples"] == 40
+    # What was searched, recorded so the run can be audited after the fact.
+    assert manifest["effective_grid"] == {"strategy.exit.initial_stop_atr": [1.5, 2.5]}
     assert manifest["earnings_calendar"] == str(calendar_path)
     assert manifest["earnings_calendar_symbols"] == len(bars)
     assert manifest["metrics"]["benchmark_return"] is not None
@@ -861,3 +1032,63 @@ def test_the_walk_forward_runner_writes_benchmark_bootstrap_and_earnings(
     assert "bootstrap (n=40, block=10d)" in text
     assert (out / "bootstrap_n_40_block_10d.csv").exists()
     assert "vs benchmark" in (out / "report.html").read_text()
+
+
+# ---------------------------------------------------------------------------
+# ablation variants (the rows docs/indicator-research.md §16 cites)
+# ---------------------------------------------------------------------------
+_MISSING = object()
+
+
+def _resolve(data: dict, path: str):
+    """Walk a dotted override path exactly as ``apply_overrides`` walks it."""
+    node = data
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def test_every_ablation_override_names_a_key_the_config_already_has():
+    """A misspelled override path is a silent no-op, not a crash.
+
+    ``apply_overrides`` walks with ``setdefault``, so
+    ``strategy.regime.exit_on_regime_of`` creates a key nothing reads: the
+    variant runs, finishes, and reports the baseline under another name. No
+    downstream check can tell that apart from a real ablation, and a component
+    would then look worthless because its switch was never flipped.
+    """
+    data = load_config().as_dict()
+    for variant, overrides in ABLATIONS.items():
+        for path in overrides:
+            found = _resolve(data, path)
+            assert found is not _MISSING, (
+                f"ablation {variant!r} overrides {path!r}, which is not a config "
+                "key: apply_overrides would create it and the variant would "
+                "quietly re-run the baseline"
+            )
+            assert not isinstance(found, dict), (
+                f"ablation {variant!r} overrides {path!r}, which is a table and "
+                "not a leaf: replacing it drops every key underneath"
+            )
+
+
+def test_the_exit_matrix_cells_are_shipped_variants():
+    """§16's regime-exit finding is reproducible only if the combined cells are
+    exactly the single-knob variants stacked — otherwise the rows compared in
+    the doc and the rows the command prints are different configurations."""
+    # The printed table and the report's delta columns are read against the
+    # first row.
+    assert next(iter(ABLATIONS)) == "baseline"
+    assert ABLATIONS["baseline"] == {}
+
+    assert ABLATIONS["regime_exit"] == {"strategy.regime.exit_on_regime_off": True}
+    assert ABLATIONS["no_exits"] == {
+        **ABLATIONS["no_trailing_stop"],
+        **ABLATIONS["no_time_stop"],
+    }
+    assert ABLATIONS["no_exits_regime_exit"] == {
+        **ABLATIONS["no_exits"],
+        **ABLATIONS["regime_exit"],
+    }

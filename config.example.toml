@@ -92,11 +92,34 @@ earnings_calendar = ""
 name = "trend_momentum_core"
 
   [strategy.regime]
-  # New entries only when the market is in an uptrend. Existing positions are
-  # never force-closed by regime — they keep trailing.
+  # New entries only when the market is in an uptrend. What happens to positions
+  # already open is `exit_on_regime_off` below: by default they ride the
+  # risk-off stretch out and keep trailing; set it and they are closed instead.
   enabled = true
   symbol = "SPY"
   ma_len = 200
+  # Close open positions when the regime turns off, at the next open.
+  #
+  # Off by default because the trail is what normally protects an open position,
+  # and force-closing the book on a 200-SMA cross churns it at every whipsaw.
+  # Turn it on when the trail is switched off: a stop then never leaves its
+  # initial level and the regime is the only thing left that can cut exposure.
+  # Measured both ways in docs/indicator-research.md §16 — it improved results
+  # in exactly one of four configurations, the one with no trail and no time
+  # stop, and cost return in the other three. It is contingent, not free.
+  #
+  # Mechanically: the backtest reads the regime on the close that flips it,
+  # queues the exit and fills at the next open, labelled `regime_off` in the
+  # exit table (a time stop firing on the same bar keeps its own label — same
+  # fill either way); `swing scan` prints "close position" for every holding on
+  # that bar. A missing or disabled benchmark degrades to "no regime filter",
+  # never to "sell everything".
+  #
+  # This key is inside the hashed [strategy] section — see Config.hash — so its
+  # arrival changed every hash that did not already set it, re-locking the gate
+  # once (one `swing backtest --walk-forward` clears that), and flipping it
+  # re-locks yours again. That is deliberate: it changes the trades.
+  exit_on_regime_off = false
 
   [strategy.trend_template]
   # Minervini-style stage-2 template. See docs/indicator-research.md §Trend.
@@ -176,6 +199,13 @@ fill = "next_open"                 # signals at close -> fill next open
     # Deliberately small. A wide grid over 15 windows does not find a better
     # strategy, it finds a better fit to noise — and walk-forward only limits
     # that damage, it does not eliminate it.
+    #
+    # This file layers UNDER your config.toml, so deleting an axis here restores
+    # this default instead of removing it — the optimiser then overrides the
+    # value you thought you had pinned, in every window. To neutralise an axis,
+    # give it one value in config.toml ("strategy.exit.chandelier_atr" = [99.0]),
+    # do not delete it. `swing backtest --walk-forward` logs the grid it
+    # resolved, and the report manifest records it as `effective_grid`.
     "strategy.entry.donchian_len" = [15, 20, 30]
     "strategy.exit.initial_stop_atr" = [1.5, 2.0, 2.5]
     "strategy.exit.chandelier_atr" = [2.5, 3.0, 4.0]
@@ -187,6 +217,13 @@ fill = "next_open"                 # signals at close -> fill next open
   max_drawdown_pct = 0.35
   min_trades = 30
   min_sharpe = 0.40
+  # Excess CAGR over buy-and-hold on the regime benchmark, same window. The
+  # alternative to trading this is not cash, it is the index: a profit factor of
+  # 1.8 and a Sharpe of 0.64 are worth nothing while SPY compounds 2.4% a year
+  # faster. 0.0 = must not underperform; set it negative to accept a deliberate
+  # trade of return for lower drawdown or exposure. A report with no benchmark
+  # comparison FAILS this check — an unverifiable criterion is not a passed one.
+  min_excess_cagr = 0.0
 
 [alerts]
 enabled = true

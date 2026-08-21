@@ -201,6 +201,53 @@ def test_regime_off_blocks_entries_and_says_so(scan_config):
     assert any("risk-off" in p.sizing_note for p in sheet.watch)
 
 
+def _risk_off_config(scan_config, exit_on_regime_off: bool) -> Config:
+    """`scan_config` with the regime filter on; the caller seeds a falling SPY."""
+    data = scan_config.as_dict()
+    data["strategy"]["regime"]["enabled"] = True
+    data["strategy"]["regime"]["exit_on_regime_off"] = exit_on_regime_off
+    return Config(data)
+
+
+def _seed_falling_spy(scan_config):
+    cache = BarCache(scan_config.expand_path(scan_config.data.cache_dir))
+    cache.write("SPY", make_bars(list(np.linspace(400.0, 200.0, 400)),
+                                 start="2020-01-01", volume=1e8))
+
+
+def test_a_regime_exit_tells_the_operator_to_close_open_positions(scan_config):
+    """Live parity: the backtest would sell this at the next open, so say so."""
+    _seed_cache(scan_config)
+    _seed_falling_spy(scan_config)
+    from swing.execution.journal import record_entry
+
+    record_entry(scan_config, "S00", 1, 20.0, 18.0)
+    cfg = _risk_off_config(scan_config, exit_on_regime_off=True)
+
+    run_scan(cfg, dry_run=True, refresh=False)
+    sheet = load_sheet(latest_sheet_path(cfg))
+
+    assert not sheet.regime_ok
+    closes = [h for h in sheet.holdings if h.action == "close position"]
+    assert [h.symbol for h in closes] == ["S00"]
+    assert "risk-off" in closes[0].detail
+
+
+def test_no_close_action_when_the_regime_exit_is_off(scan_config):
+    _seed_cache(scan_config)
+    _seed_falling_spy(scan_config)
+    from swing.execution.journal import record_entry
+
+    record_entry(scan_config, "S00", 1, 20.0, 18.0)
+    cfg = _risk_off_config(scan_config, exit_on_regime_off=False)
+
+    run_scan(cfg, dry_run=True, refresh=False)
+    sheet = load_sheet(latest_sheet_path(cfg))
+
+    assert not sheet.regime_ok
+    assert not any(h.action == "close position" for h in sheet.holdings)
+
+
 def test_open_positions_reduce_the_available_slots(scan_config):
     _seed_cache(scan_config)
     from swing.execution.journal import record_entry
@@ -283,8 +330,11 @@ def _passing_report(cfg: Config, age_days: int) -> None:
                 "kind": "walk_forward",
                 "generated_at": f"{generated}T17:30:00",
                 "config_hash": cfg.hash,
+                # excess_cagr included because a report without a
+                # buy-and-hold comparison fails the gate on its own, and these
+                # tests are about report *age*, not about the thresholds.
                 "metrics": {"profit_factor": 1.8, "max_drawdown": 0.20,
-                            "n_trades": 60, "sharpe": 0.9},
+                            "n_trades": 60, "sharpe": 0.9, "excess_cagr": 0.04},
             }
         )
     )

@@ -140,7 +140,7 @@ def run_scan(
     from .execution.journal import open_positions
 
     positions = open_positions(cfg)
-    holdings = _holding_actions(cfg, positions, bars, earnings, as_of_ts)
+    holdings = _holding_actions(cfg, positions, bars, earnings, as_of_ts, regime_ok)
     equity = float(cfg.account.equity)
     committed = sum(p.cost_basis for p in positions.values())
     available_cash = max(equity - committed, 0.0)
@@ -492,13 +492,19 @@ def _thesis(candidate: dict) -> str:
     return ", ".join(bits)
 
 
-def _holding_actions(cfg, positions, bars, earnings, as_of_ts) -> list[HoldingAction]:
+def _holding_actions(
+    cfg, positions, bars, earnings, as_of_ts, regime_ok: bool
+) -> list[HoldingAction]:
     """What to do about positions already on the books."""
     actions: list[HoldingAction] = []
     s = cfg.strategy
     tighten_days = int(s.earnings.get("tighten_stop_days_before", 0))
     time_stop = int(s.exit.time_stop_days)
     today = as_of_ts.date()
+    # The backtest queues this exit on the same bar and fills it at the next
+    # open; saying nothing here would mean the sheet withholds a decision the
+    # validated strategy has already made.
+    regime_exit = rules.regime_exit_due(regime_ok, cfg)
 
     for symbol, pos in sorted(positions.items()):
         history = bars.get(symbol)
@@ -513,6 +519,15 @@ def _holding_actions(cfg, positions, bars, earnings, as_of_ts) -> list[HoldingAc
             continue
 
         close = float(history["close"].iloc[-1])
+        if regime_exit:
+            actions.append(
+                HoldingAction(
+                    symbol, "close position",
+                    "market regime is risk-off and exit_on_regime_off is set — "
+                    f"sell at the next open (last {close:.2f})",
+                )
+            )
+
         from . import indicators as ind
 
         atr_series = ind.atr(

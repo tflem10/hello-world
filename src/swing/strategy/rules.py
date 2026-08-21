@@ -13,7 +13,10 @@ symbols at once.
 Default strategy: "Trend-Momentum Core"
 ---------------------------------------
 1. **Regime gate** — only take new entries when SPY is above its 200-day SMA.
-   Existing positions are never force-closed by regime; they keep trailing.
+   Existing positions ride a regime-off stretch out; they keep trailing. Setting
+   ``[strategy.regime] exit_on_regime_off`` reverses that and closes the book at
+   the next open, which is what you want when the trail has been switched off
+   and nothing else is protecting an open gain.
 2. **Liquidity** — price >= $5, 20-day average dollar volume >= $5M.
 3. **Trend template** (Minervini) — close above 50 > 150 > 200 SMA, the 200-SMA
    itself rising, at least 25% above the 52-week low, within 25% of the 52-week
@@ -244,6 +247,28 @@ def regime_series(benchmark_bars: pd.DataFrame, cfg) -> pd.Series:
         return pd.Series(True, index=idx, dtype=bool)
     ma = ind.sma(benchmark_bars["close"], int(regime.ma_len))
     return (benchmark_bars["close"] > ma).fillna(False).astype(bool)
+
+
+def regime_exit_due(regime_ok: bool, cfg) -> bool:
+    """Should open positions be closed because the market regime has turned off?
+
+    Off by default: the trail is what normally protects an open position, and
+    force-closing the book on a 200-SMA cross would churn it at every whipsaw.
+    With the trail disabled a stop never leaves its initial level, so the regime
+    is the only thing left that can cut exposure — that is what this option is
+    for, and it is a strategy decision, so it lives here rather than in the
+    engine or the scanner.
+
+    ``regime_ok`` is the caller's regime state for the bar being decided, which
+    is all-``True`` when the gate is off or the benchmark is missing: a missing
+    SPY must degrade to "no regime filter", never to "sell everything".
+    """
+    regime = cfg.strategy.regime
+    if not bool(regime.get("enabled", True)):
+        return False
+    if not bool(regime.get("exit_on_regime_off", False)):
+        return False
+    return not bool(regime_ok)
 
 
 # ---------------------------------------------------------------------------

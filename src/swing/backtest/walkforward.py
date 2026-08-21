@@ -121,6 +121,27 @@ def grid_points(grid: dict) -> list[dict]:
     return [dict(zip(keys, values, strict=True)) for values in combos]
 
 
+def effective_grid(cfg: Config) -> dict[str, list]:
+    """The grid this config will actually search, axes in sorted order.
+
+    ``config.example.toml`` layers UNDER the user's ``config.toml``, so an axis
+    deleted from the user file is not removed — the shipped default comes back
+    and the optimiser overrides the setting the user meant to pin. Neutralise
+    an axis by giving it a single value, not by deleting it. Resolved here once
+    so the startup log and the report manifest cannot disagree about what ran.
+
+    ``optimize = false`` searches nothing, and reports an empty grid rather than
+    the axes it is ignoring.
+    """
+    wf = cfg.backtest.walk_forward
+    if not bool(wf.get("optimize", True)):
+        return {}
+    grid = wf.get("grid", {}) or {}
+    if hasattr(grid, "as_dict"):
+        grid = grid.as_dict()
+    return {key: list(grid[key]) for key in sorted(grid)}
+
+
 # Two parameter sets whose objective differs by less than this are treated as
 # indistinguishable, and the first in sorted order wins.
 #
@@ -215,16 +236,21 @@ def run_walk_forward(
             f"{wf.in_sample_years}y/{wf.out_of_sample_years}y walk-forward"
         )
 
-    grid = wf.get("grid", {}) or {}
-    if hasattr(grid, "as_dict"):
-        grid = grid.as_dict()
-    combos = grid_points(grid) if bool(wf.get("optimize", True)) else [{}]
+    grid = effective_grid(cfg)
+    combos = grid_points(grid)
     objective = str(wf.get("objective", "profit_factor"))
     min_is_trades = int(wf.get("min_is_trades", 0))
 
+    # Printed axis by axis because the resolved grid is not the one in the
+    # user's config.toml: deleting an axis there restores the shipped default.
     log.info(
-        "walk-forward: %d windows x %d parameter combinations", len(windows), len(combos)
+        "walk-forward: %d windows x %d parameter combinations over %d grid axes",
+        len(windows), len(combos), len(grid),
     )
+    for path, values in grid.items():
+        log.info("  grid axis %s = %s", path, values)
+    if not grid:
+        log.info("  grid axis (none) — every window runs the config as written")
 
     # One aligned panel per distinct feature key, shared by every window and
     # every combination: the windows are row slices of it, not rebuilds.

@@ -20,7 +20,12 @@ from ..strategy.rules import SymbolMeta
 from .engine import run_backtest
 from .metrics import apply_benchmark, benchmark_equity, compute_metrics
 from .report import bootstrap_extras, build_report, report_dir
-from .walkforward import apply_overrides, parameter_sensitivity, run_walk_forward
+from .walkforward import (
+    apply_overrides,
+    effective_grid,
+    parameter_sensitivity,
+    run_walk_forward,
+)
 
 log = get_logger("swing.backtest.runner")
 
@@ -35,6 +40,7 @@ SENSITIVITY_PARAMS = [
 ]
 
 # Each ablation turns exactly one component off, so the delta is attributable.
+# The exit-matrix group at the bottom is the one documented exception.
 ABLATIONS: dict[str, dict] = {
     "baseline": {},
     "no_regime_filter": {"strategy.regime.enabled": False},
@@ -48,6 +54,25 @@ ABLATIONS: dict[str, dict] = {
     "no_trailing_stop": {"strategy.exit.chandelier_atr": 99.0},
     "no_time_stop": {"strategy.exit.time_stop_days": 0},
     "rsi2_entry": {"strategy.entry.mode": "rsi2_pullback"},
+    # docs/indicator-research.md §16. The regime exit is contingent: it pays only
+    # where nothing else protects an open position, so measuring it needs PAIRS,
+    # and the last two variants move more than one knob on purpose. Their delta
+    # against the baseline row is therefore not attributable to any single knob —
+    # read `regime_exit` against `baseline` (the exit on, both other exits in
+    # place) and `no_exits_regime_exit` against `no_exits` (the exit on, both
+    # others gone). The second pair is the cell that was carried to walk-forward.
+    # `chandelier_atr = 99.0` is how the trail is neutralised; the config
+    # validator rejects 0.
+    "regime_exit": {"strategy.regime.exit_on_regime_off": True},
+    "no_exits": {
+        "strategy.exit.chandelier_atr": 99.0,
+        "strategy.exit.time_stop_days": 0,
+    },
+    "no_exits_regime_exit": {
+        "strategy.exit.chandelier_atr": 99.0,
+        "strategy.exit.time_stop_days": 0,
+        "strategy.regime.exit_on_regime_off": True,
+    },
 }
 
 
@@ -297,6 +322,10 @@ def _run_walk_forward(cfg, args, start, end, etf_only: bool) -> None:
             "out_of_sample_years": int(cfg.backtest.walk_forward.out_of_sample_years),
             "etf_only": etf_only,
             "chosen_params": result.chosen_params,
+            # What was searched, not what the user's config.toml says: the
+            # example config layers under it, so a deleted axis is a
+            # restored default. Only the report can settle that afterwards.
+            "effective_grid": effective_grid(cfg),
             "universe_size": result.segments[0].universe_size if result.segments else 0,
             "data_hash": result.segments[0].data_hash if result.segments else "",
         },
