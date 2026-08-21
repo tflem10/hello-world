@@ -49,6 +49,65 @@ share count is wrong.
 
 ---
 
+## The gate
+
+`swing scan` emits no live pick until a walk-forward report exists whose
+**out-of-sample** metrics clear every threshold in `[backtest.gate]`, *and*
+whose config hash matches the config you are about to trade. Five thresholds,
+plus the hash:
+
+| key | default | what it asks |
+|---|---|---|
+| `min_profit_factor` | 1.30 | gross wins ÷ gross losses on the concatenated out-of-sample curve |
+| `max_drawdown_pct` | 0.35 | deepest peak-to-trough on that curve |
+| `min_trades` | 30 | enough trades for the other four numbers to mean anything |
+| `min_sharpe` | 0.40 | return per unit of volatility |
+| `min_excess_cagr` | 0.0 | CAGR minus buy-and-hold on the regime benchmark, same window |
+
+`min_excess_cagr` is the newest of the five and the one that bites. The
+alternative to running this system is not cash, it is the index: a profit factor
+of 1.53 and a Sharpe of 0.60 are worth nothing over years in which SPY
+compounded faster. `0.0` means "must not underperform". A negative value buys a
+deliberate trade of return for a shallower drawdown or less exposure — a real
+choice, but one you have to write into config *before* reading the report.
+
+**A report with no benchmark comparison fails this check.** The gate cannot tell
+whether the strategy beat the index, and an unverifiable criterion is not a
+passed one. Cache the benchmark symbol and re-run the walk-forward.
+
+Gate thresholds live inside the hashed `[backtest]` section, unlike the
+reporting knobs under `[reports]`. That is deliberate — a report validated
+against a floor that is no longer in force has not been validated against the
+floor now being applied. The one-time cost when `min_excess_cagr` landed:
+**it changed every config hash and re-locked every existing gate.** One
+`swing backtest --walk-forward` clears that.
+
+A blocked gate names the number:
+
+```
+backtest gate: BLOCKED
+  report: reports/2026-08-21-walkforward-final
+  [ok  ] profit_factor         1.531  (limit 1.3)
+  [ok  ] max_drawdown          0.274  (limit 0.35)
+  [ok  ] n_trades            622.000  (limit 30)
+  [ok  ] sharpe                0.599  (limit 0.4)
+  [FAIL] excess_cagr          -0.058  (limit 0)
+  - out-of-sample excess CAGR -5.80% vs buy-and-hold is below +0.00%
+```
+
+Those are the real out-of-sample numbers from
+`reports/2026-08-21-walkforward-final/`, not a worst case: four criteria
+cleared and the fifth did not. The strategy is not broken, it is losing to the
+index — docs/indicator-research.md §16 is what was tried against that, and what
+it did not fix.
+
+Age is said out loud but never enforced. A report older than `[reports]
+max_walkforward_age_days` (90) still opens the gate and puts a warning on the
+pick sheet: a stale validation is a reason to re-run the walk-forward, not a
+reason to have no picks tonight.
+
+---
+
 ## The daily loop
 
 ### 17:30 ET — the scan
@@ -131,6 +190,10 @@ The sheet tells you what changed:
 - **earnings soon** — tighten or close. A stop does not protect you across an
   overnight gap; that is the whole reason for the entry blackout.
 - **time stop** — held 40 trading days. Close it and free the slot.
+- **close position** — only if you set `[strategy.regime] exit_on_regime_off`.
+  The market is risk-off, and this is the sheet saying what the backtested
+  strategy does on that bar: sell at the next open. With the default (`false`)
+  a risk-off regime blocks new entries and leaves your holdings alone.
 
 ---
 
@@ -211,7 +274,9 @@ watched confirm mode do the right thing repeatedly.
 
 ### The gate is blocking and I want picks
 
-That is the system working. Your options, best first:
+That is the system working. Read the failing line first — it names the criterion
+and the margin, and the five are tabulated under **The gate** above. Then, best
+option first:
 
 1. Improve the strategy and re-run the walk-forward.
 2. Decide the thresholds in `[backtest.gate]` were wrong *and write down why*

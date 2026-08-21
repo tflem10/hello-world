@@ -56,6 +56,9 @@ a component. Only your own ablation justifies *keeping* it.
 | no_trailing_stop | | | | | |
 | no_time_stop | | | | | |
 | rsi2_entry | | | | | |
+| regime_exit | | | | | |
+| no_exits | | | | | |
+| no_exits_regime_exit | | | | | |
 
 ---
 
@@ -160,9 +163,15 @@ handful of episodes (1929, 1937, 2000–02, 2008).
 
 **Why keep it anyway.** For a leveraged-to-your-net-worth-by-attention retail
 account, cutting drawdown is worth giving up return. This filter's job is to
-stop the system from opening new positions into a 2008 or a 2022. It never
-force-closes an existing position — those keep trailing — because forced
+stop the system from opening new positions into a 2008 or a 2022. By default it
+never force-closes an existing position — those keep trailing — because forced
 liquidation on a regime flip adds whipsaw without adding protection.
+
+**`[strategy.regime] exit_on_regime_off` reverses that**, closing open positions
+at the next open when the benchmark drops below its 200-SMA. It ships `false`,
+and §16 is the measurement of why: switched on it *helps* only when the trail is
+also off, and costs return in every configuration where the trail is doing its
+job. It is a patch for a missing exit, not an improvement to a working one.
 
 **Ablation:** `no_regime_filter`. Expect the drawdown column to move much more
 than the CAGR column. If it does not, the filter is not doing its job here.
@@ -349,8 +358,15 @@ capital turnover — a position that has gone nowhere for 40 trading days is
 consuming one of only four slots. That is a portfolio-construction argument,
 not an edge argument, and it should be evaluated as one.
 
+**It has now been evaluated, and so has the trail: both cost money here.**
+Removing either moved CAGR, Sharpe, profit factor *and* max drawdown the right
+way in the full-period ablation, by no longer truncating the winners this
+system's expectancy depends on. The defaults are unchanged anyway, because the
+variant that beat them still loses to buy-and-hold. §16 has the numbers, the
+mechanism and the limitation.
+
 **Ablations:** `no_trailing_stop`, `no_time_stop`, plus
-`swing backtest --sensitivity` over all three multipliers.
+`swing backtest --sensitivity` over all three multipliers. Results in §16.
 
 ---
 
@@ -520,6 +536,173 @@ land in the "watch (unaffordable)" section because whole-share math does not
 work at that size. That is arithmetic, not a defect — and the amount you can
 learn from the process at $100 while risking almost nothing is the actual
 value of running it at that size.
+
+---
+
+## 16. The exits, measured — and a benchmark that still wins
+
+**Config:** `[strategy.exit]` — `chandelier_atr = 3.0`, `time_stop_days = 40`;
+`[strategy.regime]` — `exit_on_regime_off = false`. **None of these defaults
+were changed on the strength of anything below.**
+
+**The question.** §10 concedes that the exit multiples are conventions and that
+the time stop has the weakest justification of the three. This section is what
+happened when that was measured on the real cache — 954 symbols, this machine's
+bars — instead of argued. It is a negative result with a real mechanism in it.
+
+### The full-period ablation: both exits were destroying value
+
+`swing backtest --ablations`, 2010-01-04 → 2026-08-18, in-sample over the whole
+period, shipped sizing (4 positions, 2% risk). Report:
+`reports/2026-08-20-ablations/`.
+
+| variant | trades | CAGR | Sharpe | PF | max DD |
+|---|---|---|---|---|---|
+| baseline | 815 | 7.65% | 0.505 | 1.151 | 43.43% |
+| `no_trailing_stop` | 668 | 9.29% | 0.562 | **1.292** | **29.84%** |
+| `no_time_stop` | 698 | **9.64%** | **0.603** | 1.245 | 36.18% |
+
+Both exits were hurting, and both by the same mechanism: **truncating winners**.
+The Chandelier trail ratchets up under a rising position and takes it out on the
+first 3-ATR pullback; the 40-day clock closes whatever is open on day 40
+regardless of what it is doing. This system's win rate is 36%, so its
+expectancy lives entirely in the right tail — a rule that systematically
+shortens that tail cuts the thing the strategy runs on. That is not a new
+observation about trend-following (Faith 2007; Hurst, Ooi & Pedersen 2017); it
+is new *here*, on this universe, at these costs. Removing the trail also cut max
+drawdown by 13.6 points, which is the opposite of the usual risk/return
+trade-off and is reason for suspicion rather than celebration.
+
+### The 2×2×2 matrix: the regime exit is contingent, not good
+
+The follow-up question: with the trail off, a stop never leaves its initial
+level, so does a regime exit fill the hole? Run by hand as a 2×2×2 sweep over the
+**full cached history from 2005**, shipped sizing (4 positions, 2% risk), every
+cell on the same window:
+
+| trail | time stop | regime exit | trades | CAGR | max DD | Sharpe | exposure |
+|---|---|---|---|---|---|---|---|
+| on | on | off | 963 | 5.90% | 43.51% | 0.42 | 72.3% |
+| on | on | **on** | 1025 | 3.83% | 43.47% | 0.31 | 68.7% |
+| on | off | off | 820 | 7.50% | 36.18% | 0.51 | 73.3% |
+| on | off | **on** | 892 | 6.59% | 37.00% | 0.47 | 69.6% |
+| off | on | off | 766 | **10.16%** | **29.79%** | **0.62** | 74.1% |
+| off | on | **on** | 848 | 7.01% | 32.91% | 0.48 | 69.8% |
+| off | off | off | 53 | 6.57% | 47.13% | 0.43 | 90.5% |
+| off | off | **on** | 317 | 8.53% | 35.39% | 0.56 | 73.6% |
+
+**These absolute numbers are not comparable to anything else in this document.**
+The sweep runs from 2005, the whole cache; the ablations above start in 2010 and
+the walk-forward reports out-of-sample from 2013. Only the comparisons *within*
+the table are valid.
+
+**Reproduce:** `swing backtest --ablations`. Six of the eight cells ship as
+variants, keyed trail/time stop/regime exit: `baseline` (on/on/off),
+`regime_exit` (on/on/on), `no_trailing_stop` (off/on/off), `no_time_stop`
+(on/off/off), `no_exits` (off/off/off), `no_exits_regime_exit` (off/off/on). The
+two mixed cells with the regime exit on are still a hand sweep, and the command
+runs from `[backtest] start` rather than 2005, so it regenerates the comparisons
+and not these numbers.
+
+To regenerate *these* numbers: the shipped defaults from `config.example.toml`
+(4 positions at 2% risk, nothing from your `config.toml`), `start =
+2005-01-01`, `end = None`, the 954-symbol cache, `run_backtest` per cell with
+one shared feature and panel cache, `compute_metrics` for the row. Every cell
+above was re-derived that way and reproduces to the digits printed; the
+exposure column is `avg_exposure`, capital deployed, not days with a position.
+The 53-trade cell is worth running once for its own sake — profit factor 8.1 on
+53 trades over twenty-one years is what a table looks like when a configuration
+has stopped trading rather than started winning.
+
+Three things it says:
+
+1. **Turning the trail off is the strongest single effect, and it holds in
+   three of the four pairs** — by 4.3, 3.2 and 1.9 points of CAGR. The
+   exception is the cell with no trail, no time stop and no regime exit
+   (7.50% → 6.57%), which has no exit mechanism left at all beyond the initial
+   stop: 53 trades in twenty-one years, 90.5% exposed. That is a degenerate
+   configuration rather than a counter-example about trailing. Everywhere an
+   exit still exists, removing the trail helps, which agrees with the ablation
+   above on a different window.
+2. **The regime exit is not a general improvement.** It helps in exactly one of
+   four cells — the one where both other exits are off (6.57% → 8.53% CAGR,
+   47.13% → 35.39% max drawdown) — and hurts in the other three, most where
+   there was most to lose: the matrix's best cell drops 10.16% → 7.01%. Its
+   value is entirely contingent on there being no other mechanism protecting an
+   open position.
+   That is why it ships `false`, and why its annotation in `config.example.toml`
+   reads "turn it on when the trail is off" rather than "turn it on". It is also
+   the measured version of the whipsaw argument in §3.
+3. **The configuration taken to walk-forward validation was not the best cell
+   in-sample.** Both exits off + regime exit was chosen *before* this matrix
+   existed; the matrix says trail-off with the time stop kept and no regime exit
+   scores better here on CAGR, drawdown and Sharpe. That is a limitation of the
+   search, recorded rather than tidied away — and §14 applies to it in full: the
+   gaps between these cells are the size of the gaps noise moves.
+
+### What it bought out of sample, and what it did not
+
+Walk-forward, 14 windows, 3y in-sample / 1y out-of-sample, out-of-sample span
+2013-01-02 → 2026-08-18, 954 symbols. Shipped defaults
+(`reports/2026-08-19-walkforward/`) against both exits off + regime exit,
+re-sized to 10 positions at 1% risk (`reports/2026-08-21-walkforward-final/`):
+
+| out-of-sample | shipped defaults | both exits off + regime exit |
+|---|---|---|
+| profit factor | 1.153 | 1.531 |
+| Sharpe | 0.381 | 0.599 |
+| CAGR | 5.47% | 9.10% |
+| max drawdown | 25.91% | 27.43% |
+| trades | 648 | 622 |
+| bootstrap CAGR p5–p95 | −2.18% … +14.29% | +2.06% … +16.53% |
+| P(CAGR ≤ 0) | 12.8% | 1.5% |
+
+That is a genuine out-of-sample improvement on the number hardest to flatter:
+the 5th percentile of the resampled CAGR distribution crossed from negative to
+positive. Read it with §14's warning attached — one path, resampled.
+
+**And it still fails the gate.** Over the same window buy-and-hold SPY
+compounded at **14.91%**. This returns **9.10%** — an excess CAGR of **−5.80%**
+against a `min_excess_cagr` floor of 0.0, so `swing scan` refuses to emit picks
+for it. Nor is it a deliberate trade of return for safety: capital was 82%
+deployed on average, with a position open on 84% of days, and SPY beat it on
+Sharpe (**0.912** against 0.599), Sortino (1.115 against 0.761) and Calmar
+(0.442 against 0.332) while taking a *deeper* max drawdown (33.72% against
+27.43%) to do it. The two curves ran at almost the same volatility — 16.79%
+for SPY against 16.96% here — so this is not a quieter strategy earning less.
+It is the same volatility earning less.
+
+**How that benchmark Sharpe was derived**, because it is easy to get wrong:
+`compute_metrics` on the buy-and-hold curve `benchmark_equity` builds from the
+cached SPY closes, over the identical 3,427-day index of the report's own
+`equity.csv`, at the house `risk_free_rate = 0.0`. Two checks that the curve is
+the one the report used: it reproduces the manifest's `benchmark_cagr`
+(14.906%) and `benchmark_max_drawdown` (33.717%) to eight decimals, and the same
+call on the strategy's `equity.csv` returns its manifest Sharpe (0.59900076)
+exactly. **Do not quote a benchmark Sharpe from anywhere else.** The published
+figures for SPY over this period mostly assume a non-zero risk-free rate: at
+rf = 2% this same curve scores 0.793, and comparing that against a strategy
+number computed at rf = 0 understates the gap by more than a tenth of a
+Sharpe — in the flattering direction.
+
+The gap is 5.8 percentage points of CAGR. Moving from the cell that was
+selected to the best cell in the matrix is worth 1.6 of them (8.53% → 10.16%,
+in-sample, on a longer window), and the widest spread anywhere in the matrix is
+6.3. **No choice of cell closes a 5.8-point gap**, and picking the cell that
+looks best in-sample is the move §14 exists to warn about. This is not a search
+that stopped one iteration short of the answer.
+
+**What was done about it: nothing.** The defaults still carry the trail at 3
+ATR, the time stop at 40 days and `exit_on_regime_off = false`. "A variant beat
+the shipped configuration in one in-sample sweep and one walk-forward run, and
+still lost to the index" is not a reason to change the thing the gate has to
+validate. The finding is recorded here, the option is in the config with its
+contingency written beside it, and the gate stays shut — which is §15's own
+reading of a result below the thresholds: fix the strategy or lower your
+ambitions, do not lower the gate.
+
+**Ablations:** `no_trailing_stop`, `no_time_stop`, `regime_exit`, `no_exits`,
+`no_exits_regime_exit`.
 
 ---
 

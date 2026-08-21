@@ -103,7 +103,7 @@ flagged as unjustified — in [docs/indicator-research.md](docs/indicator-resear
 
 | stage | rule |
 |---|---|
-| **regime** | new entries only while SPY > its 200-day SMA (open positions keep trailing) |
+| **regime** | new entries only while SPY > its 200-day SMA (open positions keep trailing, unless `exit_on_regime_off` is set — then they close at the next open) |
 | **liquidity** | price ≥ $5, 20-day average dollar volume ≥ $5M |
 | **trend** | close > 50 > 150 > 200 SMA, 200-SMA rising, ≥25% above the 52-week low, within 25% of the 52-week high, ADX(14) ≥ 20 |
 | **entry** | today exceeds the prior 20-day high and closes within 2% of it, on volume ≥ 1.3× its 50-day average |
@@ -136,8 +136,10 @@ flagged as unjustified — in [docs/indicator-research.md](docs/indicator-resear
   best cell
 - component ablations, so each rule has to earn its place
 - a buy-and-hold **benchmark** (the regime symbol, SPY by default) plotted on
-  the equity curve and reported as excess CAGR — beating a flat line is the
-  minimum bar
+  the equity curve and reported as excess CAGR — and *enforced*: clearing
+  `[backtest.gate] min_excess_cagr` (0.0 by default, so "do not underperform")
+  is one of the five gate criteria, and a report with no benchmark comparison
+  fails it rather than skipping it
 - **block-bootstrap confidence intervals** on the out-of-sample curve (p5/p50/p95
   CAGR and max drawdown, plus P(CAGR ≤ 0)) — a floor on the uncertainty, not an
   estimate of it
@@ -250,7 +252,7 @@ docs/
   indicator-research.md     every default traced to evidence or an ablation
   schwab-setup.md           developer account → first live quote
   runbook.md                daily/weekly operation and failure recovery
-tests/                      589 tests, no network
+tests/                      612 tests, no network
 ```
 
 ---

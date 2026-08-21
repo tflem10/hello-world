@@ -22,7 +22,7 @@ swing scan --dry-run                    # a pick sheet, nothing sent
 swing journal add|exit|stop|show        # record manual fills, ratchet stops, read the log
 ```
 
-Tests are fast (~20s, 589 of them) and hermetic. Run the full suite after any
+Tests are fast (~20s, 612 of them) and hermetic. Run the full suite after any
 change: it layers `config.example.toml` under its fixtures, so editing that
 file breaks tests far away from it.
 
@@ -55,11 +55,25 @@ reporting, data-source and operational knobs under `[data]`, `[reports]`,
 earnings_calendar` and `[reports.bootstrap]`, both deliberately placed to keep
 the hash stable.
 
+The converse binds just as hard: a knob that changes the trades, or that moves
+the floor a report is validated against, **belongs inside the hash**, and its
+arrival costs every user one re-run. `[backtest.gate] min_excess_cagr` and
+`[strategy.regime] exit_on_regime_off` both landed there on purpose and
+re-locked every existing gate once. A gate threshold outside the hash would let
+a report drift out of sync with the floor being applied to it — pinned by
+`tests/test_config.py::test_gate_thresholds_are_inside_the_hashed_backtest_section`.
+Reporting knob → outside the hash; trade or validation knob → inside it, and say
+which in the annotation.
+
 Three `[account]` keys are excluded (`HASH_EXCLUDED_ACCOUNT_KEYS` in
 config.py): `equity`, `stale_equity_tolerance_pct` and `currency`. Backtests
 size from `backtest.initial_equity`, so recording a deposit cannot move an
 out-of-sample number and no longer re-locks the gate. The rest of `[account]`
 — `risk_pct`, `max_position_pct`, `max_concurrent_positions` — still does.
+
+`config.example.toml` layers *under* `config.toml`, so deleting a key there —
+a `[backtest.walk_forward.grid]` axis, say — restores the shipped default
+instead of removing it; pin the axis to one value to neutralise it.
 
 ## Conventions
 
@@ -72,7 +86,9 @@ out-of-sample number and no longer re-locks the gate. The rest of `[account]`
   run. Soft filters fail *open* when the data is missing.
 - **Execution paths block, they do not warn**: a guardrail that cannot verify
   something refuses the order. Limit orders only; market orders are refused at
-  every layer.
+  every layer. The gate reads the same way: a criterion it cannot evaluate —
+  `excess_cagr` absent, null or non-finite — FAILS, it is not skipped, because
+  0.0 would *clear* that particular floor.
 - **Whole shares only** — `floor()`, and zero shares is a real, reported answer,
   not an error to round away.
 - **The journal is append-only.** Correct it by recording new events (`swing
