@@ -1,0 +1,229 @@
+# SEED LIST — S&P SmallCap 600 (partial).
+# Hand-seeded with liquid small caps. NOT the full 600 and NOT authoritative;
+# refresh on a networked machine with:  swing universe --fetch
+# Note: small caps are where the liquidity filter earns its keep — many names
+# here will be screened out by min_dollar_volume, and that is the point.
+# Columns: symbol,kind,name
+symbol,kind,name
+AAP,stock,Advance Auto Parts
+ABCB,stock,Ameris Bancorp
+ABM,stock,ABM Industries
+ACA,stock,Arcosa
+ACLS,stock,Axcelis Technologies
+AEIS,stock,Advanced Energy Industries
+AGO,stock,Assured Guaranty
+AIN,stock,Albany International
+AIR,stock,AAR Corp
+ALG,stock,Alamo Group
+ALGT,stock,Allegiant Travel
+AMN,stock,AMN Healthcare Services
+AMPH,stock,Amphastar Pharmaceuticals
+ANDE,stock,Andersons Inc
+AORT,stock,Artivion
+APAM,stock,Artisan Partners
+APLE,stock,Apple Hospitality REIT
+APOG,stock,Apogee Enterprises
+ARCB,stock,ArcBest
+AROC,stock,Archrock
+ASO,stock,Academy Sports and Outdoors
+ATGE,stock,Adtalem Global Education
+ATI,stock,ATI Inc
+AUB,stock,Atlantic Union Bankshares
+AVA,stock,Avista Corp
+AWI,stock,Armstrong World Industries
+AWR,stock,American States Water
+AX,stock,Axos Financial
+AZZ,stock,AZZ Inc
+BANF,stock,BancFirst
+BANR,stock,Banner Corp
+BCC,stock,Boise Cascade
+BCPC,stock,Balchem
+BGC,stock,BGC Group
+BHE,stock,Benchmark Electronics
+BKE,stock,Buckle Inc
+BL,stock,BlackLine
+BLKB,stock,Blackbaud
+BMI,stock,Badger Meter
+BOH,stock,Bank of Hawaii
+BOOT,stock,Boot Barn Holdings
+BRC,stock,Brady Corp
+CAKE,stock,Cheesecake Factory
+CALM,stock,Cal-Maine Foods
+CARG,stock,CarGurus
+CATY,stock,Cathay General Bancorp
+CBU,stock,Community Financial System
+CENTA,stock,Central Garden & Pet
+CEVA,stock,CEVA Inc
+CHCO,stock,City Holding Co
+CNK,stock,Cinemark Holdings
+CNS,stock,Cohen & Steers
+COLM,stock,Columbia Sportswear
+CORT,stock,Corcept Therapeutics
+CPK,stock,Chesapeake Utilities
+CRAI,stock,CRA International
+CRC,stock,California Resources
+CRS,stock,Carpenter Technology
+CSGS,stock,CSG Systems International
+CSWI,stock,CSW Industrials
+CTRE,stock,CareTrust REIT
+CTS,stock,CTS Corp
+CVCO,stock,Cavco Industries
+CWT,stock,California Water Service
+DIOD,stock,Diodes Inc
+DNOW,stock,DNOW Inc
+DORM,stock,Dorman Products
+DRH,stock,DiamondRock Hospitality
+DXPE,stock,DXP Enterprises
+EBC,stock,Eastern Bankshares
+EFC,stock,Ellington Financial
+EGBN,stock,Eagle Bancorp
+ENR,stock,Energizer Holdings
+ENSG,stock,Ensign Group
+EPAC,stock,Enerpac Tool Group
+EPC,stock,Edgewell Personal Care
+ESE,stock,ESCO Technologies
+ETSY,stock,Etsy
+EXPO,stock,Exponent
+EXTR,stock,Extreme Networks
+FBP,stock,First BanCorp
+FELE,stock,Franklin Electric
+FIZZ,stock,National Beverage
+FORM,stock,FormFactor
+FOXF,stock,Fox Factory Holding
+FSS,stock,Federal Signal
+FUL,stock,H.B. Fuller
+GEO,stock,GEO Group
+GFF,stock,Griffon Corp
+GKOS,stock,Glaukos
+GMS,stock,GMS Inc
+GNW,stock,Genworth Financial
+GPI,stock,Group 1 Automotive
+GRBK,stock,Green Brick Partners
+GTES,stock,Gates Industrial
+HAYW,stock,Hayward Holdings
+HCC,stock,Warrior Met Coal
+HELE,stock,Helen of Troy
+HI,stock,Hillenbrand
+HIW,stock,Highwoods Properties
+HLIT,stock,Harmonic Inc
+HNI,stock,HNI Corp
+HP,stock,Helmerich & Payne
+HUBG,stock,Hub Group
+HWKN,stock,Hawkins Inc
+IBP,stock,Installed Building Products
+ICUI,stock,ICU Medical
+IIPR,stock,Innovative Industrial Properties
+INDB,stock,Independent Bank Corp
+IOSP,stock,Innospec
+IPAR,stock,Interparfums
+ITGR,stock,Integer Holdings
+ITRI,stock,Itron
+JBT,stock,John Bean Technologies
+JJSF,stock,J&J Snack Foods
+JOE,stock,St. Joe Co
+KAI,stock,Kadant Inc
+KFY,stock,Korn Ferry
+KLIC,stock,Kulicke & Soffa Industries
+KMT,stock,Kennametal
+KTB,stock,Kontoor Brands
+KWR,stock,Quaker Houghton
+LANC,stock,Lancaster Colony
+LCII,stock,LCI Industries
+LGIH,stock,LGI Homes
+LNN,stock,Lindsay Corp
+LRN,stock,Stride Inc
+LXP,stock,LXP Industrial Trust
+LZB,stock,La-Z-Boy
+MATX,stock,Matson Inc
+MC,stock,Moelis & Co
+MCY,stock,Mercury General
+MDU,stock,MDU Resources Group
+MGEE,stock,MGE Energy
+MGY,stock,Magnolia Oil & Gas
+MHO,stock,M/I Homes
+MLI,stock,Mueller Industries
+MMS,stock,Maximus Inc
+MMSI,stock,Merit Medical Systems
+MOG.A,stock,Moog Inc Class A
+MPW,stock,Medical Properties Trust
+MTRN,stock,Materion Corp
+MTX,stock,Minerals Technologies
+MYRG,stock,MYR Group
+NABL,stock,N-able Inc
+NARI,stock,Inari Medical
+NBTB,stock,NBT Bancorp
+NEO,stock,NeoGenomics
+NHC,stock,National HealthCare
+NMIH,stock,NMI Holdings
+NPO,stock,Enpro Inc
+NSIT,stock,Insight Enterprises
+NWE,stock,NorthWestern Energy
+NWL,stock,Newell Brands
+OII,stock,Oceaneering International
+OSIS,stock,OSI Systems
+OTTR,stock,Otter Tail Corp
+OXM,stock,Oxford Industries
+PATK,stock,Patrick Industries
+PBH,stock,Prestige Consumer Healthcare
+PDCO,stock,Patterson Companies
+PECO,stock,Phillips Edison & Co
+PIPR,stock,Piper Sandler
+PJT,stock,PJT Partners
+PLXS,stock,Plexus Corp
+PLUS,stock,ePlus Inc
+POWI,stock,Power Integrations
+POWL,stock,Powell Industries
+PRGS,stock,Progress Software
+PRK,stock,Park National
+PTEN,stock,Patterson-UTI Energy
+QLYS,stock,Qualys
+RDN,stock,Radian Group
+RUSHA,stock,Rush Enterprises
+SANM,stock,Sanmina
+SBCF,stock,Seacoast Banking
+SFNC,stock,Simmons First National
+SHOO,stock,Steven Madden
+SITM,stock,SiTime
+SJW,stock,SJW Group
+SKYW,stock,SkyWest
+SLVM,stock,Sylvamo
+SMPL,stock,Simply Good Foods
+SMTC,stock,Semtech
+SNEX,stock,StoneX Group
+SPSC,stock,SPS Commerce
+SPXC,stock,SPX Technologies
+SR,stock,Spire Inc
+STRA,stock,Strategic Education
+SUPN,stock,Supernus Pharmaceuticals
+SXI,stock,Standex International
+SXT,stock,Sensient Technologies
+TDS,stock,Telephone and Data Systems
+TGNA,stock,TEGNA Inc
+THRM,stock,Gentherm
+TMP,stock,Tompkins Financial
+TNC,stock,Tennant Co
+TPH,stock,Tri Pointe Homes
+TRN,stock,Trinity Industries
+TRUP,stock,Trupanion
+UCTT,stock,Ultra Clean Holdings
+UE,stock,Urban Edge Properties
+UFPT,stock,UFP Technologies
+UNF,stock,UniFirst Corp
+URBN,stock,Urban Outfitters
+UVV,stock,Universal Corp
+VECO,stock,Veeco Instruments
+VIAV,stock,Viavi Solutions
+VRRM,stock,Verra Mobility
+VSCO,stock,Victoria's Secret
+VSEC,stock,VSE Corp
+WABC,stock,Westamerica Bancorporation
+WD,stock,Walker & Dunlop
+WDFC,stock,WD-40 Co
+WERN,stock,Werner Enterprises
+WGO,stock,Winnebago Industries
+WSFS,stock,WSFS Financial
+WWD,stock,Woodward Inc
+XHR,stock,Xenia Hotels & Resorts
+XPEL,stock,XPEL Inc
+YELP,stock,Yelp
+ZWS,stock,Zurn Elkay Water Solutions

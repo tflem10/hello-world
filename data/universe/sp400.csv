@@ -1,0 +1,207 @@
+# SEED LIST — S&P MidCap 400 (partial).
+# Hand-seeded with liquid, widely-held mid caps so the system is usable out of
+# the box. It is NOT the full 400 and NOT authoritative; refresh on a networked
+# machine with:  swing universe --fetch
+# Columns: symbol,kind,name
+symbol,kind,name
+AAON,stock,AAON Inc
+ACIW,stock,ACI Worldwide
+ACM,stock,AECOM
+AFG,stock,American Financial Group
+ALTR,stock,Altair Engineering
+AMG,stock,Affiliated Managers Group
+AMKR,stock,Amkor Technology
+AN,stock,AutoNation
+ARW,stock,Arrow Electronics
+ASGN,stock,ASGN Inc
+AVNT,stock,Avient Corp
+AVT,stock,Avnet
+AYI,stock,Acuity Brands
+BC,stock,Brunswick Corp
+BCO,stock,Brink's Co
+BDC,stock,Belden Inc
+BJ,stock,BJ's Wholesale Club
+BLD,stock,TopBuild
+BRBR,stock,BellRing Brands
+BYD,stock,Boyd Gaming
+CBT,stock,Cabot Corp
+CCK,stock,Crown Holdings
+CFR,stock,Cullen/Frost Bankers
+CHDN,stock,Churchill Downs
+CHE,stock,Chemed Corp
+CIEN,stock,Ciena
+CLF,stock,Cleveland-Cliffs
+CNM,stock,Core & Main
+CNO,stock,CNO Financial Group
+COKE,stock,Coca-Cola Consolidated
+COLB,stock,Columbia Banking System
+CR,stock,Crane Co
+CROX,stock,Crocs
+CUZ,stock,Cousins Properties
+CW,stock,Curtiss-Wright
+CVLT,stock,Commvault Systems
+DAR,stock,Darling Ingredients
+DBX,stock,Dropbox
+DCI,stock,Donaldson Co
+DKS,stock,Dick's Sporting Goods
+DTM,stock,DT Midstream
+DY,stock,Dycom Industries
+EAT,stock,Brinker International
+EHC,stock,Encompass Health
+ELS,stock,Equity LifeStyle Properties
+EME,stock,EMCOR Group
+ENS,stock,EnerSys
+ESAB,stock,ESAB Corp
+EVR,stock,Evercore
+EXEL,stock,Exelixis
+EXP,stock,Eagle Materials
+FAF,stock,First American Financial
+FBIN,stock,Fortune Brands Innovations
+FCN,stock,FTI Consulting
+FHN,stock,First Horizon
+FIVE,stock,Five Below
+FLR,stock,Fluor Corp
+FLS,stock,Flowserve
+FN,stock,Fabrinet
+FNB,stock,F.N.B. Corp
+FYBR,stock,Frontier Communications
+GAP,stock,Gap Inc
+GATX,stock,GATX Corp
+GBCI,stock,Glacier Bancorp
+GME,stock,GameStop
+GNTX,stock,Gentex
+GPK,stock,Graphic Packaging
+GT,stock,Goodyear Tire & Rubber
+GTLS,stock,Chart Industries
+GXO,stock,GXO Logistics
+HAE,stock,Haemonetics
+HALO,stock,Halozyme Therapeutics
+HGV,stock,Hilton Grand Vacations
+HLI,stock,Houlihan Lokey
+HOG,stock,Harley-Davidson
+HRB,stock,H&R Block
+HXL,stock,Hexcel
+IBKR,stock,Interactive Brokers Group
+IBOC,stock,International Bancshares
+IDA,stock,IDACORP
+ITT,stock,ITT Inc
+JAZZ,stock,Jazz Pharmaceuticals
+JEF,stock,Jefferies Financial Group
+JLL,stock,Jones Lang LaSalle
+KBH,stock,KB Home
+KBR,stock,KBR Inc
+KEX,stock,Kirby Corp
+KNSL,stock,Kinsale Capital Group
+KNX,stock,Knight-Swift Transportation
+LAD,stock,Lithia Motors
+LECO,stock,Lincoln Electric Holdings
+LFUS,stock,Littelfuse
+LII,stock,Lennox International
+LNC,stock,Lincoln National
+LOPE,stock,Grand Canyon Education
+LSTR,stock,Landstar System
+M,stock,Macy's
+MAN,stock,ManpowerGroup
+MANH,stock,Manhattan Associates
+MASI,stock,Masimo
+MAT,stock,Mattel
+MEDP,stock,Medpace Holdings
+MIDD,stock,Middleby Corp
+MSA,stock,MSA Safety
+MSM,stock,MSC Industrial Direct
+MTG,stock,MGIC Investment
+MTN,stock,Vail Resorts
+MTZ,stock,MasTec
+MUR,stock,Murphy Oil
+MUSA,stock,Murphy USA
+NEU,stock,NewMarket Corp
+NFG,stock,National Fuel Gas
+NJR,stock,New Jersey Resources
+NOV,stock,NOV Inc
+NSP,stock,Insperity
+NVT,stock,nVent Electric
+NYT,stock,New York Times
+OGE,stock,OGE Energy
+OHI,stock,Omega Healthcare Investors
+OLED,stock,Universal Display
+OLN,stock,Olin Corp
+ONB,stock,Old National Bancorp
+ORI,stock,Old Republic International
+OSK,stock,Oshkosh Corp
+OZK,stock,Bank OZK
+PB,stock,Prosperity Bancshares
+PBF,stock,PBF Energy
+PEN,stock,Penumbra
+PII,stock,Polaris
+PNFP,stock,Pinnacle Financial Partners
+POST,stock,Post Holdings
+PRI,stock,Primerica
+PSTG,stock,Pure Storage
+PVH,stock,PVH Corp
+R,stock,Ryder System
+RGA,stock,Reinsurance Group of America
+RGLD,stock,Royal Gold
+RH,stock,RH
+RLI,stock,RLI Corp
+RMBS,stock,Rambus
+RPM,stock,RPM International
+RRC,stock,Range Resources
+RS,stock,Reliance Inc
+SAIC,stock,Science Applications International
+SAM,stock,Boston Beer
+SCI,stock,Service Corp International
+SEIC,stock,SEI Investments
+SF,stock,Stifel Financial
+SIGI,stock,Selective Insurance Group
+SKX,stock,Skechers USA
+SLGN,stock,Silgan Holdings
+SLM,stock,SLM Corp
+SNX,stock,TD Synnex
+SON,stock,Sonoco Products
+SSB,stock,SouthState Corp
+SSD,stock,Simpson Manufacturing
+STAG,stock,STAG Industrial
+STWD,stock,Starwood Property Trust
+SWX,stock,Southwest Gas Holdings
+SYNA,stock,Synaptics
+TCBI,stock,Texas Capital Bancshares
+TDC,stock,Teradata
+TEX,stock,Terex
+THC,stock,Tenet Healthcare
+THG,stock,Hanover Insurance Group
+THO,stock,Thor Industries
+TKR,stock,Timken Co
+TMHC,stock,Taylor Morrison Home
+TNL,stock,Travel + Leisure
+TOL,stock,Toll Brothers
+TPX,stock,Tempur Sealy International
+TREX,stock,Trex Co
+TTC,stock,Toro Co
+TTEK,stock,Tetra Tech
+TXRH,stock,Texas Roadhouse
+UFPI,stock,UFP Industries
+UGI,stock,UGI Corp
+UMBF,stock,UMB Financial
+UNM,stock,Unum Group
+UTHR,stock,United Therapeutics
+VAL,stock,Valaris
+VC,stock,Visteon
+VNO,stock,Vornado Realty Trust
+VSH,stock,Vishay Intertechnology
+VVV,stock,Valvoline
+WAL,stock,Western Alliance Bancorp
+WEN,stock,Wendy's Co
+WCC,stock,WESCO International
+WEX,stock,WEX Inc
+WH,stock,Wyndham Hotels & Resorts
+WHR,stock,Whirlpool
+WMS,stock,Advanced Drainage Systems
+WOLF,stock,Wolfspeed
+WSM,stock,Williams-Sonoma
+WSO,stock,Watsco
+WTRG,stock,Essential Utilities
+WTS,stock,Watts Water Technologies
+X,stock,United States Steel
+XRAY,stock,Dentsply Sirona
+YETI,stock,YETI Holdings
+ZI,stock,ZoomInfo Technologies

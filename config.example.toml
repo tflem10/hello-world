@@ -1,0 +1,318 @@
+# =============================================================================
+# swing — configuration
+# =============================================================================
+# Copy to config.toml (gitignored, chmod 600) and edit. Every strategy number
+# the system uses lives here; nothing is hard-coded in the code paths.
+#
+# Provenance: each strategy default is justified in docs/indicator-research.md.
+# If you change a number, re-run `swing backtest --walk-forward` — the live
+# scanner refuses to emit picks until a *passing* backtest report exists for
+# the current config hash.
+# =============================================================================
+
+[account]
+# Total account equity used for position sizing. Update as the account grows;
+# `swing execute` refuses to run if this differs from the broker by more than
+# `stale_equity_tolerance_pct` (guards against sizing off a stale number).
+equity = 100.0
+risk_pct = 0.02                    # fraction of equity risked per trade (2%). 0.03 = 3%.
+max_position_pct = 0.25            # no single position may exceed 25% of equity
+max_concurrent_positions = 4
+stale_equity_tolerance_pct = 0.20  # execute aborts if live equity differs by >20%
+currency = "USD"
+
+[universe]
+# Universe files live in data/universe/*.csv (symbol,name,sector,kind).
+sp500 = true
+sp400 = true      # mid caps
+sp600 = true      # small caps
+etfs = true
+extra_symbols = []                 # always-included symbols, e.g. ["QQQ", "SMH"]
+exclude_symbols = []               # never trade these
+min_price = 5.0
+min_dollar_volume = 5_000_000.0    # 20-day average dollar volume floor
+max_symbols = 0                    # 0 = no cap; useful to speed up experiments
+
+[data]
+# "yfinance" | "schwab" | "stooq".
+#   yfinance — the default. Split- and dividend-adjusted; free; the least
+#              reliable link in the chain (undocumented endpoints).
+#   schwab   — your broker's own data, once the app is approved.
+#   stooq    — free daily CSV fallback for when Yahoo breaks. Read this before
+#              switching: Stooq bars are split-adjusted but *NOT*
+#              dividend-adjusted, so long-horizon results drift away from
+#              yfinance by roughly the compounded dividend yield (largest for
+#              high-yield names and multi-year runs, small over a few-week
+#              hold). It publishes no earnings dates and no fundamentals, so
+#              those soft filters fail *open* — every stock passes them. Cold
+#              backfill is slow: one request per symbol with a
+#              `request_pause_sec` politeness pause between them (~1s/symbol,
+#              so ~15 min for 1,000 names), and Stooq enforces a daily hits
+#              limit that comes back as a 200 with "exceeded the daily hits
+#              limit" in the body — the run warns once and the remaining
+#              symbols simply have no fresh bars.
+# Switching this key on an existing cache is REFUSED, not merely discouraged:
+# providers adjust prices differently (yfinance adjusts for dividends, Stooq
+# does not), so mixing them would splice two adjustment bases into one series
+# and produce a price jump the strategy would happily trade. The cache records
+# which provider wrote it, and `swing data` stops before fetching anything if
+# the two disagree, telling you what to delete. To change providers:
+#   rm -rf data/cache && swing data --backfill
+provider = "yfinance"
+cache_dir = "data/cache"
+history_start = "2005-01-01"       # cache backfill start (backtest starts later)
+max_stale_days = 5                 # warn if cached bars are older than this
+request_batch_size = 50            # symbols per yfinance download call
+request_pause_sec = 1.0            # politeness pause between batches (per symbol on stooq)
+request_timeout_sec = 15.0         # per-request HTTP timeout (used by the stooq provider)
+absent_retry_days = 7              # symbols that return no data are skipped this long
+
+# Optional path to a user-supplied historical earnings calendar CSV. Empty (the
+# default) = no calendar, and the backtest runs *without* the earnings blackout
+# the live scanner applies, warning loudly on every run.
+#
+# Supply one and the backtest applies the same blackout as live, the
+# missing-calendar warning disappears, and every report records the file, its
+# symbol/date counts and how much of the traded universe it covers. Format: a
+# header row containing `symbol` and `date` (any order, case-insensitive), ISO
+# YYYY-MM-DD dates, one row per announcement; `#` comments and blank lines are
+# skipped. Full spec and failure modes are in the docstring of
+# src/swing/data/earnings_calendar.py.
+#
+# Two honest warnings:
+#   * a path that does not exist ABORTS the backtest — this is deliberate, a
+#     typo must not quietly downgrade you to "no blackout";
+#   * symbols absent from the file get NO protection. A partial calendar is
+#     partial protection; the run says so explicitly ("covers N of M universe
+#     symbols; the other K get NO earnings blackout"), so read that line rather
+#     than treating any calendar as a solved problem. Coverage is on you.
+earnings_calendar = ""
+
+[strategy]
+name = "trend_momentum_core"
+
+  [strategy.regime]
+  # New entries only when the market is in an uptrend. What happens to positions
+  # already open is `exit_on_regime_off` below: by default they ride the
+  # risk-off stretch out and keep trailing; set it and they are closed instead.
+  enabled = true
+  symbol = "SPY"
+  ma_len = 200
+  # Close open positions when the regime turns off, at the next open.
+  #
+  # Off by default because the trail is what normally protects an open position,
+  # and force-closing the book on a 200-SMA cross churns it at every whipsaw.
+  # Turn it on when the trail is switched off: a stop then never leaves its
+  # initial level and the regime is the only thing left that can cut exposure.
+  # Measured both ways in docs/indicator-research.md §16 — it improved results
+  # in exactly one of four configurations, the one with no trail and no time
+  # stop, and cost return in the other three. It is contingent, not free.
+  #
+  # Mechanically: the backtest reads the regime on the close that flips it,
+  # queues the exit and fills at the next open, labelled `regime_off` in the
+  # exit table (a time stop firing on the same bar keeps its own label — same
+  # fill either way); `swing scan` prints "close position" for every holding on
+  # that bar. A missing or disabled benchmark degrades to "no regime filter",
+  # never to "sell everything".
+  #
+  # This key is inside the hashed [strategy] section — see Config.hash — so its
+  # arrival changed every hash that did not already set it, re-locking the gate
+  # once (one `swing backtest --walk-forward` clears that), and flipping it
+  # re-locks yours again. That is deliberate: it changes the trades.
+  exit_on_regime_off = false
+
+  [strategy.trend_template]
+  # Minervini-style stage-2 template. See docs/indicator-research.md §Trend.
+  enabled = true
+  sma_fast = 50
+  sma_mid = 150
+  sma_slow = 200
+  slow_rising_lookback = 21        # 200-SMA must be above its value N days ago
+  min_pct_above_52w_low = 0.25     # close >= 1.25 x 52-week low
+  max_pct_below_52w_high = 0.25    # close >= 0.75 x 52-week high
+  adx_len = 14
+  adx_min = 20.0
+
+  [strategy.entry]
+  mode = "donchian_breakout"       # "donchian_breakout" | "rsi2_pullback"
+  donchian_len = 20
+  # A signal needs the prior donchian_len-day high to be EXCEEDED today, with
+  # the close no more than breakout_tolerance below that level. Requiring only
+  # "close is near the high" fires on flat series; requiring only "new high"
+  # buys failed breakouts that close at the day's low.
+  breakout_tolerance = 0.02        # close may finish up to 2% below the level
+  volume_len = 50
+  volume_mult = 1.30               # today's volume >= 1.3x 50-day average
+    [strategy.entry.rsi2]
+    # Alternate entry module (Connors). OFF by default; see research doc — the
+    # published edge is short-hold and has decayed post-2010.
+    enabled = false
+    rsi_len = 2
+    rsi_max = 10.0
+    trend_ma = 200
+
+  [strategy.rank]
+  # Risk-adjusted momentum. Both legs divided by ATR% so we compare across
+  # volatility regimes. Tiebreak: proximity to 52-week high.
+  long_lookback = 126
+  long_weight = 0.6
+  short_lookback = 63
+  short_weight = 0.4
+  skip_recent_days = 5             # skip last week (1-month reversal effect)
+  normalize_by_atr = true
+
+  [strategy.fundamentals]
+  # Soft filter only — yfinance fundamentals are patchy. ETFs bypass entirely.
+  enabled = true
+  require_positive_eps_or_growth = true
+  drop_if_below_rank_median = true
+
+  [strategy.earnings]
+  blackout_days_before = 10        # no new entry within N calendar days of earnings
+  blackout_days_after = 1
+  tighten_stop_days_before = 2     # alert to tighten stop while holding
+  unknown_date_policy = "allow_with_warning"   # "allow_with_warning" | "block"
+
+  [strategy.exit]
+  atr_len = 14
+  initial_stop_atr = 2.0           # stop = entry - 2.0 x ATR(14)
+  chandelier_atr = 3.0             # trail = highest close since entry - 3.0 x ATR
+  time_stop_days = 40              # trading days
+  stop_limit_offset_pct = 0.005    # stop-limit: limit = stop - 0.5%
+
+[backtest]
+start = "2010-01-01"
+end = ""                           # "" = today
+initial_equity = 10_000.0          # backtests use a realistic starting balance
+commission_per_trade = 0.0
+slippage_bps = 5.0                 # per side
+spread_atr_frac = 0.02             # extra cost proxy = 2% of ATR per side
+fill = "next_open"                 # signals at close -> fill next open
+  [backtest.walk_forward]
+  in_sample_years = 3
+  out_of_sample_years = 1
+  step_years = 1
+  optimize = true                  # tune the grid below on each in-sample block
+  objective = "profit_factor"      # profit_factor | sharpe | calmar | expectancy_r
+  min_is_trades = 15               # ignore in-sample params with too few trades
+    [backtest.walk_forward.grid]
+    # Deliberately small. A wide grid over 15 windows does not find a better
+    # strategy, it finds a better fit to noise — and walk-forward only limits
+    # that damage, it does not eliminate it.
+    #
+    # This file layers UNDER your config.toml, so deleting an axis here restores
+    # this default instead of removing it — the optimiser then overrides the
+    # value you thought you had pinned, in every window. To neutralise an axis,
+    # give it one value in config.toml ("strategy.exit.chandelier_atr" = [99.0]),
+    # do not delete it. `swing backtest --walk-forward` logs the grid it
+    # resolved, and the report manifest records it as `effective_grid`.
+    "strategy.entry.donchian_len" = [15, 20, 30]
+    "strategy.exit.initial_stop_atr" = [1.5, 2.0, 2.5]
+    "strategy.exit.chandelier_atr" = [2.5, 3.0, 4.0]
+  [backtest.gate]
+  # `swing scan` refuses to emit picks unless the newest report clears these
+  # on the concatenated out-of-sample equity curve. Override with --force.
+  enabled = true
+  min_profit_factor = 1.30
+  max_drawdown_pct = 0.35
+  min_trades = 30
+  min_sharpe = 0.40
+  # Excess CAGR over buy-and-hold on the regime benchmark, same window. The
+  # alternative to trading this is not cash, it is the index: a profit factor of
+  # 1.8 and a Sharpe of 0.64 are worth nothing while SPY compounds 2.4% a year
+  # faster. 0.0 = must not underperform; set it negative to accept a deliberate
+  # trade of return for lower drawdown or exposure. A report with no benchmark
+  # comparison FAILS this check — an unverifiable criterion is not a passed one.
+  min_excess_cagr = 0.0
+
+[alerts]
+enabled = true
+  [alerts.ntfy]
+  # Free push to your phone: install the ntfy app, subscribe to this topic.
+  # Treat the topic string as a secret — anyone who knows it can read/post.
+  enabled = false
+  server = "https://ntfy.sh"
+  topic = ""                       # e.g. "swing-a8f3c1d9-picks"
+  priority = "default"
+  [alerts.email]
+  enabled = false
+  smtp_host = "smtp.gmail.com"
+  smtp_port = 587
+  username = ""
+  password = ""                    # Gmail: use an App Password, not your login
+  from_addr = ""
+  to_addrs = []
+  [alerts.sms]
+  # Optional carrier email-to-SMS gateway (e.g. "5551234567@vtext.com").
+  enabled = false
+  to_addrs = []
+  [alerts.macos]
+  enabled = true                   # osascript banner; no-op off macOS
+
+[schwab]
+# Filled in after developer.schwab.com approves your app.
+# See docs/schwab-setup.md for the full walkthrough.
+api_key = ""
+app_secret = ""
+callback_url = "https://127.0.0.1:8182"
+token_path = "~/.swing/schwab_token.json"
+account_hash = ""                  # printed by `swing auth --check`
+token_warn_days = 6                # refresh tokens expire at 7 days
+
+[execution]
+# v2 auto-execution. Everything here is off until you deliberately turn it on.
+enabled = false                    # master switch; --live also required
+autopilot = false                  # false = confirm each order interactively
+max_orders_per_day = 3
+max_new_exposure_pct = 0.50        # cap on new $ deployed per day, as % of equity
+max_quote_drift_atr = 1.0          # abort if price moved > 1 ATR since the scan
+max_quote_drift_pct = 0.03         # ...or > 3%, whichever binds first
+order_type = "limit"               # limits only; market orders are never sent
+limit_slippage_pct = 0.003         # buy limit = quote * (1 + 0.3%)
+child_stop_type = "stop"           # "stop" | "stop_limit" | "trailing_stop"
+kill_file = "~/.swing/KILL"
+journal_path = "~/.swing/journal.jsonl"
+trading_hours_only = true
+
+[schedule]
+timezone = "America/New_York"
+scan_time = "17:30"                # nightly scan, after the close
+confirm_time = "09:00"             # pre-open re-quote and confirmation
+log_dir = "~/.swing/logs"
+
+[reports]
+dir = "reports"
+open_in_browser = false
+# How old a passing walk-forward report may get before the scan says so. The
+# gate re-locks when the config changes; nothing re-locks it as time passes,
+# so a 2026 validation would otherwise still be opening the gate in 2028 over a
+# cache that has churned every night since. This is a WARNING on the pick sheet,
+# not a block — a stale validation is a reason to re-run the walk-forward, not a
+# reason to have no picks tonight. 0 = never warn.
+#
+# Lives under [reports] rather than [backtest] on purpose: a knob in a
+# hash-covered section would re-lock every user's gate (see Config.hash).
+max_walkforward_age_days = 90
+
+  [reports.bootstrap]
+  # Circular block-bootstrap confidence intervals on the walk-forward
+  # out-of-sample equity curve: p5/p50/p95 for CAGR and max drawdown, plus
+  # P(CAGR <= 0). Blocks of consecutive daily returns are resampled with
+  # replacement, so autocorrelation and volatility clustering survive it.
+  #
+  # Reporting only — these numbers never change a trade, which is why they live
+  # under [reports] and not [backtest]: a knob in a hash-covered section would
+  # re-lock every user's gate.
+  #
+  # Read them honestly: resampling ONE historical path can only reshuffle the
+  # regimes that path happened to contain, and the parameters were already
+  # chosen before the resampling started. The interval is a FLOOR on the
+  # uncertainty, not an estimate of it — the true one is wider. A wide interval
+  # is conclusive (indistinguishable from noise); a narrow one is merely
+  # inconclusive.
+  enabled = true                   # false = the report is exactly what it was pre-bootstrap
+  n_resamples = 1000               # resampled equity paths
+  block_days = 20                  # length of each resampled block, in trading days
+  seed = 7                         # fixed so two runs of one report are byte-identical
+  # Curves with fewer than 60 daily returns get no interval at all; the report
+  # says so instead of quoting one computed from a handful of days.
