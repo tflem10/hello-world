@@ -301,41 +301,78 @@ decoration and it is not to be removed as the numbers fill in.
 
 ## 8. Scheduling it
 
-**This document does not install anything.** `swing schedule install` writes the launchd timers for
-`scan` and `confirm`; shadow is not part of that job yet, and adding it is a manual step.
-
-The natural place is **immediately after the nightly scan**, in the same job: the scan has just
-warmed the bar cache for the whole universe, so the shadow run costs a fraction of what it would
-cold. The order that makes sense is:
+Shadow is part of the nightly job. `swing schedule install` wires it in:
 
 ```sh
-swing scan            # the real, gated scan — unchanged
-swing shadow run      # record what each tracked config would have done
-swing shadow score    # walk yesterday's and older positions forward
+swing schedule install     # writes both plists, the wrapper, and loads them
+```
+
+Nothing about the real scan changes — same time, same weekday-only schedule, same logs, same exit
+code — but the evening agent now runs a generated wrapper instead of `swing scan` directly:
+
+```
+~/.swing/bin/swing-nightly.sh
+    swing scan            # the real, gated scan — unchanged
+    swing shadow run      # record what each tracked config would have done
+    swing shadow score    # walk yesterday's and older positions forward
 ```
 
 `score` is cheap: it only fetches the symbols with open shadow positions.
 
-To wire it in, edit the launchd plist that `swing schedule install` wrote — by default
-`~/Library/LaunchAgents/com.swing.scan.plist` — so the program it runs is a small shell script
-containing the three lines above, then reload it:
+### Why one job and not two
+
+launchd runs exactly one `ProgramArguments` list, so chaining needs a wrapper or a second timed job.
+It is a wrapper, for one reason: **ordering**. Scoring reads the bars the scan has just downloaded,
+and a second job "five minutes later" is a bet on how long a 1,500-symbol scan takes *tonight*. When
+that bet loses, the two run concurrently, each pulling the universe, and scoring reads a cache that
+is mid-refresh.
+
+What a separate job would have given for free — failure isolation — is written into the wrapper
+instead, and each property has a test that runs the generated script for real:
+
+- **`;`, never `&&`.** A failed scan still records the shadow arms. A night nobody records is a
+  night the forward experiment can never get back, and it is exactly the night something was
+  already going wrong.
+- **The job exits with the *scan's* status.** That exit code is load-bearing: with strict delivery,
+  non-zero means nobody heard about tonight's picks. A shadow failure must not be able to raise that
+  flag, and must not be able to clear it either.
+- **Shadow gets its own log pair**, `~/.swing/logs/shadow.out.log` and `shadow.err.log`, so neither
+  stream buries the other. Each step's exit code is written into the log next to its output.
+
+The wrapper is generated, not hand-written: `swing schedule install` overwrites it, and
+`swing schedule uninstall` deletes it along with the plists. Edit `config.toml` and re-install
+rather than editing the script. Running it by hand does exactly what launchd does:
 
 ```sh
-launchctl unload ~/Library/LaunchAgents/com.swing.scan.plist
-launchctl load   ~/Library/LaunchAgents/com.swing.scan.plist
+sh ~/.swing/bin/swing-nightly.sh
 ```
 
-Notes for whoever does that:
+### Notes
 
-- Run `shadow run` **after** `scan`, not instead of it. They are independent: shadow never writes
-  the real journal and the scan never reads the shadow one.
-- A failing shadow run must not fail the scan. If you chain them in a shell script, use `;` rather
-  than `&&`.
+- Running the chain twice is safe. Recording is idempotent per `(configuration, date)` and scoring
+  is a full replay, so a launchd double-fire on wake rewrites the same day rather than
+  double-counting it.
 - Shadow exits `2` when it refuses (no tracked configurations, an unreadable tracked file) and `0`
   otherwise. A scan that failed for one arm is recorded as an `error` on that day rather than
   being raised, so one bad night never loses the other arms' record.
 - Missing a day is not fatal to the experiment, but it is not free either: fewer observations means
   an even longer wait for a sample that means something.
+
+### When it stops running
+
+A forward experiment dies quietly — nothing raises, nothing pages, the file simply stops growing —
+and three weeks of silence look exactly like three weeks of a flat market. Two things make that
+visible:
+
+- **`swing shadow report` leads with a gap warning.** Above even the small-sample banner, it names
+  any arm whose last record is two or more weekdays old, any weekday hole inside the series, and any
+  day whose record carries a failure. It prints the log to read and the backfill command. Two or
+  three weekdays of silence is usually a market holiday; more than that is a scheduler that stopped.
+- **`swing schedule status`** shows the wrapper's path (flagged `(MISSING)` if it has been deleted),
+  the shadow log paths, and launchd's own last-exit status for the job.
+
+If it has stalled, `tail -n 40 ~/.swing/logs/shadow.err.log` is the first thing to read, and a
+single missed day can be recorded from cached bars with `swing shadow run --asof YYYY-MM-DD`.
 
 ---
 
@@ -345,8 +382,10 @@ Notes for whoever does that:
 swing shadow run --dry-run          # see today's decisions, write nothing
 swing shadow run                    # record them
 swing shadow score                  # walk the record forward
-swing shadow report                 # compare
+swing shadow report                 # compare — gap warning first, then the small print
 cat ~/.swing/shadow/baseline.json   # the raw record
+sh ~/.swing/bin/swing-nightly.sh    # exactly what the scheduler runs each evening
+tail -n 40 ~/.swing/logs/shadow.err.log   # what it said last time it ran
 ```
 
 Every command takes `--asof YYYY-MM-DD`, so a past day can be recorded or re-scored deterministically

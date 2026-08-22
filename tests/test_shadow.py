@@ -1009,3 +1009,155 @@ def test_cli_rejects_a_bad_asof(cli_root: Path) -> None:
 
     assert result.exit_code == 2
     assert "YYYY-MM-DD" in (result.stdout + (result.stderr or ""))
+
+
+# ---------------------------------------------------------------------------
+# is it still running? — the gap check that makes a silent stall visible
+# ---------------------------------------------------------------------------
+
+
+def seed_days(host: Config, name: str, days: list[str], *, error_on: str = "") -> ShadowJournal:
+    """Write a journal holding one (empty) record per date in ``days``."""
+    journal = ShadowJournal(shadow_dir(host) / f"{name}.json", name)
+    for day in days:
+        journal.record_day(
+            ShadowDay(
+                date=day,
+                recorded_at=f"{day}T17:40:00-04:00",
+                gate_passed=False,
+                error=("the data provider returned nothing" if day == error_on else ""),
+            ),
+            [],
+        )
+    return journal
+
+
+def test_a_current_series_says_nothing_about_gaps(host: Config, tracked_dir: Path) -> None:
+    """The normal case is silence: a warning that fires every day is not a warning."""
+    seed_days(host, "baseline", ["2026-08-19", "2026-08-20", "2026-08-21"])
+    seed_days(host, "combo", ["2026-08-19", "2026-08-20", "2026-08-21"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+
+    assert "STOPPED RECORDING" not in text
+    assert "FAR TOO SMALL" in text  # the unconditional banner is still there
+
+
+def test_tonights_scan_not_having_run_yet_is_not_a_stall(host: Config, tracked_dir: Path) -> None:
+    """Read in the morning, the newest record is always yesterday's."""
+    seed_days(host, "baseline", ["2026-08-20", "2026-08-21"])
+    seed_days(host, "combo", ["2026-08-20", "2026-08-21"])
+
+    # Friday recorded; read on Monday morning before Monday's scan.
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 24))
+    assert "STOPPED RECORDING" not in text
+
+
+def test_a_weekend_is_not_a_gap(host: Config, tracked_dir: Path) -> None:
+    seed_days(host, "baseline", ["2026-08-20", "2026-08-21"])  # Thursday, Friday
+    seed_days(host, "combo", ["2026-08-20", "2026-08-21"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 23))  # Sunday
+    assert "STOPPED RECORDING" not in text
+
+
+def test_a_stalled_series_leads_the_whole_report(host: Config, tracked_dir: Path) -> None:
+    """Three weeks of silence must not read as three weeks of a flat market."""
+    seed_days(host, "baseline", ["2026-07-27", "2026-07-28"])
+    seed_days(host, "combo", ["2026-07-27", "2026-07-28"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+
+    assert "SHADOW MAY HAVE STOPPED RECORDING" in text
+    assert text.index("STOPPED RECORDING") < text.index("FAR TOO SMALL")
+    assert "  baseline:" in text
+    assert "- last record 2026-07-28, 18 weekday(s) ago" in text
+    assert "  combo:" in text
+
+
+def test_the_stall_warning_names_the_log_and_the_way_out(host: Config, tracked_dir: Path) -> None:
+    """The check a human notices has to say what to look at and what to type."""
+    seed_days(host, "baseline", ["2026-08-10"])
+    seed_days(host, "combo", ["2026-08-10"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+
+    assert str(Path(host.paths.state_dir) / "logs" / "shadow.err.log") in text
+    assert "swing schedule status" in text
+    assert "swing shadow run --asof" in text
+    assert "usually a market holiday" in text  # the benign explanation, stated
+
+
+def test_a_hole_inside_the_series_is_reported(host: Config, tracked_dir: Path) -> None:
+    """A night the scheduler dropped leaves a weekday with no record at all."""
+    seed_days(host, "baseline", ["2026-08-17", "2026-08-19", "2026-08-20", "2026-08-21"])
+    seed_days(host, "combo", ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+
+    assert "SHADOW MAY HAVE STOPPED RECORDING" in text
+    assert "- 1 weekday(s) inside the series have no record" in text
+    assert "combo:" not in text.split("FAR TOO SMALL")[0]  # the healthy arm is not named
+
+
+def test_a_recorded_failure_is_surfaced_rather_than_left_in_the_file(
+    host: Config, tracked_dir: Path
+) -> None:
+    """Recording every night and failing every night looks healthy from the outside."""
+    seed_days(
+        host,
+        "baseline",
+        ["2026-08-19", "2026-08-20", "2026-08-21"],
+        error_on="2026-08-21",
+    )
+    seed_days(host, "combo", ["2026-08-19", "2026-08-20", "2026-08-21"])
+
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+
+    assert "- 1 day(s) recorded a failure" in text
+    assert "the data provider returned nothing" in text
+
+
+def test_an_empty_record_has_no_gap_to_warn_about(host: Config, tracked_dir: Path) -> None:
+    """Nothing has been recorded yet — that is a fresh install, not a stall."""
+    text = shadow.report(host, directory=tracked_dir, asof=date(2026, 8, 21))
+    assert "STOPPED RECORDING" not in text
+
+
+def test_the_gap_check_counts_weekdays_not_calendar_days() -> None:
+    assert len(shadow._weekdays_between(date(2026, 8, 17), date(2026, 8, 21))) == 5
+    assert len(shadow._weekdays_between(date(2026, 8, 22), date(2026, 8, 23))) == 0
+    assert shadow._weekdays_between(date(2026, 8, 21), date(2026, 8, 17)) == []
+    assert shadow.STALE_WEEKDAYS == 2
+
+
+# ---------------------------------------------------------------------------
+# running unattended
+# ---------------------------------------------------------------------------
+
+
+def test_a_double_fire_of_the_nightly_job_cannot_corrupt_the_series(
+    host: Config, tracked_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """launchd can fire a missed job on wake, so the whole chain must be replayable.
+
+    This is the wrapper's sequence — record, score, record again, score again —
+    which is what a double-fire actually does.
+    """
+    frame = poke(flat_bars(30), 20, low=95.0)
+    signal_day = frame.index[10].date()
+    last_day = frame.index[-1].date()
+    install_fake_scan(monkeypatch, {2.0: ["TEST"], 0.0: ["TEST"]})
+    install_fake_bars(monkeypatch, {"TEST": frame})
+
+    shadow.run(host, asof=signal_day, directory=tracked_dir)
+    shadow.score(host, asof=last_day, directory=tracked_dir)
+    first = (shadow_dir(host) / "baseline.json").read_text()
+
+    shadow.run(host, asof=signal_day, directory=tracked_dir)
+    shadow.score(host, asof=last_day, directory=tracked_dir)
+
+    assert (shadow_dir(host) / "baseline.json").read_text() == first
+    journal = ShadowJournal.load(host, "baseline")
+    assert [d.date for d in journal.days] == [signal_day.isoformat()]
+    assert [p.symbol for p in journal.picks] == ["TEST"]

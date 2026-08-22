@@ -23,6 +23,13 @@ from swing.scheduler import launchd
 #: implementation can still be exercised.
 REAL_LOCAL_TIMEZONE_NAME = launchd.local_timezone_name
 
+#: Likewise for ``subprocess.run``: the autouse fixture refuses every real
+#: subprocess so no test can reach ``launchctl``, but the generated nightly
+#: wrapper is a shell script whose whole value is its runtime behaviour, and
+#: asserting on the *text* of a shell script proves nothing. These tests run it
+#: for real against a stub ``swing``.
+REAL_RUN = subprocess.run
+
 
 @pytest.fixture
 def cfg(tmp_path: Path):
@@ -78,8 +85,9 @@ def test_scan_plist_has_the_structure_launchd_expects(cfg, tmp_path: Path) -> No
     plist = launchd.build_plist(cfg, launchd.LABEL_SCAN)
 
     assert plist["Label"] == "com.swing.scan"
-    assert plist["ProgramArguments"][1] == "scan"
-    assert plist["ProgramArguments"][0].endswith("/swing")
+    # The evening agent runs the generated wrapper — scan, then the shadow arms
+    # — because launchd executes exactly one ProgramArguments list.
+    assert plist["ProgramArguments"] == ["/bin/sh", str(launchd.nightly_script_path(cfg))]
     assert plist["StartCalendarInterval"] == [
         {"Hour": 17, "Minute": 30, "Weekday": day} for day in (1, 2, 3, 4, 5)
     ]
@@ -144,7 +152,11 @@ def test_written_plists_round_trip_through_plistlib(cfg, agents_dir: Path) -> No
             parsed = plistlib.load(handle)
         assert parsed["Label"] == label
         assert isinstance(parsed["StartCalendarInterval"][0]["Hour"], int)
-        assert parsed["ProgramArguments"][0].endswith("/swing")
+        assert Path(parsed["ProgramArguments"][0]).is_absolute()
+        if label == launchd.LABEL_CONFIRM:
+            assert parsed["ProgramArguments"][0].endswith("/swing")
+        else:
+            assert parsed["ProgramArguments"] == ["/bin/sh", str(launchd.nightly_script_path(cfg))]
 
 
 def test_write_plists_creates_the_log_directory(cfg, agents_dir: Path, tmp_path: Path) -> None:
@@ -412,3 +424,252 @@ def test_status_only_calls_launchctl_list(cfg, agents_dir: Path, capsys) -> None
     runner = Runner({"list": subprocess.CompletedProcess([], 0, stdout=LIST_OUTPUT, stderr="")})
     launchd.status(cfg, runner=runner, target_dir=agents_dir)
     assert runner.subcommands == ["list"]
+
+
+# ---------------------------------------------------------------------------
+# the nightly wrapper — scan, then the forward paper-trading arms
+# ---------------------------------------------------------------------------
+
+
+def stub_swing(tmp_path: Path) -> Path:
+    """A stand-in ``swing`` that records its arguments and obeys two env vars.
+
+    Every subcommand appends its argument list to ``trace.txt`` and writes a
+    line to each of stdout and stderr, so a test can prove both *what* ran, in
+    *what order*, and *where its output went*.
+    """
+    binary = tmp_path / "bin" / "swing"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$TRACE"\n'
+        'echo "stdout: $*"\n'
+        'echo "stderr: $*" >&2\n'
+        'if [ "$1" = "scan" ]; then exit "${SCAN_STATUS:-0}"; fi\n'
+        'exit "${SHADOW_STATUS:-0}"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def run_wrapper(
+    cfg, tmp_path: Path, *, scan_status: int = 0, shadow_status: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Generate the wrapper, run it for real against the stub, return (result, trace).
+
+    The trace is reset each time so a test may call this more than once and
+    still read one run's argument list.
+    """
+    trace = tmp_path / "trace.txt"
+    trace.unlink(missing_ok=True)
+    binary = stub_swing(tmp_path)
+    script = launchd.write_nightly_script(cfg, root=tmp_path, executable=binary)
+    result = REAL_RUN(
+        ["/bin/sh", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "TRACE": str(trace),
+            "SCAN_STATUS": str(scan_status),
+            "SHADOW_STATUS": str(shadow_status),
+        },
+    )
+    lines = trace.read_text(encoding="utf-8").splitlines() if trace.exists() else []
+    return result, lines
+
+
+def test_the_evening_job_runs_the_generated_wrapper(cfg, agents_dir: Path) -> None:
+    launchd.write_plists(cfg, target_dir=agents_dir)
+    script = launchd.nightly_script_path(cfg)
+
+    assert script.is_file()
+    assert os.access(script, os.X_OK)
+    assert script.read_text().startswith("#!/bin/sh")
+
+
+def test_the_morning_job_still_runs_confirm_directly(cfg) -> None:
+    """Nothing is chained to the confirm, so it keeps the simplest possible job."""
+    plist = launchd.build_plist(cfg, launchd.LABEL_CONFIRM)
+    assert plist["ProgramArguments"][0].endswith("/swing")
+    assert plist["ProgramArguments"][1] == "confirm"
+
+
+def test_the_wrapper_scans_first_then_records_and_scores(cfg, tmp_path: Path) -> None:
+    """Ordering is the whole reason this is one job and not two.
+
+    Shadow scoring reads the bars the scan just refreshed; a second launchd job
+    "a few minutes later" would be a guess about how long tonight's scan takes.
+    """
+    result, trace = run_wrapper(cfg, tmp_path)
+
+    assert trace == ["scan", "shadow run", "shadow score"]
+    assert result.returncode == 0
+
+
+def test_a_failing_scan_still_records_the_shadow_arms(cfg, tmp_path: Path) -> None:
+    """`;` not `&&`: a missed night of forward evidence cannot be re-lived."""
+    result, trace = run_wrapper(cfg, tmp_path, scan_status=2)
+
+    assert trace == ["scan", "shadow run", "shadow score"]
+    assert result.returncode == 2  # and the scan's own status still surfaces
+
+
+def test_a_failing_shadow_never_touches_the_scans_exit_code(cfg, tmp_path: Path) -> None:
+    """The scan's exit code is load-bearing: non-zero means nobody heard tonight."""
+    healthy, _trace = run_wrapper(cfg, tmp_path, shadow_status=2)
+    assert healthy.returncode == 0
+
+    failed, _trace = run_wrapper(cfg, tmp_path, scan_status=2, shadow_status=0)
+    assert failed.returncode == 2
+
+    both, trace = run_wrapper(cfg, tmp_path, scan_status=2, shadow_status=70)
+    assert both.returncode == 2  # shadow cannot raise it, and cannot clear it
+    assert trace == ["scan", "shadow run", "shadow score"]
+
+
+def test_the_second_shadow_step_runs_even_when_the_first_one_fails(cfg, tmp_path: Path) -> None:
+    """A `shadow run` that refuses must not cost the scoring pass for older positions."""
+    _result, trace = run_wrapper(cfg, tmp_path, shadow_status=2)
+    assert trace == ["scan", "shadow run", "shadow score"]
+
+
+def test_shadow_output_goes_to_its_own_log_pair(cfg, tmp_path: Path) -> None:
+    """A stalled shadow must be visible without reading the scan log, and vice versa."""
+    result, _trace = run_wrapper(cfg, tmp_path, shadow_status=2)
+    logs = launchd.logs_dir(cfg)
+
+    # The scan's own streams stay on the job's stdout/stderr, which launchd
+    # sends to scan.out.log / scan.err.log.
+    assert "stdout: scan" in result.stdout
+    assert "stderr: scan" in result.stderr
+    assert "shadow" not in result.stdout
+    assert "shadow" not in result.stderr
+
+    out = (logs / "shadow.out.log").read_text()
+    err = (logs / "shadow.err.log").read_text()
+    assert "stdout: shadow run" in out
+    assert "stdout: shadow score" in out
+    assert "shadow run exited 2" in out  # the failure is stated in the log itself
+    assert "stderr: shadow run" in err
+    assert "scan" not in err
+
+
+def test_the_shadow_log_appends_rather_than_truncating(cfg, tmp_path: Path) -> None:
+    """The series is the evidence; last night's log must survive tonight's run."""
+    run_wrapper(cfg, tmp_path)
+    run_wrapper(cfg, tmp_path)
+
+    out = (launchd.logs_dir(cfg) / "shadow.out.log").read_text()
+    assert out.count("=== shadow ") == 2
+
+
+def test_the_wrapper_survives_a_deleted_log_directory(cfg, tmp_path: Path) -> None:
+    """launchd recreates its own log files; the wrapper's redirect has to too."""
+    import shutil
+
+    shutil.rmtree(launchd.logs_dir(cfg), ignore_errors=True)
+    result, trace = run_wrapper(cfg, tmp_path)
+
+    assert result.returncode == 0
+    assert trace == ["scan", "shadow run", "shadow score"]
+    assert (launchd.logs_dir(cfg) / "shadow.out.log").is_file()
+
+
+def test_the_wrapper_quotes_paths_that_contain_spaces(tmp_path: Path) -> None:
+    """A checkout under "~/My Projects" must not silently break the schedule."""
+    spaced = tmp_path / "My Projects" / "swing trader"
+    spaced.mkdir(parents=True)
+    cfg = build_config(spaced)
+    binary = spaced / "a dir" / "swing"
+    binary.parent.mkdir(parents=True)
+    binary.write_text('#!/bin/sh\necho "$*" >> "$TRACE"\n', encoding="utf-8")
+    binary.chmod(0o755)
+
+    script = launchd.write_nightly_script(cfg, root=spaced, executable=binary)
+    trace = spaced / "trace.txt"
+    result = REAL_RUN(
+        ["/bin/sh", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "TRACE": str(trace)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert trace.read_text().splitlines() == ["scan", "shadow run", "shadow score"]
+
+
+def test_install_writes_the_wrapper_and_says_what_it_does(cfg, agents_dir: Path, capsys) -> None:
+    launchd.install(cfg, runner=Runner(), target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert launchd.nightly_script_path(cfg).is_file()
+    assert str(launchd.nightly_script_path(cfg)) in out
+    assert "shadow run" in out and "shadow score" in out
+    assert "cannot change the scan's exit code" in out
+
+
+def test_install_is_safe_to_re_run(cfg, agents_dir: Path) -> None:
+    """Re-running install rewrites the wrapper in place; nothing accumulates."""
+    launchd.install(cfg, runner=Runner(), target_dir=agents_dir)
+    first = launchd.nightly_script_path(cfg).read_text()
+
+    launchd.install(cfg, runner=Runner(), target_dir=agents_dir)
+    script = launchd.nightly_script_path(cfg)
+
+    assert script.read_text() == first
+    assert sorted(p.name for p in script.parent.iterdir()) == [launchd.NIGHTLY_SCRIPT_NAME]
+    assert sorted(p.name for p in agents_dir.iterdir()) == [
+        "com.swing.confirm.plist",
+        "com.swing.scan.plist",
+    ]
+
+
+def test_uninstall_removes_everything_install_wrote(cfg, agents_dir: Path, capsys) -> None:
+    launchd.install(cfg, runner=Runner(), target_dir=agents_dir)
+    script = launchd.nightly_script_path(cfg)
+    assert script.is_file()
+
+    launchd.uninstall(cfg, runner=Runner(), target_dir=agents_dir)
+
+    assert not script.exists()
+    assert not script.parent.exists()  # the bin directory goes too when it is empty
+    assert not list(agents_dir.glob("*.plist"))
+    assert "Removed the nightly wrapper" in capsys.readouterr().out
+    # The logs are the record of what happened and are deliberately left alone.
+    assert launchd.logs_dir(cfg).is_dir()
+
+
+def test_uninstall_is_still_safe_when_the_wrapper_is_already_gone(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    launchd.uninstall(cfg, runner=Runner(), target_dir=agents_dir)
+    launchd.uninstall(cfg, runner=Runner(), target_dir=agents_dir)
+    assert "nightly wrapper was not installed" in capsys.readouterr().out
+
+
+def test_status_points_at_the_wrapper_and_the_shadow_logs(
+    cfg, agents_dir: Path, tmp_path: Path, capsys
+) -> None:
+    launchd.write_plists(cfg, target_dir=agents_dir)
+    runner = Runner({"list": subprocess.CompletedProcess([], 0, stdout=LIST_OUTPUT, stderr="")})
+    launchd.status(cfg, runner=runner, target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert str(launchd.nightly_script_path(cfg)) in out
+    assert "shadow run" in out and "shadow score" in out
+    assert str(tmp_path / "state" / "logs" / "shadow.out.log") in out
+    assert str(tmp_path / "state" / "logs" / "shadow.err.log") in out
+
+
+def test_status_flags_a_missing_wrapper(cfg, agents_dir: Path, capsys) -> None:
+    """The plist can be loaded while the script it names has been deleted."""
+    launchd.write_plists(cfg, target_dir=agents_dir)
+    launchd.nightly_script_path(cfg).unlink()
+    runner = Runner({"list": subprocess.CompletedProcess([], 0, stdout=LIST_OUTPUT, stderr="")})
+    launchd.status(cfg, runner=runner, target_dir=agents_dir)
+
+    assert "(MISSING)" in capsys.readouterr().out

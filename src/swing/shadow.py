@@ -131,6 +131,13 @@ MEANINGFUL_TRADE_COUNT = 300
 #: has to wait.
 TRADES_PER_YEAR = 50
 
+#: How many weekdays may pass with no record before :func:`report` says the
+#: series has stalled. One is normal — tonight's scan has not run yet when the
+#: report is read in the morning — so the first weekday of silence means
+#: nothing. Two or more means yesterday is missing too, which is either a market
+#: holiday or a scheduler that stopped, and the reader needs to know which.
+STALE_WEEKDAYS = 2
+
 #: Outcome statuses.
 STATUS_PENDING = "pending"
 STATUS_OPEN = "open"
@@ -1174,6 +1181,14 @@ class _Stats:
     avg_hold: float
     gate_passing_days: int
     by_reason: tuple[tuple[str, int], ...]
+    #: Every date this arm has a record for, ascending. The gap check needs the
+    #: whole set, not just its ends.
+    recorded_days: tuple[str, ...] = ()
+    #: Days whose record carries a recorded failure — the arm was observed, but
+    #: its scan did not produce a decision.
+    error_days: int = 0
+    #: The most recent such failure, for the header to quote.
+    last_error: str = ""
 
     @property
     def win_rate(self) -> float | None:
@@ -1203,6 +1218,7 @@ def _stats_for(journal: ShadowJournal) -> _Stats:
     for pick in closed:
         reasons[pick.outcome.exit_reason] = reasons.get(pick.outcome.exit_reason, 0) + 1
     days = [d.date for d in journal.days]
+    failed = [d for d in journal.days if d.error]
     return _Stats(
         name=journal.name,
         days_tracked=len(journal.days),
@@ -1221,6 +1237,9 @@ def _stats_for(journal: ShadowJournal) -> _Stats:
         avg_hold=(sum(p.outcome.hold_days for p in closed) / len(closed)) if closed else 0.0,
         gate_passing_days=sum(1 for d in journal.days if d.gate_passed),
         by_reason=tuple(sorted(reasons.items())),
+        recorded_days=tuple(sorted(days)),
+        error_days=len(failed),
+        last_error=failed[-1].error if failed else "",
     )
 
 
@@ -1230,6 +1249,99 @@ def _money(value: float) -> str:
 
 def _maybe(value: float | None, fmt: str) -> str:
     return "n/a" if value is None else format(value, fmt)
+
+
+def _weekdays_between(start: date, end: date) -> list[date]:
+    """Every Monday-to-Friday date in ``[start, end]``, ascending.
+
+    A weekday is the best available stand-in for a trading day here: the real
+    calendar would need a holiday feed, and getting that wrong in the *quiet*
+    direction — a checker that under-counts missing days — would defeat the
+    point of checking. So this over-counts by the handful of market holidays a
+    year, and the wording it feeds says so out loud.
+    """
+    if end < start:
+        return []
+    days: list[date] = []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _gaps_for(stat: _Stats, asof: date) -> tuple[int, int]:
+    """``(weekdays since the last record, weekday holes inside the series)``."""
+    recorded = {d for d in (_parse_iso(value) for value in stat.recorded_days) if d is not None}
+    if not recorded:
+        return 0, 0
+    first, last = min(recorded), max(recorded)
+    stale = len(_weekdays_between(last + timedelta(days=1), asof))
+    holes = len([d for d in _weekdays_between(first, last) if d not in recorded])
+    return stale, holes
+
+
+def _gap_lines(cfg: Config, stats: Sequence[_Stats], asof: date) -> list[str]:
+    """The block that has to be read before the numbers: is this still running?
+
+    A forward experiment dies quietly. Nothing raises, nothing pages, the file
+    simply stops growing — and because the report happily prints whatever is in
+    the journal, three weeks of silence look exactly like three weeks of a flat
+    market. This is the one check a human actually notices, so it goes at the
+    very top, above even the small-sample banner, and it names the log to read
+    and the command to backfill with.
+
+    Returns an empty list when every arm is current, which is the normal case.
+    """
+    logs = Path(cfg.paths.state_dir).expanduser() / "logs"
+    findings: list[str] = []
+    stalled = False
+    for stat in stats:
+        stale, holes = _gaps_for(stat, asof)
+        parts: list[str] = []
+        if stale >= STALE_WEEKDAYS:
+            stalled = True
+            parts.append(f"last record {stat.last_day}, {stale} weekday(s) ago")
+        if holes:
+            parts.append(f"{holes} weekday(s) inside the series have no record")
+        if stat.error_days:
+            said = stat.last_error if len(stat.last_error) <= 90 else stat.last_error[:87] + "..."
+            parts.append(f"{stat.error_days} day(s) recorded a failure, most recently: {said}")
+        if parts:
+            # One fact per line: these are read at a glance, and a wrapped
+            # semicolon-joined sentence is not read at all.
+            findings.append(f"  {stat.name}:")
+            findings.extend(f"    - {part}" for part in parts)
+
+    if not findings:
+        return []
+
+    lines = [
+        "#" * 78,
+        "  SHADOW MAY HAVE STOPPED RECORDING — READ THIS BEFORE THE NUMBERS BELOW",
+        "#" * 78,
+        "",
+        *findings,
+        "",
+    ]
+    if stalled:
+        lines += [
+            "  Two or three weekdays of silence is usually a market holiday. Longer than",
+            "  that is a scheduler that is no longer running, and every day it stays broken",
+            "  is forward evidence that cannot be recovered later — the whole point of this",
+            "  record is that it accrues in real time.",
+            "",
+        ]
+    lines += [
+        f"  Check:     tail -n 40 {logs / 'shadow.err.log'}",
+        "             swing schedule status",
+        "  Backfill:  swing shadow run --asof YYYY-MM-DD   (cached bars only, one day)",
+        "",
+        "#" * 78,
+        "",
+    ]
+    return lines
 
 
 def _warning_header(stats: Sequence[_Stats]) -> list[str]:
@@ -1275,20 +1387,30 @@ def report(
     *,
     names: Sequence[str] | None = None,
     directory: Path | None = None,
+    asof: date | None = None,
 ) -> str:
     """Build the side-by-side comparison of every tracked configuration.
+
+    Args:
+        cfg: the host configuration.
+        names: only these tracked configurations.
+        directory: override the search for ``config/shadow``.
+        asof: the day the record is judged current against, for the gap check.
+            Defaults to today in ``cfg.schedule.timezone``.
 
     Returns:
         The report as plain text. It always opens with the small-sample
         warning, at every sample size — there is no threshold above which the
         header is dropped, because the threshold at which a reader stops
-        needing it is not one this function can know.
+        needing it is not one this function can know — and, when the series has
+        stopped accumulating, with a louder warning above that one.
     """
     tracked = tracked_configs(cfg, names=names, directory=directory)
     journals = [ShadowJournal.load(cfg, entry.name) for entry in tracked]
     stats = [_stats_for(journal) for journal in journals]
 
-    lines = _warning_header(stats)
+    lines = _gap_lines(cfg, stats, asof or _today(cfg))
+    lines += _warning_header(stats)
     labels = [s.name for s in stats]
     width = max([12, *(len(label) for label in labels)]) + 2
 
