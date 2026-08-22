@@ -657,6 +657,146 @@ def test_an_unknown_earnings_date_is_re_asked_the_same_day(test_cfg: Config) -> 
 
 
 # ---------------------------------------------------------------------------
+# the live scanner's upcoming-date path (audit COVER-1, BUG-051)
+# ---------------------------------------------------------------------------
+
+
+def test_a_healthy_upcoming_sweep_behaves_exactly_as_it_always_did(test_cfg: Config) -> None:
+    """The whole observable surface of a normal sweep, pinned.
+
+    This is the live scanner's path, so the three-outcome rewrite underneath it
+    has to be invisible whenever Yahoo answers normally: same dates, same
+    number of vendor calls, same cache contents, and no pacing beyond the
+    ordinary gap between chunks.
+    """
+    days = ["2026-09-01", "2026-11-02", "2026-05-01"]  # one past, two ahead of NOW
+    tickers = {f"S{i}": FakeTicker(earnings=earnings_frame(days)) for i in range(12)}
+    factory = TickerFactory(tickers)
+    sleep = RecordingSleep()
+    provider = build_provider(test_cfg, ticker_factory=factory, sleep=sleep, chunk_size=5)
+    symbols = list(tickers)
+
+    out = provider.earnings_dates(symbols, now=NOW)
+
+    assert out == dict.fromkeys(symbols, date(2026, 9, 1)), "the soonest date still in the future"
+    assert factory.count == 12, "one call per symbol, as before"
+    assert sleep.waits == [2.0, 2.0], "three chunks, two ordinary gaps"
+
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "earnings.json", timedelta(days=3)).read_all()
+    assert len(stored) == 12
+    assert {e["value"] for e in stored.values()} == {"2026-09-01"}
+
+    # ...and it is still a warm cache on the next call.
+    assert provider.earnings_dates(symbols, now=NOW + timedelta(days=2)) == out
+    assert factory.count == 12
+
+
+def test_a_symbol_yahoo_refuses_is_not_cached_as_having_no_earnings_date(
+    test_cfg: Config,
+) -> None:
+    """Audit COVER-1 on the live path — the dangerous half.
+
+    A rate-limited reply used to arrive as "no upcoming earnings date", get
+    written down as one for twelve hours, and let the scanner enter a position
+    the blackout existed to prevent. It must leave no trace instead.
+    """
+    tickers: dict[str, FakeTicker] = {
+        f"S{i}": FakeTicker(earnings=earnings_frame(["2026-09-01"])) for i in range(11)
+    }
+    tickers["BROKEN"] = FakeTicker(explode=True)
+    factory = TickerFactory(tickers)
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+
+    out = provider.earnings_dates(list(tickers), now=NOW)
+
+    assert "BROKEN" not in out, "unknown is not a date, and not a None either"
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "earnings.json", timedelta(days=3)).read_all()
+    assert "BROKEN" not in stored, "a refusal must not be written down as a fact"
+    assert len(stored) == 11, "its healthy neighbours are cached as usual"
+
+
+def test_the_calendar_still_rescues_a_symbol_whose_earnings_table_refused(
+    test_cfg: Config,
+) -> None:
+    """One source failing must not lose the other; that fallback predates this."""
+
+    class TableRefuses(FakeTicker):
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            raise RuntimeError("rate limited")
+
+    ticker = TableRefuses(calendar={"Earnings Date": [date(2026, 10, 5)]})
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory({"AAPL": ticker}), retries=1)
+
+    assert provider.earnings_dates(["AAPL"], now=NOW) == {"AAPL": date(2026, 10, 5)}
+
+
+def test_only_past_dates_is_a_real_answer_and_keeps_the_short_miss_ttl(
+    test_cfg: Config,
+) -> None:
+    """Audit BUG-051 semantics intact: "no upcoming date" is still cached, briefly.
+
+    The vendor answered; it simply has nothing ahead of today. That is a fact
+    about the company, so it is cached — but only for twelve hours, because it
+    is the one fact that can turn into a date inside the blackout window.
+    """
+    ticker = FakeTicker(earnings=earnings_frame(["2020-02-01", "2021-05-02"]))
+    factory = TickerFactory({"AAPL": ticker})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+
+    assert provider.earnings_dates(["AAPL"], now=NOW) == {"AAPL": None}
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "earnings.json", timedelta(days=3)).read_all()
+    assert stored["AAPL"]["value"] is None, "cached, unlike a refusal"
+
+    before = factory.count
+    provider.earnings_dates(["AAPL"], now=NOW + timedelta(hours=6))
+    assert factory.count == before, "still fresh at six hours"
+
+    ticker._earnings = earnings_frame(["2026-08-24"])
+    later = provider.earnings_dates(["AAPL"], now=NOW + timedelta(hours=13))
+    assert later == {"AAPL": date(2026, 8, 24)}, "and stale at thirteen"
+
+
+def test_a_throttled_upcoming_batch_caches_nothing(test_cfg: Config) -> None:
+    """The history guard, reused rather than reinvented, on the live path."""
+
+    class Refuses(FakeTicker):
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            raise RuntimeError("rate limited")
+
+        def get_calendar(self) -> Any:
+            raise RuntimeError("rate limited")
+
+    tickers = {f"S{i}": Refuses() for i in range(20)}
+    provider = build_provider(
+        test_cfg, ticker_factory=TickerFactory(tickers), retries=1, history_retries=0
+    )
+
+    out = provider.earnings_dates(list(tickers), now=NOW)
+
+    assert out == {}, "nothing is known, and nothing is claimed"
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "earnings.json", timedelta(days=3)).read_all()
+    assert stored == {}
+
+
+def test_a_morning_confirm_over_a_few_positions_is_never_read_as_throttling(
+    test_cfg: Config,
+) -> None:
+    """The live case that must not change: four held names, all answered "none".
+
+    Below the minimum batch the guard stays out of the way, so a confirm run
+    over a handful of positions caches its answers exactly as it always has.
+    """
+    tickers = {s: FakeTicker(earnings=None, calendar=None) for s in ("AAPL", "MSFT", "KO", "PG")}
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory(tickers))
+
+    out = provider.earnings_dates(list(tickers), now=NOW)
+
+    assert out == dict.fromkeys(tickers), "all four genuinely have no upcoming date"
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "earnings.json", timedelta(days=3)).read_all()
+    assert len(stored) == 4
+
+
+# ---------------------------------------------------------------------------
 # earnings history (amendment A12 / audit BUG-036)
 # ---------------------------------------------------------------------------
 

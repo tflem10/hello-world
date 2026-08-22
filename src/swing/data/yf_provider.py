@@ -61,11 +61,23 @@ __all__ = [
     "EARNINGS_THROTTLE_RETRIES",
     "EARNINGS_TTL",
     "FUNDAMENTALS_TTL",
+    "EarningsUnavailable",
     "YFinanceProvider",
     "settled_history_ttl",
 ]
 
 log = logging.getLogger(__name__)
+
+
+class EarningsUnavailable(RuntimeError):
+    """Yahoo could not be asked about a symbol's earnings at all.
+
+    Distinct from "Yahoo says there is no announcement", and deliberately an
+    exception rather than a return value so it cannot be quietly treated as
+    one. The retry policy turns a persistent one into ``None``, and ``None``
+    is the one answer this module refuses to cache (audit COVER-1).
+    """
+
 
 #: Yahoo's bulk endpoint is happiest a couple of hundred tickers at a time.
 DOWNLOAD_BATCH = 200
@@ -432,14 +444,24 @@ class YFinanceProvider:
         stamp = as_utc(now) if now is not None else utcnow()
         today = stamp.date()
         wanted = clean_symbols(symbols)
-        return self._earnings_cache.get_or_fetch(
+        sweep = _Sweep()
+        out = self._earnings_cache.get_or_fetch(
             wanted,
-            lambda keys: self._map(keys, lambda key: self._next_earnings(key, today)),
+            lambda keys: self._fetch_earnings_chunk(
+                keys,
+                sweep,
+                lambda key: self._upcoming_earnings(key, today),
+                lambda days: days[0] if days else None,
+                what="upcoming earnings date",
+            ),
             now=stamp,
             chunk_size=self._chunk_size,
             encode=lambda value: value.isoformat() if isinstance(value, date) else None,
             decode=lambda value: date.fromisoformat(value) if isinstance(value, str) else None,
         )
+        if sweep.chunks:
+            self._log_earnings_refetch(sweep, len(wanted), what="upcoming earnings dates")
+        return out
 
     def earnings_history(
         self,
@@ -493,7 +515,13 @@ class YFinanceProvider:
         sweep = _Sweep()
         known = self._earnings_history_cache.get_or_fetch(
             wanted,
-            lambda keys: self._fetch_history_chunk(keys, sweep),
+            lambda keys: self._fetch_earnings_chunk(
+                keys,
+                sweep,
+                self._earnings_history,
+                lambda days: tuple(sorted(set(days))) if days else None,
+                what="earnings history",
+            ),
             now=stamp,
             ttl=ttl,
             chunk_size=self._chunk_size,
@@ -507,8 +535,8 @@ class YFinanceProvider:
             for symbol in wanted
         }
 
-    def _log_history_refetch(self, sweep: _Sweep, wanted: int, end: date, ttl: timedelta) -> None:
-        """Say how much history came off the wire, and — when it matters — why.
+    def _log_earnings_refetch(self, sweep: _Sweep, wanted: int, *, what: str) -> None:
+        """Say how much came off the wire, and whether the vendor gave up.
 
         Three things a reader needs and used to have no way to learn: how much
         was downloaded, how much of it actually carried dates, and whether the
@@ -516,18 +544,24 @@ class YFinanceProvider:
         """
         if sweep.unanswered:
             log.warning(
-                "Yahoo stopped answering during this earnings-history download: %d symbols went "
-                "unanswered and were deliberately not cached, so they will be asked again rather "
-                "than treated as companies with no earnings. Re-run to fill them in; the earnings "
-                "blackout is weaker than usual until you do.",
+                "Yahoo stopped answering while downloading %s: %d symbols went unanswered and "
+                "were deliberately not cached, so they will be asked again rather than treated as "
+                "symbols with no earnings. Re-run to fill them in; the earnings blackout is "
+                "weaker than usual until you do.",
+                what,
                 sweep.unanswered,
             )
         log.info(
-            "Downloaded earnings history for %d of %d symbols; %d had dates.",
+            "Downloaded %s for %d of %d symbols; %d had dates.",
+            what,
             sweep.asked,
             wanted,
             sweep.dated,
         )
+
+    def _log_history_refetch(self, sweep: _Sweep, wanted: int, end: date, ttl: timedelta) -> None:
+        """The shared report, plus the window caveat that only history has."""
+        self._log_earnings_refetch(sweep, wanted, what="earnings history")
         if ttl > self._earnings_ttl:
             return
         log.info(
@@ -660,22 +694,58 @@ class YFinanceProvider:
 
     # -- earnings ---------------------------------------------------------
 
-    def _next_earnings(self, symbol: str, today: date) -> date | None:
+    def _upcoming_earnings(self, symbol: str, today: date) -> list[date] | None:
+        """Announcement dates from ``today`` onwards, soonest first.
+
+        Returns:
+            The upcoming dates; an **empty list** when the vendor answered and
+            has none; or ``None`` when the vendor could not be asked at all.
+
+            That last distinction is the point (audit COVER-1 on the live
+            path). A rate-limited reply used to arrive here as "no upcoming
+            earnings date", get cached as one, and let the scanner enter a
+            position the blackout existed to prevent — BUG-051's failure with
+            real money behind it. "Unknown" now means genuinely unknown, which
+            is what makes the pipeline's *earnings unknown* warning tag
+            truthful rather than accidental.
+        """
         candidates = self._with_retry(
             f"the earnings calendar for {symbol}", lambda: self._earnings_candidates(symbol)
         )
-        upcoming = sorted(day for day in (candidates or []) if day >= today)
-        return upcoming[0] if upcoming else None
+        if candidates is None:
+            return None
+        return sorted(day for day in candidates if day >= today)
 
     def _earnings_candidates(self, symbol: str) -> list[date]:
+        """Every announcement date Yahoo will offer for one symbol.
+
+        Two sources, because Yahoo populates them inconsistently. Either one
+        *answering* is enough to make an empty result meaningful; only when
+        neither could be read at all is the answer unknown, and then this
+        raises so the retry policy above it — and ultimately the cache — can
+        tell "there is no date" from "we never got to ask".
+
+        Raises:
+            EarningsUnavailable: neither the earnings table nor the calendar
+                could be read.
+        """
         ticker = self._ticker(symbol)
-        days = _dates_from_frame(_safe_call(ticker, "get_earnings_dates", limit=16))
+        frame, table_answered = _ask(ticker, "get_earnings_dates", limit=16)
+        days = _dates_from_frame(frame)
         if days:
             return days
-        calendar = _safe_call(ticker, "get_calendar")
+
+        calendar, calendar_answered = _ask(ticker, "get_calendar")
         if calendar is None:
-            calendar = getattr(ticker, "calendar", None)
-        return _dates_from_calendar(calendar)
+            calendar, attr_answered = _read_attr(ticker, "calendar")
+            calendar_answered |= attr_answered
+        days = _dates_from_calendar(calendar)
+        if days or table_answered or calendar_answered:
+            return days
+        raise EarningsUnavailable(
+            f"Neither Yahoo's earnings table nor its calendar could be read for {symbol}, so "
+            f"whether it has an upcoming announcement is unknown."
+        )
 
     def _earnings_history(self, symbol: str) -> list[date] | None:
         """Every announcement date Yahoo remembers for one symbol.
@@ -701,31 +771,51 @@ class YFinanceProvider:
 
         return self._with_retry(f"the earnings history for {symbol}", call)
 
-    def _fetch_history_chunk(self, keys: list[str], sweep: _Sweep) -> dict[str, Any]:
+    def _fetch_earnings_chunk(
+        self,
+        keys: list[str],
+        sweep: _Sweep,
+        ask: Callable[[str], Sequence[date] | None],
+        store: Callable[[Sequence[date]], Any],
+        *,
+        what: str,
+    ) -> dict[str, Any]:
         """Ask about one chunk of symbols, keeping only answers we can trust.
 
-        Keys missing from the returned dict are **not written to the cache** —
-        :meth:`TtlJsonCache.get_or_fetch` stores only what it is handed — so a
-        symbol we could not ask about stays stale and is asked again next run,
-        instead of being written down as a fact about the company.
+        One mechanism for both earnings endpoints, because they fail the same
+        way and there is no version of this worth getting right twice.
+
+        Args:
+            keys: the symbols in this chunk.
+            sweep: running state for the whole walk.
+            ask: per-symbol call returning the dates found, an **empty**
+                sequence when the vendor answered and had none, or ``None``
+                when the vendor could not be asked at all.
+            store: turns a trusted answer into the value the cache should hold.
+            what: noun phrase for the log lines.
+
+        Returns:
+            Values for the symbols we trust. Keys missing from it are **not
+            written to the cache** — :meth:`TtlJsonCache.get_or_fetch` stores
+            only what it is handed — so a symbol we could not ask about stays
+            stale and is asked again next run, instead of being written down as
+            a fact about the company.
         """
         for attempt in range(1 + self._history_retries):
             self._pace(sweep, attempt)
-            answers = self._map(keys, self._earnings_history)
+            answers = self._map(keys, ask)
             answered = {key: days for key, days in answers.items() if days is not None}
             if not _looks_throttled(keys, answered):
                 sweep.asked += len(answered)
                 sweep.dated += sum(1 for days in answered.values() if days)
-                return {
-                    key: (tuple(sorted(set(days))) if days else None)
-                    for key, days in answered.items()
-                }
+                return {key: store(days) for key, days in answered.items()}
             log.warning(
-                "Yahoo answered %d of %d earnings-history requests in this batch, which looks "
-                "like rate limiting rather than %d companies that never reported. Nothing from "
-                "this batch will be cached%s.",
+                "Yahoo answered %d of %d %s requests in this batch, which looks like rate "
+                "limiting rather than %d symbols with nothing to report. Nothing from this batch "
+                "will be cached%s.",
                 sum(1 for days in answered.values() if days),
                 len(keys),
+                what,
                 len(keys),
                 "; waiting and trying again" if attempt < self._history_retries else "",
             )
@@ -889,15 +979,54 @@ def _lookup(container: Any, key: str) -> Any:
 
 
 def _safe_call(obj: Any, name: str, **kwargs: Any) -> Any:
-    """Call ``obj.name(**kwargs)`` if it exists, swallowing vendor exceptions."""
+    """Call ``obj.name(**kwargs)`` if it exists, swallowing vendor exceptions.
+
+    Only for callers where "the vendor refused" and "the vendor has nothing"
+    genuinely lead to the same decision — the fundamentals screen, which is
+    documented to pass on missing data either way. Anything that *caches* the
+    answer wants :func:`_ask` instead, because collapsing the two writes a
+    refusal down as a fact (audit COVER-1).
+    """
+    return _ask(obj, name, **kwargs)[0]
+
+
+def _ask(obj: Any, name: str, **kwargs: Any) -> tuple[Any, bool]:
+    """Call ``obj.name(**kwargs)``, reporting whether the vendor actually answered.
+
+    Returns:
+        ``(result, answered)``. ``answered`` is ``False`` when the accessor is
+        missing or threw — which is *not* the same as the vendor telling us
+        there is nothing, however identical the two look from here. Conflating
+        them is what let a rate-limited reply be cached as "this company has no
+        earnings" (audit COVER-1).
+    """
     method = getattr(obj, name, None)
     if not callable(method):
-        return None
+        return None, False
     try:
-        return method(**kwargs)
+        return method(**kwargs), True
     except Exception as exc:  # noqa: BLE001 - every yfinance accessor can throw
         log.debug("%s() failed (%s).", name, exc)
-        return None
+        return None, False
+
+
+def _read_attr(obj: Any, name: str) -> tuple[Any, bool]:
+    """Read ``obj.name``, reporting whether it could be read at all.
+
+    yfinance exposes some of the same data as a lazily-computed property, which
+    means a plain attribute read can perform a request and raise like any other.
+
+    Deliberately no ``getattr`` default: a default turns "there is no such
+    attribute" into a successful read of ``None``, which is exactly the
+    conflation this whole change exists to remove.
+    """
+    try:
+        return getattr(obj, name), True
+    except AttributeError:
+        return None, False  # nothing here to read, so nothing was asked
+    except Exception as exc:  # noqa: BLE001 - a yfinance property can throw
+        log.debug("Reading .%s failed (%s).", name, exc)
+        return None, False
 
 
 def _dates_from_frame(frame: Any) -> list[date]:
