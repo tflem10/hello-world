@@ -23,7 +23,7 @@ import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from swing.data.cache import BarCache, CacheMeta, TtlJsonCache
+from swing.data.cache import BarCache, CacheMeta, TtlJsonCache, earnings_fingerprint
 from swing.data.provider import (
     BAR_COLUMNS,
     DataProvider,
@@ -49,6 +49,7 @@ __all__ = [
     "SchwabUnavailable",
     "TtlJsonCache",
     "YFinanceProvider",
+    "earnings_fingerprint",
     "empty_bars",
     "get_provider",
     "normalize_bars",

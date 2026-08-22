@@ -24,7 +24,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Callable, Iterator, Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -50,22 +50,55 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
 __all__ = [
+    "EARNINGS_HISTORY_TTL",
     "EARNINGS_MISS_TTL",
+    "EARNINGS_SETTLE_LAG",
     "EARNINGS_TTL",
     "FUNDAMENTALS_TTL",
     "YFinanceProvider",
+    "settled_history_ttl",
 ]
 
 log = logging.getLogger(__name__)
 
 #: Yahoo's bulk endpoint is happiest a couple of hundred tickers at a time.
 DOWNLOAD_BATCH = 200
-#: Earnings dates get confirmed/moved on a scale of days, not hours.
+#: Earnings dates get confirmed/moved on a scale of days, not hours. This is
+#: the TTL for :meth:`YFinanceProvider.earnings_dates` — the *next* upcoming
+#: announcement, which is genuinely volatile — and the floor under the
+#: history TTL below.
 EARNINGS_TTL = timedelta(days=3)
 #: But "Yahoo has no date for this symbol" is a *much* weaker statement, and
 #: caching it for three days against a ten-day blackout lets a newly published
 #: date slip through the window it exists to block (audit BUG-051).
 EARNINGS_MISS_TTL = timedelta(hours=12)
+#: How long after an announcement its date stops moving.
+#:
+#: ``get_earnings_dates`` returns one row per quarter, and the rows for
+#: quarters that have not happened yet hold Yahoo's *estimate*. An estimate
+#: slips: a company pencils in "late April", confirms a date two weeks out,
+#: and occasionally moves it again. Once the company has actually reported,
+#: the row is a matter of record and never changes again. A month is
+#: comfortably past the usual estimate-to-actual slippage, so a date this far
+#: behind the moment we captured it is treated as settled history.
+EARNINGS_SETTLE_LAG = timedelta(days=30)
+#: Ceiling on how long a *settled* earnings-history entry stays fresh.
+#:
+#: A company's 2014 earnings date is immutable, so the honest answer to "when
+#: should this expire?" is "never" — and refetching is not merely pointless,
+#: it is lossy: the vendor returns the most recent
+#: :data:`EARNINGS_HISTORY_LIMIT` announcements, so the window walks *forward*
+#: with the fetch date and a refetch in 2036 would drop the 2011 rows a 2026
+#: fetch still holds. A finite ceiling exists only so the entry is not
+#: literally immortal after a vendor backfill or a schema change; five years
+#: is long enough that no backtest ever trips it.
+#:
+#: The ceiling doubles as the history cache's *base* TTL, which is what
+#: :meth:`TtlJsonCache.write_all` prunes against. That is deliberate: at ten
+#: times five years nothing is ever pruned, and a delisted symbol's earnings
+#: history is exactly the record a point-in-time backtest of an earlier period
+#: needs (audit LEAK-003 traded away knowingly, for ~250 bytes a symbol).
+EARNINGS_HISTORY_TTL = timedelta(days=365 * 5)
 #: Fundamentals only change when a company reports.
 FUNDAMENTALS_TTL = timedelta(days=7)
 #: Symbols per persisted chunk of a cold earnings/fundamentals walk.
@@ -89,6 +122,61 @@ _PRICE_ATTRS = (
 _INFO_BASIS = "quarterly"
 
 
+def settled_history_ttl(
+    end: date,
+    *,
+    now: datetime,
+    lag: timedelta = EARNINGS_SETTLE_LAG,
+    floor: timedelta = EARNINGS_TTL,
+    ceiling: timedelta = EARNINGS_HISTORY_TTL,
+) -> timedelta:
+    """How long a cached earnings history may serve a window ending on ``end``.
+
+    One cached record holds both kinds of date at once — that is the boundary a
+    naive "history is immutable, so cache it forever" split walks into. The
+    record Yahoo returns for AAPL today lists announcements back to 2011 *and*
+    an estimate for next quarter, under a single ``fetched_at``. Freezing the
+    whole record for five years would freeze the estimate too.
+
+    So the expiry is a property of the **window the caller asked for**, not of
+    the record. A record captured at ``F`` has settled every date on or before
+    ``F - lag``; a request for ``[start, end]`` only ever exposes dates up to
+    ``end``; so the record answers that request immutably exactly when
+    ``end <= F - lag``. Rearranged against the cache's own ``now - F <= ttl``
+    test, that is a time-to-live of ``now - end - lag`` — long for a backtest
+    that ended in 2024, negative for a scan that runs to today.
+
+    The clamp keeps both ends sane. ``floor`` is the live behaviour, unchanged:
+    a window reaching into the unsettled zone ages at :data:`EARNINGS_TTL`,
+    because part of what it exposes really can still move. ``ceiling`` is
+    :data:`EARNINGS_HISTORY_TTL`.
+
+    Note the lag is measured against the *fetch* time, not the present. A date
+    twelve days old when we captured it does not become trustworthy merely
+    because a month has since passed on our clock: it was an estimate when we
+    wrote it down, and it stays one until someone refetches.
+
+    Args:
+        end: last calendar day the caller will read out of the record.
+        now: injected clock.
+        lag: how far behind the fetch a date must be to count as settled.
+        floor: shortest lifetime this may return — the volatile-data TTL.
+        ceiling: longest lifetime this may return.
+
+    Returns:
+        The time-to-live to apply to real (non-``None``) history entries.
+        Misses are not covered: an absence of data is never settled, and keeps
+        :data:`EARNINGS_MISS_TTL` (audit BUG-051).
+    """
+    # Midnight *after* ``end``: the window includes the whole of that day, so
+    # the day is only behind us once it has finished.
+    finished = datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(days=1)
+    settled = as_utc(now) - finished - lag
+    if settled <= floor:
+        return floor
+    return min(settled, ceiling)
+
+
 class YFinanceProvider:
     """A :class:`~swing.data.provider.DataProvider` backed by Yahoo Finance.
 
@@ -108,7 +196,13 @@ class YFinanceProvider:
             ``cfg.data.retry_backoff``.
         workers: upper bound on concurrent per-symbol calls.
         chunk_size: symbols per persisted chunk of a cold TTL-cache walk.
-        earnings_ttl / fundamentals_ttl: how long those caches stay fresh.
+        earnings_ttl: how long the *next upcoming* announcement stays fresh,
+            and the floor under the history TTL.
+        earnings_history_ttl: ceiling on how long a settled historical window
+            stays fresh. See :func:`settled_history_ttl`.
+        earnings_settle_lag: how far behind its fetch a date must be before it
+            counts as settled history rather than a live estimate.
+        fundamentals_ttl: how long the fundamentals cache stays fresh.
     """
 
     def __init__(
@@ -124,8 +218,21 @@ class YFinanceProvider:
         workers: int = DEFAULT_WORKERS,
         chunk_size: int = FETCH_CHUNK,
         earnings_ttl: timedelta = EARNINGS_TTL,
+        earnings_history_ttl: timedelta = EARNINGS_HISTORY_TTL,
+        earnings_settle_lag: timedelta = EARNINGS_SETTLE_LAG,
         fundamentals_ttl: timedelta = FUNDAMENTALS_TTL,
     ) -> None:
+        if earnings_history_ttl < earnings_ttl:
+            raise ValueError(
+                "Historical earnings must not expire sooner than the next upcoming date "
+                f"({earnings_history_ttl} against {earnings_ttl}): a past announcement is the "
+                "more stable of the two, never the less stable one."
+            )
+        if earnings_settle_lag < timedelta(0):
+            raise ValueError(
+                "The earnings settle lag is how long after an announcement its date stops "
+                "moving, so it cannot be negative."
+            )
         self._policy = RetryPolicy.from_config(
             cfg, retries=retries, backoff=retry_backoff, batch=batch_size
         )
@@ -135,12 +242,20 @@ class YFinanceProvider:
         self._cache = cache if cache is not None else BarCache.from_config(cfg)
         self._workers = max(1, workers)
         self._chunk_size = max(1, chunk_size)
+        self._earnings_ttl = earnings_ttl
+        self._earnings_history_ttl = earnings_history_ttl
+        self._earnings_settle_lag = earnings_settle_lag
         cache_dir = self._cache.root.parent
         self._earnings_cache = TtlJsonCache(
             cache_dir / "earnings.json", earnings_ttl, miss_ttl=EARNINGS_MISS_TTL
         )
+        # The history cache's *base* TTL is the long one. It is what
+        # ``write_all`` prunes against, and pruning settled history at ten
+        # times three days would delete the very entries this scheme exists to
+        # keep — including the delisted symbols a point-in-time backtest wants.
+        # The short lifetime is applied per call instead, from the window.
         self._earnings_history_cache = TtlJsonCache(
-            cache_dir / "earnings-history.json", earnings_ttl, miss_ttl=EARNINGS_MISS_TTL
+            cache_dir / "earnings-history.json", earnings_history_ttl, miss_ttl=EARNINGS_MISS_TTL
         )
         self._fundamentals_cache = TtlJsonCache(cache_dir / "fundamentals.json", fundamentals_ttl)
 
@@ -228,7 +343,10 @@ class YFinanceProvider:
         """Next upcoming earnings date per symbol, ``None`` when Yahoo has none.
 
         Cached for :data:`EARNINGS_TTL` — but a ``None`` only for
-        :data:`EARNINGS_MISS_TTL`. Yahoo mixes confirmed dates with estimated
+        :data:`EARNINGS_MISS_TTL`. Three days is right *here* and nowhere else
+        in this module: the next announcement is the one earnings fact that
+        genuinely moves. :meth:`earnings_history` keeps its own, far longer
+        expiry. Yahoo mixes confirmed dates with estimated
         ones and does not always say which is which; we return the earliest
         upcoming date from either source, because for an earnings blackout an
         estimate that is a few days off is far better than nothing.
@@ -263,6 +381,23 @@ class YFinanceProvider:
         The *unfiltered* list is what gets cached, keyed by symbol alone, so
         two callers asking for different windows share one download.
 
+        **Expiry depends on the window, not the clock** (audit REPRO-1). This
+        used to share :data:`EARNINGS_TTL` with the upcoming-date cache, so a
+        backtest over 2014-2024 re-downloaded ~1,500 symbols of immutable
+        history every three days — and a comparison run either side of that
+        boundary silently changed its own answer, with an identical
+        ``config_hash``, ``data_hash`` and ``code_ref`` because none of the
+        three can see earnings. A window that ends in the settled past now has
+        an effectively unbounded lifetime; a window that runs to today keeps
+        the old three days. :func:`settled_history_ttl` derives both.
+
+        A ``None`` — "Yahoo has no history for this symbol" — is exempt and
+        still expires at :data:`EARNINGS_MISS_TTL` whatever the window, because
+        an absence of data is not settled data: it is the one answer that can
+        turn into a real one at any moment (audit BUG-051). That leaves a
+        genuine, deliberate source of run-to-run drift, which is precisely what
+        :func:`~swing.data.cache.earnings_fingerprint` exists to make visible.
+
         Returns:
             ``{symbol: (dates...)}`` for every requested symbol, sorted and
             unique. An empty tuple means "unknown", never "there were none".
@@ -270,18 +405,65 @@ class YFinanceProvider:
         stamp = as_utc(now) if now is not None else utcnow()
         first, last = as_date(start), as_date(end)
         wanted = clean_symbols(symbols)
+        ttl = settled_history_ttl(
+            last,
+            now=stamp,
+            lag=self._earnings_settle_lag,
+            floor=self._earnings_ttl,
+            ceiling=self._earnings_history_ttl,
+        )
+        refetched: list[str] = []
+
+        def fetch(keys: list[str]) -> dict[str, Any]:
+            refetched.extend(keys)
+            return self._map(keys, self._earnings_history)
+
         known = self._earnings_history_cache.get_or_fetch(
             wanted,
-            lambda keys: self._map(keys, self._earnings_history),
+            fetch,
             now=stamp,
+            ttl=ttl,
             chunk_size=self._chunk_size,
             encode=_encode_days,
             decode=_decode_days,
         )
+        if refetched:
+            self._log_history_refetch(len(refetched), len(wanted), last, ttl)
         return {
             symbol: tuple(day for day in (known.get(symbol) or ()) if first <= day <= last)
             for symbol in wanted
         }
+
+    def _log_history_refetch(self, fetched: int, wanted: int, end: date, ttl: timedelta) -> None:
+        """Say how much history came off the wire, and — when it matters — why.
+
+        This is the only warning anyone gets that a run's earnings inputs may
+        differ from the last one's. A window ending inside the settling period
+        is the case that bit: the record's tail really can still move, so it
+        expires as fast as a live quote does, and *the whole record* comes back
+        down with it. Nothing in the run's identity triple records that, so the
+        line names the remedy — an earlier, fixed end date — rather than
+        leaving the reader to infer it.
+        """
+        if ttl > self._earnings_ttl:
+            log.info(
+                "Downloaded earnings history for %d of %d symbols; the rest was already cached.",
+                fetched,
+                wanted,
+            )
+            return
+        log.info(
+            "Downloaded earnings history for %d of %d symbols. The requested window ends on %s, "
+            "which is inside the %d-day period where an announcement date can still move, so the "
+            "whole record expires on the same short schedule as a live date and comes back down "
+            "with it. Two runs either side of that can read different earnings and so produce "
+            "different trades, with nothing in the run's config, data or code hash to show it. "
+            "Ending the window on an earlier, fixed day keeps repeated runs comparable.",
+            fetched,
+            wanted,
+            end,
+            self._earnings_settle_lag.days,
+        )
 
     def fundamentals(
         self, symbols: Sequence[str], *, now: datetime | None = None

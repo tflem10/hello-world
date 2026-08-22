@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -23,8 +24,15 @@ import pytest
 
 from conftest import build_config, make_bars
 from swing.config import Config
+from swing.data.cache import earnings_fingerprint
 from swing.data.provider import Fundamentals
-from swing.data.yf_provider import YFinanceProvider, _split_download
+from swing.data.yf_provider import (
+    EARNINGS_HISTORY_TTL,
+    EARNINGS_TTL,
+    YFinanceProvider,
+    _split_download,
+    settled_history_ttl,
+)
 
 NOW = datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
 START = date(2020, 1, 2)
@@ -694,6 +702,247 @@ def test_earnings_history_asks_for_enough_history_to_backtest(test_cfg: Config) 
     provider.earnings_history(["AAPL"], date(2020, 1, 1), date(2026, 1, 1), now=NOW)
 
     assert Recorder.limits == [60]
+
+
+# ---------------------------------------------------------------------------
+# how long historical earnings stay fresh (audit REPRO-1)
+# ---------------------------------------------------------------------------
+
+
+def test_settled_history_ttl_floors_at_the_volatile_ttl() -> None:
+    """A window reaching into today is exactly as trustworthy as it ever was."""
+    assert settled_history_ttl(NOW.date(), now=NOW) == EARNINGS_TTL
+    assert settled_history_ttl(NOW.date() - timedelta(days=20), now=NOW) == EARNINGS_TTL
+    assert settled_history_ttl(NOW.date() + timedelta(days=90), now=NOW) == EARNINGS_TTL
+
+
+def test_settled_history_ttl_grows_with_the_age_of_the_window() -> None:
+    ttl = settled_history_ttl(date(2024, 12, 31), now=NOW)
+
+    # 2026-08-18 21:00 minus midnight after 2024-12-31, minus the 30-day lag.
+    assert ttl == timedelta(days=564, hours=21)
+    assert ttl > settled_history_ttl(date(2025, 6, 30), now=NOW)
+
+
+def test_settled_history_ttl_stops_at_the_ceiling() -> None:
+    assert settled_history_ttl(date(1999, 1, 1), now=NOW) == EARNINGS_HISTORY_TTL
+
+
+def test_a_settled_history_window_is_not_refetched_under_the_live_ttl(test_cfg: Config) -> None:
+    """Audit REPRO-1: a company's 2019 earnings date does not change.
+
+    It used to share the three-day TTL of the *next* announcement, so a pair of
+    backtests run either side of that boundary silently read different earnings
+    — and reported the same ``config_hash``, ``data_hash`` and ``code_ref``,
+    because none of the three can see this file.
+    """
+    factory = TickerFactory(
+        {"AAPL": FakeTicker(earnings=earnings_frame(["2019-02-01", "2019-05-02"]))}
+    )
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    provider.earnings_history(["AAPL"], *window, now=NOW)
+    before = factory.count
+    later = provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(days=400))
+
+    assert factory.count == before, "settled history must not churn"
+    assert later == {"AAPL": (date(2019, 2, 1), date(2019, 5, 2))}
+
+
+def test_a_history_window_running_to_today_still_expires_in_three_days(
+    test_cfg: Config,
+) -> None:
+    """The volatile half keeps its old lifetime: the tail really can move."""
+    ticker = FakeTicker(earnings=earnings_frame(["2026-09-01"]))
+    factory = TickerFactory({"AAPL": ticker})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    window = (date(2026, 1, 1), NOW.date())
+
+    provider.earnings_history(["AAPL"], *window, now=NOW)
+    before = factory.count
+    provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(days=2, hours=23))
+    assert factory.count == before
+
+    provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(days=3, seconds=1))
+    assert factory.count > before
+
+
+@pytest.mark.parametrize(
+    ("end", "refetched"),
+    [
+        # 2026-07-18 finished 31 days before the fetch, so the record's row for
+        # it was already a reported fact when we wrote it down.
+        (date(2026, 7, 18), False),
+        # One day later, and the window's last day was only 30 days behind the
+        # fetch: inside the lag, so that row may still have been an estimate.
+        (date(2026, 7, 19), True),
+    ],
+)
+def test_the_settled_boundary_is_measured_from_the_fetch_not_from_today(
+    test_cfg: Config, end: date, refetched: bool
+) -> None:
+    """The upcoming-to-history transition, one day either side of it.
+
+    Both calls happen at the same moment on the same cached record. The only
+    difference is how far the *window* reaches, and that is the whole scheme:
+    a date does not become trustworthy because a month has passed on our clock,
+    only because a month had passed when the vendor was asked.
+    """
+    factory = TickerFactory({"AAPL": FakeTicker(earnings=earnings_frame(["2026-07-15"]))})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+
+    provider.earnings_history(["AAPL"], date(2026, 1, 1), end, now=NOW)
+    before = factory.count
+    provider.earnings_history(["AAPL"], date(2026, 1, 1), end, now=NOW + timedelta(days=10))
+
+    assert (factory.count > before) is refetched
+
+
+def test_an_unknown_history_is_re_asked_the_same_day_however_old_the_window(
+    test_cfg: Config,
+) -> None:
+    """Audit BUG-051 survives REPRO-1: an absence of data is never settled.
+
+    "Yahoo has no history for this symbol" is the one answer that can turn into
+    a real one at any moment, so it keeps its twelve hours no matter how far in
+    the past the caller is looking.
+    """
+    ticker = FakeTicker(earnings=None)
+    factory = TickerFactory({"AAPL": ticker})
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    assert provider.earnings_history(["AAPL"], *window, now=NOW) == {"AAPL": ()}
+    before = factory.count
+    provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(hours=6))
+    assert factory.count == before, "a miss is still worth caching for a few hours"
+
+    ticker._earnings = earnings_frame(["2019-05-02"])
+    later = provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(hours=13))
+
+    assert factory.count > before
+    assert later == {"AAPL": (date(2019, 5, 2),)}
+
+
+def test_a_warm_history_cache_serves_a_backtest_without_touching_yahoo(
+    test_cfg: Config,
+) -> None:
+    """Audit REPRO-1, the whole point: a rerun months later downloads nothing.
+
+    A fresh provider instance, so this proves the file is doing the work rather
+    than anything remembered in memory.
+    """
+    symbols = [f"S{i}" for i in range(20)]
+    days = ["2019-02-01", "2019-05-02", "2019-08-01", "2019-11-01"]
+    expected = {symbol: tuple(date.fromisoformat(day) for day in days) for symbol in symbols}
+    factory = TickerFactory({s: FakeTicker(earnings=earnings_frame(days)) for s in symbols})
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    build_provider(test_cfg, ticker_factory=factory).earnings_history(symbols, *window, now=NOW)
+    cold = factory.count
+    assert cold == len(symbols)
+
+    warm = build_provider(test_cfg, ticker_factory=factory).earnings_history(
+        symbols, *window, now=NOW + timedelta(days=200)
+    )
+
+    assert factory.count == cold, "200 days on, a warm history cache is still a warm cache"
+    assert warm == expected
+
+
+def test_the_old_shared_ttl_is_what_made_the_warm_cache_churn(test_cfg: Config) -> None:
+    """The same run under the pre-REPRO-1 setting, to show what changed.
+
+    Pinning ``earnings_history_ttl`` back to the three days it used to share
+    with the upcoming-date cache re-downloads every symbol.
+    """
+    symbols = [f"S{i}" for i in range(20)]
+    factory = TickerFactory(
+        {s: FakeTicker(earnings=earnings_frame(["2019-02-01"])) for s in symbols}
+    )
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+    old = {"ticker_factory": factory, "earnings_history_ttl": EARNINGS_TTL}
+
+    build_provider(test_cfg, **old).earnings_history(symbols, *window, now=NOW)
+    cold = factory.count
+    build_provider(test_cfg, **old).earnings_history(symbols, *window, now=NOW + timedelta(days=4))
+
+    assert factory.count == cold + len(symbols)
+
+
+def test_history_cannot_be_configured_to_rot_faster_than_the_next_date(
+    test_cfg: Config,
+) -> None:
+    with pytest.raises(ValueError, match="must not expire sooner"):
+        build_provider(test_cfg, earnings_history_ttl=timedelta(hours=1))
+    with pytest.raises(ValueError, match="cannot be negative"):
+        build_provider(test_cfg, earnings_settle_lag=timedelta(days=-1))
+
+
+def test_a_window_ending_today_says_why_it_re_downloaded_history(
+    test_cfg: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one place a run is told its earnings inputs may have moved.
+
+    ``earnings_history`` has a single caller — the backtest — and a backtest
+    whose window runs to today still expires history in three days, because
+    the tail of the record genuinely can still move. Nothing in the run's
+    identity triple records that, so the log line has to.
+    """
+    factory = TickerFactory({"AAPL": FakeTicker(earnings=earnings_frame(["2019-02-01"]))})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+
+    with caplog.at_level("INFO", logger="swing.data.yf_provider"):
+        provider.earnings_history(["AAPL"], date(2010, 1, 1), NOW.date(), now=NOW)
+    assert "an earlier, fixed day" in caplog.text
+    assert "30-day period" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="swing.data.yf_provider"):
+        provider.earnings_history(["MSFT"], date(2010, 1, 1), date(2020, 12, 31), now=NOW)
+    assert "already cached" in caplog.text, "a settled window has nothing to warn about"
+    assert "fixed day" not in caplog.text
+
+
+def test_a_warm_settled_window_logs_nothing_at_all(
+    test_cfg: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    factory = TickerFactory({"AAPL": FakeTicker(earnings=earnings_frame(["2019-02-01"]))})
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    window = (date(2010, 1, 1), date(2020, 12, 31))
+    provider.earnings_history(["AAPL"], *window, now=NOW)
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="swing.data.yf_provider"):
+        provider.earnings_history(["AAPL"], *window, now=NOW + timedelta(days=400))
+
+    assert caplog.text == "", "nothing was downloaded, so there is nothing to say"
+
+
+def test_two_caches_filled_at_different_times_fingerprint_the_same(tmp_path: Path) -> None:
+    """Audit REPRO-1(b): the digest answers "same earnings?", not "same run?".
+
+    Two separate cache directories, filled a year apart from the same vendor
+    answers. Everything incidental differs — the files, their ``fetched_at``
+    stamps — and the fingerprints must still match, or the number is useless
+    for comparing two runs.
+    """
+    days = ["2019-02-01", "2019-05-02", "2020-08-03"]
+    symbols = ["AAPL", "MSFT"]
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    def fill(name: str, now: datetime) -> dict[str, Any]:
+        cfg = build_config(tmp_path, data={"cache_dir": tmp_path / name})
+        factory = TickerFactory({s: FakeTicker(earnings=earnings_frame(days)) for s in symbols})
+        provider = build_provider(cfg, ticker_factory=factory)
+        return dict(provider.earnings_history(symbols, *window, now=now))
+
+    early = fill("early", NOW)
+    late = fill("late", NOW + timedelta(days=365))
+
+    assert early == late
+    assert earnings_fingerprint(symbols, early) == earnings_fingerprint(symbols, late)
 
 
 # ---------------------------------------------------------------------------

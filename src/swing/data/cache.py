@@ -36,12 +36,19 @@ Four audit findings shaped the current version:
 :class:`TtlJsonCache` is a much dumber thing: a JSON dict of
 ``key -> {fetched_at, value}`` used for earnings dates and fundamentals, which
 change on the order of days, not minutes. It writes under the same lock, drops
-long-dead keys, and can expire "we found nothing" answers faster than real ones
-(audit LEAK-003, BUG-051).
+long-dead keys, can expire "we found nothing" answers faster than real ones
+(audit LEAK-003, BUG-051), and lets a caller override the lifetime per call
+when *it* knows something about the data's stability that the cache cannot —
+which is how historical earnings stopped churning under a live TTL (REPRO-1).
+
+:func:`earnings_fingerprint` is the other half of that story: a digest of the
+announcement dates a run actually consumed, so two runs claiming to be the same
+experiment can be checked rather than trusted.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -49,7 +56,7 @@ import re
 import tempfile
 import time as _time
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -75,6 +82,7 @@ __all__ = [
     "CacheMeta",
     "FetchBars",
     "TtlJsonCache",
+    "earnings_fingerprint",
     "utcnow",
 ]
 
@@ -720,6 +728,12 @@ class TtlJsonCache:
     will not have one in five minutes either, and a nightly scan over 1,500
     symbols cannot afford to re-ask every time. They can be cached for *less*
     long than real answers though — see ``miss_ttl``.
+
+    A caller may also pass ``ttl=`` to :meth:`get_or_fetch` to override the
+    lifetime of *real* answers for that one call. The cache cannot know that
+    one caller is reading only the settled part of a record and another is
+    reading its volatile tail; the caller can (audit REPRO-1). Misses are
+    never overridden — an absence of data is never settled.
     """
 
     def __init__(self, path: Path, ttl: timedelta, *, miss_ttl: timedelta | None = None) -> None:
@@ -742,11 +756,23 @@ class TtlJsonCache:
         self.ttl = ttl
         self.miss_ttl = miss_ttl
 
-    def ttl_for(self, value: Any) -> timedelta:
-        """The lifetime that applies to one stored value."""
+    def ttl_for(self, value: Any, *, ttl: timedelta | None = None) -> timedelta:
+        """The lifetime that applies to one stored value.
+
+        Args:
+            value: the stored (encoded) value; ``None`` is a cached miss.
+            ttl: a caller's override for this one lookup. It applies to real
+                answers only: a miss keeps ``miss_ttl`` however long the caller
+                would like to trust the rest of the file, because "Yahoo knows
+                nothing about this symbol" is the one answer that can flip at
+                any moment (audit BUG-051).
+
+        Returns:
+            How long this value stays fresh.
+        """
         if value is None and self.miss_ttl is not None:
             return self.miss_ttl
-        return self.ttl
+        return ttl if ttl is not None else self.ttl
 
     def read_all(self) -> dict[str, dict[str, Any]]:
         """Return the raw entries, recovering silently from a damaged file."""
@@ -801,6 +827,7 @@ class TtlJsonCache:
         encode: Callable[[Any], Any] = lambda value: value,
         decode: Callable[[Any], Any] = lambda value: value,
         chunk_size: int = 0,
+        ttl: timedelta | None = None,
     ) -> dict[str, Any]:
         """Return a value per key, fetching only the keys that are stale or new.
 
@@ -814,6 +841,11 @@ class TtlJsonCache:
                 size and **persist after each one**. A cold run over 1,500
                 symbols used to write nothing until the last one answered, so
                 a Ctrl-C at symbol 1,400 discarded the lot (audit PERF-003).
+            ttl: lifetime to apply to real answers on this call, in place of
+                the cache's own. Only affects what this call considers stale —
+                nothing is rewritten, and pruning still uses the cache's base
+                TTL, so an override can never shorten an entry's life on disk.
+                Cached misses ignore it entirely (see :meth:`ttl_for`).
 
         Returns:
             ``{key: value}`` for every key that was cached or successfully
@@ -829,7 +861,7 @@ class TtlJsonCache:
             if entry is None or fetched_at is None:
                 stale.append(key)
                 continue
-            if moment - fetched_at > self.ttl_for(entry.get("value")):
+            if moment - fetched_at > self.ttl_for(entry.get("value"), ttl=ttl):
                 stale.append(key)
                 continue
             try:
@@ -879,6 +911,88 @@ class TtlJsonCache:
         except Exception as exc:  # noqa: BLE001 - a stale value beats a crash
             log.error("Could not refresh %d cached values (%s).", len(keys), exc)
             return {}
+
+
+# ---------------------------------------------------------------------------
+# fingerprinting what a run read out of the earnings caches
+# ---------------------------------------------------------------------------
+
+
+def earnings_fingerprint(symbols: Sequence[str], earnings: Mapping[str, Any]) -> str:
+    """SHA-256 over the announcement dates a run actually consumed.
+
+    A backtest's reproducibility triple — ``config_hash``, ``data_hash``,
+    ``code_ref`` — fingerprints the settings, the price bars and the code.
+    Earnings dates are a fourth input, and none of the three can see them:
+    :func:`swing.strategy.rules.earnings_blackout` is part of the entry gate,
+    so a re-download that moves one date moves the trade list. Two runs of the
+    *same* control diverged by 32 trades that way while every hash matched
+    (audit REPRO-1). This is the missing fourth number.
+
+    What goes in is exactly what the simulation reads and nothing else:
+
+    * **the symbols asked for**, not the cache's keys. A run over a different
+      universe is a different run even if both got nothing back. Keys present
+      in ``earnings`` but absent from ``symbols`` are ignored — the simulation
+      never looks them up.
+    * **their dates**, sorted and de-duplicated, so the digest cannot move on
+      dict iteration order, on the order of the symbol list, or on the order
+      the vendor happened to return a symbol's quarters in.
+
+    What stays out is everything incidental: ``fetched_at`` stamps, cache file
+    paths, which provider answered, how many symbols were served warm. Two
+    caches holding the same dates fingerprint identically however far apart
+    they were downloaded — which is the whole point, since "identical inputs"
+    is the claim being checked.
+
+    ``None``, ``()`` and "absent from the mapping" all digest the same, because
+    :func:`~swing.strategy.rules.earnings_blackout` treats all three the same:
+    zero announcements, nothing blocked. Distinguishing them would raise an
+    alarm on a difference the simulation cannot observe.
+
+    Args:
+        symbols: the symbols the run was over, in any case or order.
+        earnings: what the provider returned for them — the
+            ``{symbol: (dates...)}`` of
+            :meth:`~swing.data.yf_provider.YFinanceProvider.earnings_history`,
+            or the ``{symbol: date | None}`` of ``earnings_dates``. Both shapes
+            are accepted, and a lone date reads as a one-element sequence, so a
+            caller that degrades from one to the other need not branch.
+
+    Returns:
+        A 64-character hex digest, matching the width of ``data_hash`` and
+        ``config_hash``. Reports may truncate it for display.
+
+    Raises:
+        TypeError: if a value cannot be read as a date or a sequence of them.
+            A digest is a claim about what was consumed, so guessing at an
+            unreadable value would be worse than refusing.
+    """
+    lookup = {str(key).strip().upper(): value for key, value in earnings.items()}
+    parts = [
+        f"{symbol}:{','.join(day.isoformat() for day in _announcement_days(lookup.get(symbol)))}"
+        for symbol in sorted(clean_symbols(symbols))
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _announcement_days(value: Any) -> tuple[date, ...]:
+    """One earnings value as sorted, unique calendar days.
+
+    Accepts the several shapes the two providers and their caches hand round:
+    ``None``, a single date-ish scalar, or any iterable of them. Missing
+    entries inside a sequence are dropped rather than digested as a literal
+    ``"NaT"``.
+    """
+    if value is None or value is pd.NaT:
+        return ()
+    if isinstance(value, str | date | datetime):  # pd.Timestamp subclasses datetime
+        return (as_date(value),)
+    if isinstance(value, Iterable):
+        return tuple(
+            sorted({as_date(item) for item in value if item is not None and item is not pd.NaT})
+        )
+    return (as_date(value),)  # not a date and not a sequence: as_date says so plainly
 
 
 def _coverage_after_empty_tail(last_bar: date, end: date) -> date:

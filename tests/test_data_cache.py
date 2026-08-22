@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 from conftest import make_bars
-from swing.data.cache import BarCache, CacheMeta, TtlJsonCache
+from swing.data.cache import BarCache, CacheMeta, TtlJsonCache, earnings_fingerprint
 from swing.state import file_lock
 
 NOW = datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
@@ -886,3 +886,195 @@ def test_a_long_cold_walk_is_persisted_chunk_by_chunk(tmp_path: Path) -> None:
 
     assert calls == [["S0", "S1"], ["S2", "S3"], ["S4"]]
     assert sorted(cache.read_all()) == ["S0", "S1", "S2", "S3"], "four survive the interrupt"
+
+
+# ---------------------------------------------------------------------------
+# per-call lifetimes (audit REPRO-1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_caller_may_lengthen_one_lookup(tmp_path: Path) -> None:
+    """The cache cannot know which half of a record a caller is reading.
+
+    Historical earnings live in the same file as next quarter's estimate. A
+    caller asking only about 2019 knows that answer is immutable; the cache
+    does not, and used to expire the lot after three days (audit REPRO-1).
+    """
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3))
+    calls: list[list[str]] = []
+
+    def fetch(keys: list[str]) -> dict[str, str]:
+        calls.append(sorted(keys))
+        return dict.fromkeys(keys, "2019-05-02")
+
+    cache.get_or_fetch(["AAPL"], fetch, now=NOW)
+    much_later = NOW + timedelta(days=400)
+
+    assert cache.get_or_fetch(["AAPL"], fetch, now=much_later, ttl=timedelta(days=500)) == {
+        "AAPL": "2019-05-02"
+    }
+    assert len(calls) == 1
+
+    cache.get_or_fetch(["AAPL"], fetch, now=much_later)
+    assert len(calls) == 2, "without the override the cache's own three days apply"
+
+
+def test_a_per_call_lifetime_never_extends_a_cached_miss(tmp_path: Path) -> None:
+    """Audit BUG-051 survives REPRO-1.
+
+    A miss is an absence of data, and an absence is never settled: it is the
+    one answer that can turn into a real one at any moment. However long a
+    caller would like to trust the rest of the file, a ``None`` keeps its
+    ``miss_ttl``.
+    """
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3), miss_ttl=timedelta(hours=12))
+    answers: dict[str, str | None] = {"KNOWN": "2019-05-02", "UNKNOWN": None}
+    calls: list[list[str]] = []
+
+    def fetch(keys: list[str]) -> dict[str, str | None]:
+        calls.append(sorted(keys))
+        return {key: answers[key] for key in keys}
+
+    forever = timedelta(days=500)
+    cache.get_or_fetch(["KNOWN", "UNKNOWN"], fetch, now=NOW, ttl=forever)
+    later = NOW + timedelta(hours=13)
+    cache.get_or_fetch(["KNOWN", "UNKNOWN"], fetch, now=later, ttl=forever)
+
+    assert calls[1] == ["UNKNOWN"], "the override cannot make 'we found nothing' stick"
+
+
+def test_ttl_for_reports_both_kinds_of_lifetime(tmp_path: Path) -> None:
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3), miss_ttl=timedelta(hours=12))
+    override = timedelta(days=500)
+
+    assert cache.ttl_for("a value") == timedelta(days=3)
+    assert cache.ttl_for("a value", ttl=override) == override
+    assert cache.ttl_for(None) == timedelta(hours=12)
+    assert cache.ttl_for(None, ttl=override) == timedelta(hours=12)
+
+
+def test_a_per_call_lifetime_does_not_change_what_is_pruned(tmp_path: Path) -> None:
+    """Overriding a lookup must not shorten — or lengthen — a life on disk.
+
+    Pruning is a property of the file, so it stays on the cache's own TTL.
+    Anything else would let one caller's opinion about one window quietly
+    delete another caller's data.
+    """
+    cache = TtlJsonCache(tmp_path / "e.json", timedelta(days=3))
+    cache.get_or_fetch(["OLD"], lambda keys: {"OLD": "x"}, now=NOW - timedelta(days=40))
+
+    cache.get_or_fetch(["NEW"], lambda keys: {"NEW": "y"}, now=NOW, ttl=timedelta(days=500))
+
+    assert sorted(cache.read_all()) == ["NEW"], "40 days is still past 10 times a 3-day TTL"
+
+
+# ---------------------------------------------------------------------------
+# earnings_fingerprint (audit REPRO-1)
+# ---------------------------------------------------------------------------
+
+AAPL_DAYS = (date(2019, 2, 1), date(2019, 5, 2), date(2019, 8, 1))
+MSFT_DAYS = (date(2019, 1, 30), date(2019, 4, 25))
+
+
+def test_earnings_fingerprint_is_a_full_width_digest() -> None:
+    """Same width as ``data_hash`` and ``config_hash``, so reports can align."""
+    digest = earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS})
+
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
+
+
+def test_earnings_fingerprint_ignores_every_kind_of_order() -> None:
+    """Order-independence in all three places it could leak in."""
+    canonical = earnings_fingerprint(["AAPL", "MSFT"], {"AAPL": AAPL_DAYS, "MSFT": MSFT_DAYS})
+
+    assert (
+        earnings_fingerprint(
+            ["msft", "aapl"],  # the symbol list, and its casing
+            {"MSFT": MSFT_DAYS, "AAPL": tuple(reversed(AAPL_DAYS))},  # dict and date order
+        )
+        == canonical
+    )
+    assert earnings_fingerprint(
+        ["AAPL", "MSFT", "AAPL"], {"AAPL": AAPL_DAYS, "MSFT": MSFT_DAYS}
+    ) == (canonical), "a duplicate symbol is still one symbol"
+    assert (
+        earnings_fingerprint(
+            ["AAPL", "MSFT"], {"AAPL": (*AAPL_DAYS, AAPL_DAYS[0]), "MSFT": MSFT_DAYS}
+        )
+        == canonical
+    ), "a duplicate date is still one date"
+
+
+def test_earnings_fingerprint_moves_when_one_date_moves() -> None:
+    """One day, on one symbol, out of a universe of many."""
+    universe = [f"S{i}" for i in range(200)]
+    before = dict.fromkeys(universe, AAPL_DAYS)
+    after = {**before, "S137": (date(2019, 2, 1), date(2019, 5, 3), date(2019, 8, 1))}
+
+    assert earnings_fingerprint(universe, before) != earnings_fingerprint(universe, after)
+
+
+def test_earnings_fingerprint_moves_when_a_symbol_gains_or_loses_dates() -> None:
+    known = earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS})
+
+    assert earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS[:2]}) != known
+    assert earnings_fingerprint(["AAPL"], {"AAPL": ()}) != known
+
+
+def test_earnings_fingerprint_covers_the_symbols_asked_for(tmp_path: Path) -> None:
+    """The universe is an input, and the cache's other keys are not.
+
+    Two runs over different universes are different runs even when both got
+    nothing back; a symbol sitting in the shared cache file that this run never
+    looked up cannot change its answer.
+    """
+    nothing: dict[str, tuple[date, ...]] = {}
+
+    assert earnings_fingerprint(["AAPL"], nothing) != earnings_fingerprint(
+        ["AAPL", "MSFT"], nothing
+    )
+    assert earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS, "TSLA": MSFT_DAYS}) == (
+        earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS})
+    )
+
+
+def test_earnings_fingerprint_treats_the_three_spellings_of_unknown_alike() -> None:
+    """``None``, ``()`` and "absent" all block nothing, so all digest alike.
+
+    :func:`swing.strategy.rules.earnings_blackout` cannot tell them apart, so a
+    digest that could would raise the alarm on a difference the simulation is
+    incapable of observing.
+    """
+    absent = earnings_fingerprint(["AAPL", "MSFT"], {"AAPL": AAPL_DAYS})
+    empty = earnings_fingerprint(["AAPL", "MSFT"], {"AAPL": AAPL_DAYS, "MSFT": ()})
+    none = earnings_fingerprint(["AAPL", "MSFT"], {"AAPL": AAPL_DAYS, "MSFT": None})
+
+    assert absent == empty == none
+
+
+def test_earnings_fingerprint_reads_both_provider_shapes() -> None:
+    """``earnings_history`` returns sequences, ``earnings_dates`` a lone date.
+
+    The backtest degrades from the first to the second when a provider cannot
+    supply history, so the digest accepts either without the caller branching.
+    """
+    one_day = date(2019, 5, 2)
+    from_dates = earnings_fingerprint(["AAPL"], {"AAPL": one_day})
+    from_history = earnings_fingerprint(["AAPL"], {"AAPL": (one_day,)})
+
+    assert from_dates == from_history
+    assert earnings_fingerprint(["AAPL"], {"AAPL": pd.Timestamp("2019-05-02")}) == from_dates
+    assert earnings_fingerprint(["AAPL"], {"AAPL": "2019-05-02"}) == from_dates
+
+
+def test_earnings_fingerprint_ignores_missing_entries_inside_a_sequence() -> None:
+    assert earnings_fingerprint(["AAPL"], {"AAPL": [*AAPL_DAYS, pd.NaT, None]}) == (
+        earnings_fingerprint(["AAPL"], {"AAPL": AAPL_DAYS})
+    )
+
+
+def test_earnings_fingerprint_refuses_a_value_it_cannot_read() -> None:
+    """A digest is a claim about what was consumed; guessing would be worse."""
+    with pytest.raises(TypeError, match="Expected a date"):
+        earnings_fingerprint(["AAPL"], {"AAPL": 42})
