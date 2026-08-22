@@ -231,6 +231,13 @@ drawdown 21.3% vs 28.6%. The default stays `True`. This window contains no exten
 it prices the premium without ever paying the claim; see
 [Ablation plan → Interpretation](#three-removals-improved-this-sample--and-the-defaults-are-kept-anyway).
 
+**The obvious remedy for the whipsaw cost does not work.** `ablate-exp-regime-fast` shortened
+`regime.sma_window` from 200 to 50 on the stock universe, testing the hypothesis that a faster gate
+would re-enter sooner after drawdowns. It was worse on every headline metric: PF 1.18 → 1.00, CAGR
++4.97% → −1.43%, maxDD 52.88% → 56.13%. A faster gate whipsawed more, not less. The hypothesis is
+refuted on that window ([`experiment-log.md`](experiment-log.md#three-hypotheses-refuted-outright)),
+which is support for the 200-day default arrived at by elimination rather than by tuning.
+
 Default reference symbol is SPY rather than a broader index because SPY is the most liquid, longest,
 cleanest free-data series available and correlates ~0.95+ with any reasonable alternative.
 
@@ -387,7 +394,10 @@ invoking when we require breakout volume ≥ 1.3× the 50-day average.
 
 ### Verdict for this system
 
-Adopted, with the entry deliberately **not** load-bearing:
+Adopted. The design intent was that the entry is **not** load-bearing — **that intent is now
+contradicted by measurement on the stock universe, and the proximity tolerance is an open question,
+not a settled one.** See the bullets below and
+[`experiment-log.md`](experiment-log.md#strict-entry-was-the-only-single-change-to-improve-profit-factor).
 
 - Entry requires a close at or above the prior-20-day Donchian high **or within
   `breakout_proximity_pct` (2%) of it**, *and* volume ≥ `volume_mult` (1.3) × the 50-day average
@@ -395,18 +405,39 @@ Adopted, with the entry deliberately **not** load-bearing:
   batch scan produces a lottery on which names happened to close a cent higher, and because we fill
   at the *next open* (see `backtest-methodology.md`) — demanding a tick-perfect break at close and
   then paying an overnight gap is the worst of both worlds.
-- **Design intent: the trend template and the ranking carry most of the weight; the breakout is a
-  timing device.** By the time a candidate has passed the trend template (§3), the regime gate (§4)
-  and the liquidity filter (§10), and then ranked in the top four by risk-adjusted momentum (§1),
-  the breakout is mainly answering "is today a reasonable day to start the position?"
-- **The ablation could not test this, and we should not pretend otherwise.** `volume_off` returned
+- **Design intent (as originally written): the trend template and the ranking carry most of the
+  weight; the breakout is a timing device.** By the time a candidate has passed the trend template
+  (§3), the regime gate (§4) and the liquidity filter (§10), and then ranked in the top four by
+  risk-adjusted momentum (§1), the breakout is mainly answering "is today a reasonable day to start
+  the position?"
+- **Measured (stock universe, 2013–2025): the design intent above is wrong on this window.**
+  `ablate-exp-strict-entry` set `breakout_proximity_pct` to 0.0, forcing a genuine new high. It was
+  the only one of ten single changes tested to improve profit factor — 1.18 → 1.25 — with
+  CAGR 4.97% → 7.80% and drawdown 52.88% → 49.43%, at essentially unchanged turnover (689 trades vs
+  692) and unchanged average hold (16.3 days). The tolerance was not selecting a *different number*
+  of entries; it was selecting *different names*, and worse ones. An audit observation motivated the
+  test: with a 2% band, the breakout condition is close to always true for a name already through the
+  trend template in an uptrend, which leaves volume as the de-facto trigger.
+  **The default `breakout_proximity_pct = 2.0` is nonetheless retained**, because a single
+  out-of-sample window that has now been searched twelve times is not grounds for changing a
+  shipping default — see
+  [`experiment-log.md` → Limitations](experiment-log.md#limitations--read-before-quoting-any-number-above).
+  What has changed is the status of the claim: "the entry is not load-bearing" is no longer a
+  documented design property, it is a hypothesis the evidence runs against.
+- **Volume confirmation still cannot be tested by ablation.** `volume_off` returned
   metrics identical to baseline because `volume_mult` is grid-tuned and the tuner overwrites the
   config default per fold — a structural no-op, not a finding (see
   [Ablation plan → Structural](#structural--three-000-rows-are-an-artefact-of-the-tuner-not-evidence-of-inert-components)).
   What the in-sample tuning *does* show is that folds split between `volume_mult` 1.6 and 1.0 with no
   stable preference, and settled on `donchian_window` 15 rather than the default 20 — i.e. the tuner
-  wants a shorter channel and has no firm opinion on volume confirmation. That is weak evidence for
-  the design intent above, not the confirmation originally anticipated here.
+  wants a shorter channel and has no firm opinion on volume confirmation. Read that as a statement
+  about the tuner's preferences, not as support for any claim about how much the entry matters; the
+  `strict-entry` result above is the direct evidence on that question, and it points the other way.
+- **The tuner's preference for a shorter channel now has out-of-sample support.**
+  `ablate-exp-long-breakout` offered the tuner `donchian_window` [30, 45, 60] instead of
+  [15, 20, 25]. Profit factor fell 1.18 → 1.11 and CAGR 4.97% → 2.53%. Longer breakout channels are
+  worse on this window, which is consistent with the in-sample preference for 15 and with the horizon
+  argument in the next bullet.
 - `donchian_window = 20` is Turtle System 1, retained for horizon fit (20 trading days ≈ 4 weeks,
   the middle of our 1–8 week hold) rather than for its pedigree. `volume_avg_window = 50` matches
   `sma_fast` so the same 50-day window governs both the trend and volume baselines — one fewer free
@@ -492,8 +523,11 @@ fraction of full Kelly precisely because expectancy is uncertain.
 
 ### Verdict for this system
 
-Adopted wholesale. This is the part of the system we have the most confidence in, and it is
-notably the part that makes no prediction at all.
+Adopted wholesale. The *existence* of stops is the part of the system we have the most confidence
+in, and it is notably the part that makes no prediction at all. **Their widths are a different
+matter, and are not settled** — see
+[Stop width is an open question](#stop-width-is-an-open-question-not-a-settled-one) below before
+reading the two width bullets that follow as conclusions.
 
 - **Initial stop**: `close − atr_stop_mult × ATR(14)` with `atr_stop_mult = 2.0`. 2× is tighter than
   the Turtle 2× *of a 20-day ATR on futures* and tighter than LeBeau's 3×; the justification is
@@ -518,6 +552,12 @@ notably the part that makes no prediction at all.
   abandoning the 1–8 week horizon that the rest of this document is built around, not merely
   retuning a knob. The chandelier stop is what should capture an extended winner, not the absence
   of a horizon bound.
+  **Measured again (stock universe, 2013–2025):** `ablate-exp-hold-longer` tripled the bound to 120
+  days and made things distinctly worse — PF 1.18 → 1.02, CAGR +4.97% → −0.66%, maxDD 52.88% →
+  55.47%. Average hold moved only 16.3 → 17.3 days, so the time stop was not the binding exit for
+  most positions and relaxing it mainly retained losers. The ETF sweep's "+0.13 PF from removing it"
+  does not replicate on the stock universe; the hypothesis that the horizon bound is cutting winners
+  is refuted there ([`experiment-log.md`](experiment-log.md#three-hypotheses-refuted-outright)).
 - **Risk sizing**: `shares = floor(equity × risk_pct/100 / (entry − stop))` with `risk_pct = 2.5`.
   2.5% is aggressive by institutional standards and appropriate only because the absolute stake is
   tiny ($2.50 on a $100 account) and because a smaller fraction would round to zero shares on
@@ -533,6 +573,54 @@ notably the part that makes no prediction at all.
 - **Caps**: `max_position_pct = 25.0` and `max_positions = 4` together mean a fully invested book is
   4 × 25% = 100% of equity with no leverage. The notional cap binds far more often than the risk
   formula at small equity — see `strategy-spec.md` for the worked examples.
+
+#### Stop width is an open question, not a settled one
+
+Until commit `c90e407` made the walk-forward tuning grid configurable, stop widths could not be
+varied in a walk-forward run at all: `atr_stop_mult` and `chandelier_mult` are grid members, so the
+tuner overwrote any config default per fold and an ablation of either was a guaranteed no-op. The
+widths above were therefore justified by argument (horizon fit, affordability on a small account)
+and never measured. They have now been measured, and the result is genuinely ambiguous.
+
+`ablate-exp-wide-stops` offered the tuner `atr_stop_mult` [2.5, 3.5, 4.5] and `chandelier_mult`
+[4.0, 5.0, 6.0] in place of the defaults' [1.5, 2.0, 2.5] and [2.5, 3.0, 3.5]. Every mechanical
+prediction of the whipsaw hypothesis came true, and the strategy still made less money:
+
+| | Baseline | `wide-stops` |
+|---|---:|---:|
+| Max drawdown | 52.88% | 33.13% |
+| Win rate | 33.82% | 41.94% |
+| Average hold | 16.3d | 27.5d |
+| Trades | 692 | 422 |
+| **Profit factor** | **1.18** | **1.11** |
+| **CAGR** | **4.97%** | **2.92%** |
+
+Read plainly: on this window the tight stops were **net-positive for returns**. They were cutting
+losers faster than they were cutting winners, and the wide-stop configuration bought a much calmer
+equity curve at the price of roughly 40% of the return. That is a real trade-off between return and
+drawdown, not a mistake in the defaults — and it is a trade-off this document had not previously
+acknowledged existed.
+
+**A caution about the tuning procedure itself.** When offered wider stops, the tuner walks to the
+edge of whatever range it is given. Counting fold-by-fold selections across the thirteen folds:
+
+| Run | Grid offered | Top value chosen in |
+|---|---|---|
+| `full-walkforward-r1` | `chandelier_mult` [2.5, 3.0, 3.5] | 9 of 13 folds (3.5) |
+| `full-walkforward-r1` | `atr_stop_mult` [1.5, 2.0, 2.5] | 4 of 13 folds (2.5) |
+| `ablate-exp-wide-stops` | `chandelier_mult` [4.0, 5.0, 6.0] | 9 of 13 folds (6.0) |
+| `ablate-exp-wide-stops` | `atr_stop_mult` [2.5, 3.5, 4.5] | 7 of 13 folds (4.5) |
+
+The *default* grid's widest chandelier is already the majority in-sample choice, so this is not a
+property of the widened experiment — it is a property of the shipping configuration. An in-sample
+optimum sitting on a grid boundary means the search found the limit of what it was allowed to
+consider rather than an interior optimum, and out-of-sample results got worse as in-sample
+preference widened. Treat the tuner's stop-width selections as suspect in both grids.
+
+The defaults `atr_stop_mult = 2.0` and `chandelier_mult = 3.0` are retained — a single searched
+out-of-sample window is not grounds for changing them either way. Full detail, including the
+combined configuration, is in
+[`experiment-log.md`](experiment-log.md#wide-stops-the-whipsaw-hypothesis-was-mechanically-right-and-financially-wrong).
 
 ### Where it appears in config
 
@@ -725,22 +813,52 @@ variant that has drifted outside the config's allowed range without burning a mu
 All runs are walk-forward, so the reported metrics are **out-of-sample** (3-year IS / 1-year OOS
 stepped annually, concatenated OOS equity).
 
+### Follow-on: the 2026-08-21 stock-universe programme
+
+The sweep below is the ETF-only, pre-remediation ablation table. A second and larger programme was
+run on 2026-08-21 against the full 1545-symbol stock universe under post-remediation code, and it is
+recorded separately in **[`experiment-log.md`](experiment-log.md)**. It differs from this sweep in
+three ways worth knowing before reading further:
+
+- **Stock universe, not ETF.** Eleven single-change experiments plus a combined configuration over
+  2013–2025, plus one ETF replication of the combined configuration.
+- **It could vary the tuning grid.** Commit `c90e407` made the grid configurable, which is what
+  finally allowed stop widths (`atr_stop_mult`, `chandelier_mult`) and channel length
+  (`donchian_window`) to be tested. Under the sweep below those were structural no-ops.
+- **It reached the same verdict about defaults, for the same reason.** Nothing was changed. Twelve
+  looks at one out-of-sample window means the best-scoring configuration is selection-contaminated,
+  and its numbers are biased upward.
+
+Where the two disagree, prefer the experiment log for anything measured on stocks and this table for
+the ETF universe, and note that neither is validation — see
+[`experiment-log.md` → What would actually settle this](experiment-log.md#what-would-actually-settle-this).
+
 ### Results — ETF universe, 2010-01-01 to 2026-08-18
 
 Executed 2026-08-18. Full metrics, per-variant detail and the reproducibility triple
 (`config_hash` / `code_ref` / `data_hash`) are in [`ablation-results.md`](ablation-results.md).
 
-> **Stale as of 2026-08-19 — this sweep predates the remediation pass.** These numbers were produced
-> on 2026-08-18, before commits `10f6673..94e90f5` fixed the findings in
-> [`CODE_AUDIT_REPORT.md`](../CODE_AUDIT_REPORT.md). Several of those fixes change what the engine
-> computes, so every row below can move: the ATR% floor that drops a pegged name from the ranking
-> (BUG-003), the sizing risk floor that refuses a sub-tick stop (BUG-054), the deeper pending-order
-> queue that stops a zero-share candidate from consuming a slot (BUG-053), the earnings blackout now
-> being simulated from historical announcement dates (A12), and the `end_of_data` exit for a symbol
-> that stops printing bars (BUG-016). **No number here has been adjusted by hand.** The table will be
-> replaced wholesale by the next `uv run python scripts/ablations.py --universe etf` run; until then,
-> read the `code_ref` in `ablation-results.md` as the statement of which code produced it, and treat
-> the qualitative conclusions below — noise-dominated sample, defaults retained — as the durable part.
+> **Superseded in part — see [`experiment-log.md`](experiment-log.md).** This table was produced on
+> 2026-08-18 under `code_ref` `0b4fa6d`, before commits `10f6673..94e90f5` fixed the findings in
+> [`CODE_AUDIT_REPORT.md`](../CODE_AUDIT_REPORT.md), and it remains the pre-remediation sweep. Two
+> things have changed since the staleness warning that used to sit here.
+>
+> First, the warning's central worry — that the remediation fixes would move every row — has been
+> **checked and not borne out for the baseline**. `ablate-baseline` (pre-remediation, `0b4fa6d`) and
+> `etf-walkforward-r1` (post-remediation, `94e90f5`) share the same `config_hash` `c6782f8db70b`
+> *and* the same `data_hash` `e3df7c8b7a15`, and their out-of-sample blocks agree to six decimal
+> places: PF 1.022947, CAGR 0.059357%, maxDD 28.559881%, 332 trades, 16.478916-day hold. The
+> remediated engine reproduces the pre-remediation baseline exactly on this universe. That is
+> evidence for the baseline row only — the variant rows differ in config and were not re-run — but it
+> removes the presumption that the table is invalid.
+>
+> Second, and more importantly, a much larger programme has since been run on the **stock** universe
+> under post-remediation code, and it is recorded in [`experiment-log.md`](experiment-log.md):
+> eleven single-change experiments plus a combined configuration over 2013–2025, plus one ETF
+> replication. Where that programme and this table speak to the same question, the experiment log is
+> the current evidence and this table is the historical record. The qualitative conclusions below —
+> noise-dominated sample, defaults retained — are unchanged, and the experiment log reached the same
+> verdict by a different route: nothing in it moved a default either.
 
 **Baseline: PF 1.02, CAGR 0.06%, max drawdown 28.56%, 332 OOS trades, 41.6% exposure.** That is a
 system scraping breakeven on this universe, and every delta below should be read against that
@@ -876,13 +994,13 @@ Components deliberately **not** ablated, and why:
 
 | Component | Why not in the ablation set |
 |-----------|------------------------------|
-| Trend template (`sma_*`, `min_above_low_mult`, `max_below_high_pct`) | Disabling it does not produce a variant of this strategy; it produces a different strategy (unfiltered breakout). Its ±25% parameter sensitivity is covered by the walk-forward sensitivity tables in `backtest-methodology.md`. |
-| Liquidity filters (`min_price`, `min_dollar_volume`) | Relaxing them makes the cost model invalid, so the resulting metrics would not be comparable. |
-| ATR stops (`atr_stop_mult`) | There is no "off" — every position needs a stop. Width is covered by sensitivity tables. |
+| Trend template (`sma_*`, `min_above_low_mult`, `max_below_high_pct`) | Disabling it does not produce a variant of this strategy; it produces a different strategy (unfiltered breakout). Its ±25% parameter sensitivity is covered by the walk-forward sensitivity tables in `backtest-methodology.md`. **Since tightened rather than disabled:** `ablate-exp-near-high` took `max_below_high_pct` 25 → 8 on the stock universe (PF 1.18 → 1.14, maxDD 52.88% → 48.90%) — see [`experiment-log.md`](experiment-log.md). |
+| Liquidity filters (`min_price`, `min_dollar_volume`) | Relaxing them makes the cost model invalid, so the resulting metrics would not be comparable. **Tightening them is testable and has been tested:** `ablate-exp-quality` (`min_dollar_volume` 5M → 25M, `min_price` 5 → 15) was the worst run of the 2026-08-21 programme at PF 0.96 / CAGR −3.26%. Restricting to larger, more liquid names removed the dispersion the cross-sectional ranking needs. |
+| ATR stops (`atr_stop_mult`) | There is no "off" — every position needs a stop. **Width was untestable until commit `c90e407` made the tuning grid configurable; it has now been tested** (`ablate-exp-wide-stops`) and the result is ambiguous — see [Stop width is an open question](#stop-width-is-an-open-question-not-a-settled-one). |
 | Fundamentals soft filter (`fundamentals_filter`) | Data quality on the free provider is too poor for a measured difference to be interpretable. Can be run manually. |
 | Earnings blackout (`earnings_blackout_days`) | Same data-coverage problem; the unknown-date fail-open path (§12) means the measured effect would be diluted by missing dates. |
 | MACD / OBV | Not implemented in any rule (§6, §8). Nothing to ablate. |
-| `donchian_window` (and any other grid member) | In the walk-forward tuning grid, so the tuner overwrites the config default per fold and the variant is a guaranteed no-op — see "Structural" above. `volume_mult` and `chandelier_mult` have rows only because their no-op status was discovered by running them. |
+| `donchian_window` (and any other grid member) | In the walk-forward tuning grid, so the tuner overwrites the config default per fold and the variant is a guaranteed no-op — see "Structural" above. `volume_mult` and `chandelier_mult` have rows only because their no-op status was discovered by running them. **Grid members are now testable by varying the grid itself** (`backtest.tuning_grid`, added in `c90e407`) rather than the config default: `ablate-exp-long-breakout` offered `donchian_window` [30, 45, 60] and scored PF 1.11 vs the baseline's 1.18. |
 
 **How to read the results.** Look for components whose removal *degrades* OOS profit factor or
 materially *worsens* max drawdown — those are earning their keep. A component whose removal barely
