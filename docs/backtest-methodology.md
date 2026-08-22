@@ -67,7 +67,7 @@ each is closed explicitly:
 |------|-----------|
 | Donchian channel including the current bar's high | `donchian_high`/`donchian_low` are shifted by one bar (SPEC Contract 5) |
 | Rolling statistics computed over the whole series then sliced | All indicators are causal rolling/`ewm` operations; no centred windows, no `bfill` |
-| Universe membership known in advance | **Not closed by default, and it is load-bearing.** This is the survivorship problem — see §7. The half of it that *is* fixable from data already on disk — trading a company before it joined its index — is measured in §7.1, and removing it with `[backtest] membership = "point_in_time"` takes the stock walk-forward from profit factor 1.055 to 0.749–0.930. The default is `off`, so every headline in this document carries the bias |
+| Universe membership known in advance | **Not closed by default, and it is load-bearing.** This is the survivorship problem — see §7. The half of it that *is* fixable from data already on disk — trading a company before it joined its index — is measured in §7.1, where three attempts have moved the stock walk-forward's profit factor by +0.003, −0.306 and +0.017: in both directions, and none of them outside fold-to-fold noise. The default is `off`, so every headline in this document carries the bias, and its size is not known |
 
 **No wall-clock in logic.** `asof` is passed down from the entry point; `datetime.now()` is never
 called inside strategy or engine code. This is what makes a rerun of a historical date reproduce that
@@ -609,13 +609,31 @@ stocks in today's universe, a source states a join date for 1,410 — **93.6%**:
 ETFs must file dated holdings with the SEC, which gives a quarterly membership roster back to 2005.
 That closed most of the small-cap gap this section previously called the binding constraint.
 
-**One property of the new dates matters for every number below.** EDGAR gives a *quarterly* roster,
-so what it establishes is "a member no later than this filing", not "joined on this day": those
-rows carry `added_bound = no_later_than` rather than `exact`. `universe.py` reads `added` as a date
-either way, so a bounded join date is used as if it were exact — which places the join **too late**
-whenever the truth is earlier. That is conservative in the same direction the old missing-data
-problem was, just far milder, and it is why the correction still cannot be called exact. It bites
-hardest on the S&P 600, where 893 of 1,799 stints are bounded rather than exact.
+**One property of the new dates governs every number below, and it is stronger than it first
+looks.** EDGAR gives a *quarterly* roster, so what it establishes is "a member no later than this
+filing", not "joined on this day": those rows carry `added_bound = no_later_than` rather than
+`exact`. It bites hardest on the S&P 600, where 893 of 1,799 stints are bounded rather than exact.
+
+`universe.py` used to read `added` as a date either way, so a bounded join was used as if it were
+exact — placing the join **too late** whenever the truth is earlier. Since c0eb886 the choice is
+explicit, `[universe] membership_bounded`, and the default is `"unknown"`: a bound is conservative
+at one end and permissive at the other, so only discarding it is conservative at both.
+
+**The consequence is that every join date EDGAR contributed is a bound, so under the default reading
+EDGAR's contribution to eligibility is zero.** That is arithmetic, not rhetoric — read bounds as
+unknown and the coverage figures land exactly on their pre-EDGAR values:
+
+| Index | members | stated join, bounds as **fact** | stated join, bounds as **unknown** (default) | pre-EDGAR |
+|---|---|---|---|---|
+| S&P 500 | 503 | 503 (100%) | 503 (100%) | 100% |
+| S&P 400 | 400 | 369 (92%) | 303 (**76%**) | 76% |
+| S&P 600 | 603 | 538 (89%) | 350 (**58%**) | 58% |
+| **All** | **1,506** | **1,410 (93.6%)** | **1,156 (76.8%)** | **77%** |
+
+Symbols with no usable join date go from 96 to **350** — again exactly the pre-EDGAR count, because
+the 254 symbols EDGAR dated are dated *only* by a bound. The tables below carry both readings for
+this reason: the difference between them is not a tuning preference, it is whether EDGAR's evidence
+is admitted at all.
 
 Eligibility is read as the **union of a symbol's stints across every enabled index**, not just the
 index it sits in today. A company in the S&P 500 until 2016 and in the S&P 400 since 2021 was an
@@ -629,9 +647,10 @@ problem exclusively, which is why the knobs live under `[backtest]`.
 #### The unknown-join-date policy, and why the default is the conservative one
 
 A symbol whose join date no source states must **not** default to "member since the dawn of time" —
-that silently reinstates the whole bias for the 96 symbols still undated (it was 350 before EDGAR,
-which is why this choice used to matter far more than it now does). `[backtest] membership_unknown`
-makes the choice explicit and reportable:
+that silently reinstates the whole bias for the **350** symbols with no usable join date under the
+default reading of bounded dates (96 if bounds are admitted as facts — this choice and the bounded
+one compound, which is why both are reported). `[backtest] membership_unknown` makes the choice
+explicit and reportable:
 
 - `"exclude"` (the default) — no stated date, no membership. Conservative, and it **over**-corrects:
   absence of evidence is treated as evidence of absence, so genuine members are dropped.
@@ -640,54 +659,78 @@ makes the choice explicit and reportable:
 
 The two bracket the truth; neither is it. Every run reports which was in force and how many symbols
 it moves, in `summary.json` under `membership` — and that count is measured, not inferred: the
-policy changes the eligible windows of **405** of the 1,506 stocks, more than the 96 with no stated
-join date, because a stint whose *end* is unstated is relaxed by `"include"` as well.
+policy changes the eligible windows of **769** of the 1,506 stocks under the default reading of
+bounded dates (405 if bounds are admitted). Either figure exceeds the count with no stated join
+date, because a stint whose *end* is unstated is relaxed by `"include"` as well.
 
 #### How big is the bias? Three readings of the same window
 
 Window 2010-01-01 to 2025-12-31, 1,506 stocks, so **24,096 nominal member-years** — the same
 denominator [`survivorship.md`](survivorship.md) §5.2 uses.
 
-| Reading | provable member-years | unvouched-for | share | unvouched, pre-EDGAR |
+| Bounded dates read as | Unknown-date policy | provable member-years | unvouched-for | share |
 |---|---|---|---|---|
-| Union across indices, unstated dates assumed present (`include`) | 15,986 | **8,110** | 34% | 7,199 |
-| Union across indices, unstated dates excluded (`exclude`, the default) | 12,807 | **11,289** | 47% | 15,424 |
+| **unknown** (the default) | `include` | 17,951 | **6,145** | 26% |
+| **unknown** (the default) | `exclude` | 8,672 | **15,424** | 64% |
+| fact | `include` | 15,986 | **8,110** | 34% |
+| fact | `exclude` | 12,807 | **11,289** | 47% |
 
-Both rows read eligibility as the union of a symbol's stints across every enabled index. That
+All four rows read eligibility as the union of a symbol's stints across every enabled index. That
 correction still matters and is worth restating: a per-index reading counts a 500→400 move as an
 arrival and so overstates the unvouched-for total ([`survivorship.md`](survivorship.md) §5.2 carries
 that arithmetic, now on the same EDGAR data).
 
-**The two policies used to bracket the truth 8,672–16,897; they now bracket it 12,807–15,986.** That
-narrowing — from 8,225 member-years of ambiguity to 3,179 — is the whole value of the better data,
-and it is worth reading the two rows' *directions* to see why. `exclude` rose sharply because 254
-symbols that had no join date now have one. `include` **fell**, which looks wrong until you see the
-mechanism: a stint with no stated start used to be back-dated to the beginning of the data, and
-giving it a real (later) start removes exposure that was never provable in the first place. The two
-readings converged from opposite sides, which is what better data is supposed to look like.
+**An earlier version of this section claimed the better data narrowed the bracket from 8,225
+member-years of ambiguity to 3,179. That narrowing was an artefact of reading bounds as facts, and
+it does not survive.** Reading them honestly, the bracket is 8,672–17,951 — **9,279 member-years
+wide, slightly wider than the 8,225 it started at.** The claim was arithmetically correct given its
+premise; the premise was that a quarterly filing dates a join, and it does not.
 
-The same thing said as a universe size, under the default policy: on 2010-01-04 the backtest trades
-1,506 stocks, of which **451 (30%)** can be shown to have been in an index that day — it was 273
-(18%). By 2019 it is 810 (54%), and by the end of 2025, 1,323 (88%). The residual 12% is still pure
-coverage gap rather than departure — every one of those names is in today's snapshot by definition,
-so it *is* a member; no source simply dates the stint it is in. `"exclude"` still over-corrects,
-just far less than it did.
+Reading the rows' *directions* shows why both framings are consistent. Admitting bounds as facts
+raises `exclude` sharply (254 symbols acquire a join date) and lowers `include` (a stint with no
+stated start was back-dated to the beginning of the data, and giving it a real, later start removes
+exposure that was never provable). The two converge — which is exactly what better data is supposed
+to look like, and exactly what admitting an unearned precision also looks like. The convergence is
+real only to the extent the bounds are tight, and EDGAR's cadence is quarterly, so they are tight to
+within a quarter at best and to within the gap since the previous filing at worst.
+
+What the better data genuinely bought is therefore *not* a narrower bracket. It is the S&P 500 at
+100% exact coverage, the former-name corrections, and — through the provenance columns — the
+ability to say which of these numbers rest on a bound at all. That last is what makes the honest
+bracket computable, and an honest wide bracket is worth more than a narrow one that assumed its way
+there.
+
+The same thing said as a universe size, under the `exclude` policy. On 2010-01-04 the backtest
+trades 1,506 stocks, of which this many can be shown to have been in an index that day:
+
+| Day | bounds as **unknown** (default) | bounds as fact | pre-EDGAR |
+|---|---|---|---|
+| 2010-01-04 | **273 (18%)** | 451 (30%) | 273 (18%) |
+| 2019-01-02 | **531 (35%)** | 810 (54%) | — |
+| 2025-12-31 | **1,060 (70%)** | 1,323 (88%) | — |
+
+The default column lands on the pre-EDGAR figure at the left edge for the third time on this page,
+and the reason is the same each time. The residual is still coverage gap rather than departure —
+every one of those names is in today's snapshot by definition, so it *is* a member; no source simply
+dates the stint it is in. `"exclude"` therefore over-corrects, and under the default reading of
+bounded dates it over-corrects about as much as it ever did.
 
 #### What it costs the headline numbers
 
-Measured on a real stocks walk-forward — `reports/backtest/ablate-edgar-off`, 1,505 symbols,
-OOS 2013-01-01 to 2025-12-31, 700 trades, profit factor **1.055**, net **+$2,890** on $10,000 of
+Measured on a real stocks walk-forward — `reports/backtest/ablate-repro2-off`, 1,499 symbols,
+OOS 2013-01-01 to 2025-12-31, 684 trades, profit factor **1.067**, net **+$3,553** on $10,000 of
 reference capital — by asking of every trade whether its symbol was an index member on the day it
-was *entered*:
+was *entered*. Membership is tested by window containment, which is what the engine gates on:
 
 | Subset (`include` policy — only demonstrably pre-membership trades are separated) | trades | net P&L | profit factor |
 |---|---|---|---|
-| Entered **before** the symbol's stated join date | 195 (28%) | **+$8,120** | **1.491** |
-| Everything else | 505 (72%) | **−$5,230** | **0.854** |
-| All trades (the reported result) | 700 | +$2,890 | 1.055 |
+| Entered **before** the symbol was a provable member | 151 (22%) | **+$5,392** | **1.401** |
+| Everything else | 533 (78%) | **−$1,839** | **0.954** |
+| All trades (the reported result) | 684 | +$3,553 | 1.067 |
 
-Under the conservative `exclude` policy the split is 437 provable-member trades (−$5,561, PF 0.822)
-against 263 unprovable ones (+$8,451, PF 1.398).
+Read with bounds admitted as facts the same run splits 216 (+$6,256, PF 1.308) against 468
+(−$2,703, PF 0.918). Attempt 2's equivalent rows, on its own run, were 195 (+$8,120, PF 1.491)
+against 505 (−$5,230, PF 0.854).
 
 Note that better data did **not** collapse the pre-membership count: 201 → **195**, essentially
 unchanged. Two effects cancel. SEC former-name records pulled 93 symbols' first appearance earlier,
@@ -697,23 +740,27 @@ date was treated as a member from the dawn of time, so all of its entries used t
 "member" bucket by default. Under `exclude` the count falls (425 → 263), which is the same
 arithmetic seen from the other side.
 
-**In aggregate the split is stark: the 195 entries taken before their company joined an index
-account for more than the entire profit of the run, and the other 505 trades lose money.** That is
-consistent with the mechanism — index inclusion is an outcome of past growth, and this strategy buys
-past growth. But the aggregate is still the least informative view of it, and the re-simulation
-below prints a number that no arithmetic on this table would have predicted.
+**In aggregate the split is still stark: the 151 entries taken before their company was a provable
+member account for more than the entire profit of the run, and the other 533 trades lose money.**
+That is consistent with the mechanism — index inclusion is an outcome of past growth, and this
+strategy buys past growth. But the aggregate is the least informative view of it, and the
+re-simulation below prints a number no arithmetic on this table would have predicted — three times
+now, in three different directions.
 
 ##### The same split, per index — and this is what stops it being a headline
 
-| Index | join-date coverage | pre-membership entries | member entries | gap (was) |
-|---|---|---|---|---|
-| S&P 500 | 100% | 45 trades, PF **1.056**, +$224 | 254 trades, PF **0.871**, −$2,029 | +0.19 (−0.04) |
-| S&P 400 | 92% | 55 trades, PF **1.871**, +$3,426 | 122 trades, PF **1.170**, +$1,446 | +0.70 (+0.80) |
-| S&P 600 | 89% | 95 trades, PF **1.520**, +$4,470 | 129 trades, PF **0.603**, −$4,647 | +0.92 (+0.69) |
+| Index | exact-date coverage | pre-membership entries | member entries | gap | *attempt 2* |
+|---|---|---|---|---|---|
+| S&P 500 | 100% | 40 trades, PF **1.058**, +$233 | 180 trades, PF **1.183**, +$1,883 | **−0.13** | *+0.19* |
+| S&P 400 | 76% | 78 trades, PF **1.707**, +$4,730 | 119 trades, PF **0.755**, −$2,176 | **+0.95** | *+0.70* |
+| S&P 600 | 58% | 98 trades, PF **1.135**, +$1,293 | 133 trades, PF **0.825**, −$1,965 | **+0.31** | *+0.92* |
 
-The effect is still concentrated in the mid- and small-cap names, and the S&P 600 gap **widened**
-(+0.69 → +0.92) as its coverage went from 58% to 89%. If the whole thing had been an artefact of
-late-starting sources, near-doubling the coverage should have collapsed it. It did the opposite.
+The effect remains concentrated in the mid- and small-cap names and absent from the large caps —
+that much has held across every reading. But the ordering within it has not: attempt 2 reported the
+S&P 600 gap *widening* to +0.92 and read that as evidence against the artefact hypothesis; on
+attempt 3's run it is +0.31, below the S&P 400's. The coverage column is also restated here as
+**exact**-date coverage, which is the figure that governs whether the artefact can operate — 76% and
+58%, not the 92% and 89% attempt 2 quoted, which counted quarterly bounds as dates.
 
 (This table uses the `include` reading deliberately. It is the only one that separates
 *demonstrably* pre-membership entries — the symbol has a stated join date and the entry predates it
@@ -731,63 +778,75 @@ The two candidate explanations were previously impossible to separate:
   largely "before the source starts", so the split is partly by *date* rather than by membership —
   picking up whatever the market did in each period.
 
-The provenance columns now let these be told apart, because each trade's symbol carries a join date
-that is either `exact` (a dated change record) or `no_later_than` (an EDGAR quarterly roster, which
+The provenance columns let these be told apart, because each trade's symbol carries a join date that
+is either `exact` (a dated change record) or `no_later_than` (an EDGAR quarterly roster, which
 places the join too late whenever the truth is earlier). **The artefact can only live in the bounded
-subset.** Splitting the same 700 trades that way:
+subset.** Splitting attempt 3's 684 trades that way, with bounds admitted so the two subsets are
+both populated (attempt 2's figures on its own 700 trades in brackets):
 
 | Subset | pre-membership | member | gap |
 |---|---|---|---|
-| Join date **exact** (434 trades) | 161 tr, PF **1.272** | 273 tr, PF **0.848** | **+0.42** |
-| Join date **`no_later_than`** (234 trades) | 34 tr, PF **2.966** | 200 tr, PF **0.834** | **+2.13** |
+| Join date **exact** (410 trades) | 164 tr, PF **1.256** | 246 tr, PF **1.143** | **+0.113** *(+0.42)* |
+| Join date **`no_later_than`** (238 trades) | 52 tr, PF **1.464** | 186 tr, PF **0.724** | **+0.740** *(+2.13)* |
 
-The gap is much larger where the dates are bounds — that part is the artefact, and it is real. But
-the exact-dated subset, where the artefact **cannot** operate, still carries a +0.42 gap. Splitting
-that subset by index is where it gets interesting:
+The gap is still far larger where the dates are bounds — six times larger — so that part of the
+artefact hypothesis is confirmed and confirmed strongly. What has changed is the other half: the
+exact-dated residue, where the artefact **cannot** operate, has fallen from +0.42 to **+0.113**. The
+mechanism is visible in the member column: that bucket went from PF 0.848 to 1.143, because the
+earnings blackout now actually operates on it. Attempt 2 was comparing pre-membership trades against
+a member bucket that was losing money partly for reasons unrelated to membership.
 
-| Exact-dated only | pre-membership | member | gap |
-|---|---|---|---|
-| S&P 500 | 41 tr, PF 0.622 | 201 tr, PF 0.799 | **−0.18** |
-| S&P 400 | 46 tr, PF 1.816 | 46 tr, PF 1.576 | **+0.24** |
-| S&P 600 | 74 tr, PF 1.366 | 26 tr, PF 0.280 | **+1.09** |
+Under the default reading the bounded subset contributes **zero** pre-membership trades by
+construction — discarding the bound makes those symbols members throughout — and the exact-dated
+gap reads +0.366 on a differently-composed split. Splitting the exact-dated subset by index:
 
-On the S&P 500, with complete and exact dates, there is still no effect — if anything it is
-negative, as it has been in every reading of this table. On the S&P 600 the gap is *larger* on exact
-dates than the index-wide figure, which is the opposite of what the artefact hypothesis predicts.
-That cell rests on 26 member trades, so it is weak evidence — but it is evidence pointing the other
-way.
+| Exact-dated only | pre-membership | member | gap | *(attempt 2)* |
+|---|---|---|---|---|
+| S&P 500 | 38 tr, PF 0.688 | 169 tr, PF 1.191 | **−0.503** | *(−0.18)* |
+| S&P 400 | 62 tr, PF 1.787 | 60 tr, PF 1.146 | **+0.641** | *(+0.24)* |
+| S&P 600 | 64 tr, PF 1.154 | 17 tr, PF 0.818 | **+0.336** | *(+1.09)* |
 
-So the verdict is **reduced, not resolved — and the weight has shifted towards the bias being
-real.** Better data did not make the effect vanish and did not make it decompose cleanly into
-artefact; it left a residue that survives every control available. What would settle it is exact
-join dates for the S&P 600, which EDGAR's quarterly cadence cannot give. And the re-simulation
-below — which does not depend on this table at all — now points the same way, much harder.
+The S&P 500 — complete, exact dates, the one index where the question could be settled cleanly —
+shows **no positive effect in any reading ever taken**, and the negative gap has deepened. The S&P
+600 gap, which attempt 2 highlighted at +1.09 as evidence against the artefact, has fallen to
++0.336 and rests on 17 member trades.
+
+So the verdict moves back: **reduced, not resolved, and the weight has shifted towards the
+artefact** — the reverse of what attempt 2 concluded from the same decomposition one commit
+earlier. Every cell here rests on tens of trades, the exact-dated residue is now a third of what it
+was, and the only index with data good enough to arbitrate says there is nothing there. What would
+settle it is exact join dates for the S&P 600, which EDGAR's quarterly cadence structurally cannot
+give.
 
 The year-by-year breakdown still argues against the artefact being the whole story: comparing the
 two buckets *within* each calendar year, which controls for the market, pre-membership entries have
-the higher profit factor in 8 of the 13 out-of-sample years. But 700 trades split thirteen ways is
-not evidence anyone should lean on — several of those years rest on fewer than ten trades a side.
+the higher profit factor in **9 of the 13** out-of-sample years (8 of 13 in attempt 2). But 684
+trades split thirteen ways is not evidence anyone should lean on — several of those years rest on
+fewer than ten trades a side, and 9-of-13 is two coin-flips away from 7-of-13.
 
 Four honest qualifications, because the top table is easy to over-read:
 
 1. **It is an attribution, not a re-simulation — and this is the one that matters most.** Removing
    an entry frees cash and a slot, and the next-ranked candidate takes them, so a genuine
-   point-in-time run does not produce the 470-trade row. This was written down as a caveat before
-   the correction could be run; the re-simulation below then measured it, and it turned out to be
-   the dominant effect rather than a footnote. **No subset attribution over a portfolio backtest
-   with a position limit can be read as the cost of removing that subset.**
+   point-in-time run does not produce the 533-trade "everything else" row. This was written down as
+   a caveat before the correction could be run; every re-simulation since has confirmed it, and its
+   magnitude has swamped the attribution every time. **No subset attribution over a portfolio
+   backtest with a position limit can be read as the cost of removing that subset.**
 2. **The per-index table is the load-bearing one, and it is not one-way.** Where the data is good,
    the effect is not there. "The strategy's entire edge is look-ahead" is a fair description of the
    aggregate arithmetic and an overstatement of what has actually been shown.
-3. **The 700 trades are a small sample** (§5). A profit-factor gap of this size between two subsets
-   of a 700-trade run has a wide confidence interval around it, and the decomposition above splits
-   it into cells of 26–273 trades, which are wider still.
+3. **The ~700 trades are a small sample, and this is the qualification that has grown teeth** (§5).
+   A profit-factor gap between two subsets of a 684-trade run has a wide confidence interval, and
+   the decomposition above splits it into cells of 17–246 trades, which are wider still. The
+   re-simulation section now quantifies what that means at the aggregate level: no contrast in this
+   entire section reaches |t| = 0.8 across the thirteen folds.
 4. **`min_dollar_volume` already screens some pre-inclusion exposure**, since companies are smaller
    before they are promoted. How much is not measured.
 
 The honest summary of the attribution: the look-ahead is measurable, it is large in aggregate, and
 most of it sits in the part of the data that is still imprecise. The next section re-simulates it
-properly, and the re-simulation does not agree with the aggregate.
+properly, and the re-simulation has now disagreed with the aggregate three times, in three
+different directions.
 
 #### The correction, switched on
 
@@ -834,11 +893,26 @@ assumed:
   `earnings` coverage block would mean what it says — synthetic dates would be counted as
   announcement coverage, inflating the one figure that exists to be honest about the gap.
 
-#### What the correction actually costs: the re-simulation
+#### What the correction actually costs: three measurements, and the sequence is the finding
 
-Three runs over the identical universe, window, price data and earnings cache (`data_hash`
-`d2696839…` and `config_hash` differing only by the two membership keys; 1,505 stocks, OOS
-2013-01-01 to 2025-12-31):
+This section has now measured the same thing three times and got three different answers. The
+tables below are all kept, in order, because **the sequence is more informative than any one row of
+it** — and because two of the three were published with more confidence than they could carry.
+
+| Attempt | Join-date coverage | Earnings blackout | Control PF | Corrected PF | Reported as |
+|---|---|---|---|---|---|
+| 1 | 77% (pre-EDGAR) | unrecorded | 1.0663 | 1.0692 (`include`) | "the bias barely mattered" |
+| 2 | 93.6%, bounds as fact | unrecorded, partial | 1.0551 | 0.7493 / 0.9299 | "destroys the result" |
+| **3** | **76.8% default / 93.6% bounds-as-fact** | **99.6%, recorded** | **1.0668** | **0.9566–1.0841** | **not separable from noise** |
+
+Attempt 3 is the first with `earnings_hash`, and the first whose runs are pinned (§9). It agrees
+with attempt 1 and not with attempt 2 — and attempt 1's control (685 trades, PF 1.0663, +$3,523,
+51.5% max DD) is within a trade and a thousandth of attempt 3's (684, 1.0668, +$3,553, 51.5%).
+**Attempt 2 is the outlier of the three.**
+
+##### Attempt 2 (superseded, retained for the record)
+
+Three runs, `data_hash` `d2696839…`, 1,505 stocks, OOS 2013-01-01 to 2025-12-31:
 
 | Run | `membership` | policy | trades | profit factor | net P&L | CAGR | max DD |
 |---|---|---|---|---|---|---|---|
@@ -846,75 +920,182 @@ Three runs over the identical universe, window, price data and earnings cache (`
 | `ablate-edgar-pit-include` | point_in_time | `include` | 769 | **0.7493** | −$13,182 | −10.81% | 83.2% |
 | `ablate-edgar-pit-exclude` | point_in_time | `exclude` | 732 | **0.9299** | −$3,502 | −4.21% | 73.1% |
 
-The gate demonstrably bit. Re-checking every trade against the membership windows, the `off` run
-took **263 entries (38%)** on days its policy cannot vouch for; both corrected runs took **zero**.
+It concluded: "Enforcing point-in-time membership destroys the result… this is not a marginal shift
+inside the noise band; it is the strategy's entire reported edge disappearing." **That conclusion
+does not survive re-measurement, and the run directory cannot be reproduced.** Its three runs were
+made with `backtest.end` unset, so they asked for a window ending on the day they were run
+(`end: 2026-08-21`) — the precise configuration §9 now warns about — and against an earnings cache
+whose contents were never recorded. Their `data_hash` `d2696839…` no longer reproduces. The OOS
+stretch and fold count are the same as attempt 3's, so the tables are structurally comparable; what
+cannot be recovered is the state of the two inputs that were not fingerprinted.
 
-**Enforcing point-in-time membership destroys the result.** Profit factor falls from 1.055 to 0.749
-and 0.930 — both corrected runs lose money, on a run whose uncorrected version was marginally
-profitable. Maximum drawdown rises from 46% to 73–83%. The corrected run is worse than the
-uncorrected one in 11 of 13 folds under `include` and 9 of 13 under `exclude`. This is not a
-marginal shift inside the noise band; it is the strategy's entire reported edge disappearing when it
-is no longer allowed to buy companies before they joined an index.
+##### Attempt 3: the current measurement
 
-##### This reverses the previous reading of this section, and the reason is the data
+Seven runs, stocks universe, **`backtest.end` pinned to 2025-12-31**, run strictly sequentially
+against one warm cache. The five comparable runs share `data_hash` `1052af6b…` **and**
+`earnings_hash` `e49927c3…`, with five distinct `config_hash` values — so for the first time the
+comparison is checkable rather than asserted. 1,499 stocks, OOS 2013-01-01 to 2025-12-31, 13 folds.
 
-An earlier version of this section ran the same three-way comparison on the **pre-EDGAR** membership
-files and reported that the correction moved profit factor by 0.005 — nothing. That measurement was
-not wrong, and it was not noise. It was **measuring a correction that barely corrected anything**:
+| Run | `membership` | bounded dates | unknown dates | blackout | trades | profit factor | net P&L | CAGR | max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| `ablate-repro2-off` | off | — | — | on | 684 | **1.0668** | +$3,553 | +0.90% | 51.5% |
+| `ablate-repro2-pit-unknown` | point_in_time | unknown *(default)* | `exclude` | on | 690 | **1.0841** | +$3,477 | +1.25% | 51.3% |
+| `ablate-repro2-pit-exact` | point_in_time | as fact | `exclude` | on | 707 | **1.0233** | +$1,118 | −0.35% | 51.4% |
+| `ablate-repro2-pit-inc-unknown` | point_in_time | unknown *(default)* | `include` | on | 694 | **1.0334** | +$1,708 | −0.87% | 50.3% |
+| `ablate-repro2-pit-inc-exact` | point_in_time | as fact | `include` | on | 717 | **0.9566** | −$2,090 | −2.48% | 63.0% |
+| `ablate-repro2-off-noearn` | off | — | — | **off** | 756 | **1.0121** | +$672 | −0.74% | 54.3% |
+| `ablate-repro2-pit-exact-noearn` | point_in_time | as fact | `exclude` | **off** | 684 | **1.0522** | +$2,437 | +0.54% | 61.5% |
 
-- Under the old `include` policy, the 350 symbols with no stated join date were back-dated to the
+**Enforcing point-in-time membership does not destroy the result.** Under the shipping defaults it
+very slightly improves it (1.0668 → 1.0841) while dropping 349 symbols from the universe. The worst
+corner of the 2×2 — `include` with bounds read as fact — prints 0.9566, not 0.7493.
+
+##### The bounded reading is worth about 0.07, and that is the one consistent signal
+
+Isolating the c0eb886 knob at each unknown-date policy, on runs that differ in nothing else:
+
+| unknown-date policy | bounds as **unknown** | bounds as **fact** | cost of admitting bounds |
+|---|---|---|---|
+| `exclude` | 1.0841 | 1.0233 | **−0.0607** |
+| `include` | 1.0334 | 0.9566 | **−0.0768** |
+
+Same sign, same order of magnitude, at two independent policy settings. Reading a quarterly filing
+as a join date places the join too late and so over-blocks, and that over-blocking costs roughly
+0.07 profit factor. **This is the answer to "was the reversal an artefact of reading 893 bounded
+S&P 600 joins as exact?" — partly, but only about a quarter of it.** Decomposing attempt 2's
+`include` row against attempt 3's: of the 0.284 recovery from 0.7493 to 1.0334, the bounded reading
+accounts for **+0.077** and everything else for **+0.207**.
+
+##### The earnings blackout moved results independently of membership — and its own line
+
+The 8% → 99.67% coverage shift landed in the same window as everything above, so it gets measured
+separately rather than absorbed. Two pairs, each differing **only** in `earnings_hash` — identical
+`config_hash`, identical `data_hash`, same commit:
+
+| | blackout off | blackout on | Δ PF | Δ max DD | Δ trades |
+|---|---|---|---|---|---|
+| membership `off` | 1.0121 (54.3% DD) | 1.0668 (51.5% DD) | **+0.055** | −2.8pp | −72 |
+| membership `point_in_time` | 1.0522 (61.5% DD) | 1.0233 (51.4% DD) | **−0.029** | −10.1pp | +23 |
+
+Two things to read here, and they point differently.
+
+**The profit-factor effect is real in size and unstable in sign.** With membership off, the blackout
+is the difference between a losing strategy and a marginally profitable one — CAGR −0.74% against
++0.90%, net P&L $672 against $3,553. With membership enforced it goes the other way. A swing of
+±0.05 profit factor from an input that no report used to record is larger than the membership effect
+it was being confounded with, which is precisely why it now gets its own hash.
+
+**The drawdown effect is consistent and mechanical.** The blackout cuts maximum drawdown in both
+pairs, by 2.8 and 10.1 percentage points. Blocking entries either side of an announcement avoids
+gap risk, and that shows up where it should. It is also why attempt 2's headline "maximum drawdown
+rises from 46% to 73–83%" reads as an earnings artefact rather than a membership finding: in attempt
+3 drawdown barely responds to membership at all (51.3–51.5% across A, B and C), and the only runs
+with elevated drawdowns are the two with the blackout suppressed (54.3%, 61.5%) plus the
+`include`-and-bounds-as-fact corner (63.0%).
+
+##### None of it is statistically separable at 13 folds
+
+The honest caveat, and it applies to attempt 3 exactly as much as to attempt 2. Treating the 13
+walk-forward folds as paired observations:
+
+| Contrast | mean Δ PF | s.e. | t | better in |
+|---|---|---|---|---|
+| point-in-time (default) − off | +0.094 | 0.265 | +0.35 | 6/13 |
+| point-in-time (bounds as fact) − off | −0.047 | 0.156 | −0.30 | 7/13 |
+| blackout on − blackout off (membership off) | +0.057 | 0.082 | +0.69 | 9/13 |
+| bounds unknown − bounds as fact (`exclude`) | +0.141 | 0.192 | +0.74 | 7/13 |
+| bounds unknown − bounds as fact (`include`) | +0.041 | 0.112 | +0.36 | 5/13 |
+
+Per-fold out-of-sample profit factors span **0.33 to 3.81**; the standard error on a 13-fold mean is
+0.141, which swallows every aggregate difference in this section. **Not one contrast reaches
+|t| = 0.8**, and the win rates are coin-flips. The most consistent of them is the earnings blackout
+(9 of 13 folds, the tightest dispersion at sd 0.296), and it is still t = 0.69.
+
+This is the finding that should have been stated the first time. Attempt 2 wrote "this is not a
+marginal shift inside the noise band" about a difference the noise band comfortably contains. The
+sample has never been large enough to separate these effects, and three measurements have now
+produced three answers — 1.069, 0.749 and 1.084 for the same nominal quantity — which is what a
+noise-dominated measurement looks like when it is read as signal.
+
+##### Attempt 2's explanation of attempt 1, which was half right
+
+Attempt 2 explained attempt 1's null like this, and the mechanism it describes is real:
+
+- Under the `include` policy, the 350 symbols with no stated join date were back-dated to the
   beginning of the data, so for 23% of the universe — disproportionately the small caps where the
   bias lives — no entry was blocked at all.
-- Under the old `exclude` policy those same 350 symbols were dropped outright, which removes the
-  look-ahead but also removes most of the evidence, and replaces one bias with another.
+- Under `exclude` those same 350 symbols were dropped outright, which removes the look-ahead but
+  also removes most of the evidence, and replaces one bias with another.
 
-With join dates for 93.6% of the universe, `include` is a real correction for the first time. The
-lesson generalises past this section: **a correction applied to data that cannot support it will
-report that the thing being corrected does not matter.** That is a statement about the data, not
-about the bias, and it is very hard to tell apart from a genuine null.
+From that it concluded that with 93.6% coverage, `include` was "a real correction for the first
+time", and generalised: **a correction applied to data that cannot support it will report that the
+thing being corrected does not matter.** That generalisation is worth keeping — it is true, and it
+is a genuinely useful warning.
+
+What attempt 2 got wrong was believing it had escaped the trap. The 93.6% coverage it was relying on
+consists, for 254 of those 350 symbols, entirely of quarterly filing bounds — so under the honest
+reading the coverage is 76.8% and those symbols are undated exactly as before. Attempt 2 did not
+apply a correction to data that could support it; it applied a correction to data that had been
+*read* as though it could. The lesson survives its own author.
 
 ##### The substitution mechanism, and why it is not a mitigation
 
 Qualification 1 above says an attribution cannot be read as the cost of removing a subset, because
-the freed slot goes to the next-ranked candidate. Both re-simulations confirm the mechanism —
-**trade counts go up under enforcement, not down** (700 → 769 and 732), exactly as predicted. What
-has changed is the sign of its effect:
+the freed slot goes to the next-ranked candidate. **Every re-simulation confirms the mechanism:
+trade counts go up under enforcement, not down** — 700 → 769/732 in attempt 2, and 684 → 690/694/707
+/717 across attempt 3's 2×2. That much is robust.
 
-| | net P&L |
-|---|---|
-| Uncorrected run | +$2,890 |
-| Attribution's implied answer (the "member" bucket alone) | −$5,230 |
-| **Actual corrected run (`include`)** | **−$13,182** |
-| Difference — the 264 substitute trades | **−$7,952** |
+What the substitution *does* to the result is not. Three measurements, three signs:
 
-On the old data the substitution *rescued* the result and the attribution overstated the damage. On
-the better data the substitution **compounds** it: the replacement names the strategy is pushed into
-are worse than the ones it was denied, and the corrected run is nearly $8,000 worse than the naive
-subtraction implies. So the durable lesson is not "attribution overstates" — it is the stronger and
-more uncomfortable **"attribution does not predict re-simulation, in either direction."** Two
-measurements now sit on opposite sides of that statement.
+| | attempt 1 | attempt 2 | attempt 3 (`include`, default bounds) |
+|---|---|---|---|
+| Uncorrected run | +$3,523 | +$2,890 | +$3,553 |
+| Attribution's implied answer (the "member" bucket alone) | — | −$5,230 | −$1,839 |
+| **Actual corrected run** | **+$3,251** | **−$13,182** | **+$1,708** |
+| Difference — the substitute trades | ~0 | **−$7,952** | **+$3,547** |
 
-One thing this table does not explain: `include` is the *more permissive* correction (16,917
-provable member-years against 13,672) and yet scores worse than `exclude`. That ordering is not
-monotone in correction strength and should not be read as meaningful. The tuner chose different
-parameters in 13 of 13 folds under `include` and 10 of 13 under `exclude`, and per-fold
-out-of-sample profit factors range from 0.17 to 2.09; the gap between the two corrected runs is
-comfortably inside that spread. What is outside it is the gap between either of them and `off`.
+Attempt 1 said substitution was neutral, attempt 2 that it compounds the damage by $8,000, attempt 3
+that it rescues $3,547 of it. So the durable lesson is not "attribution overstates" and not
+"attribution understates" — it is **"attribution does not predict re-simulation, in either
+direction, and the direction is not stable across measurements."** Three measurements now sit on
+three sides of it.
+
+One ordering that recurs and should still not be read as meaningful: `include` is the *more*
+permissive correction (17,935 provable member-years against 8,672 for `exclude` in attempt 3) and
+yet scores worse in both attempts. That is not monotone in correction strength. The tuner chose
+different parameters in most folds, and with per-fold profit factors spanning 0.33–3.81 the gap
+between any two corrected runs is comfortably inside the spread. In attempt 2 the gap between the
+corrected runs and `off` was described as being outside it. On attempt 3's numbers nothing is
+outside it.
 
 ##### What this still does not establish
 
-The correction remains imperfect in known directions: 96 symbols still have no stated join date and
-are dropped by `exclude` and back-dated by `include`, and a third of all stints carry
-`no_later_than` bounds read as exact, which places joins too late and so *over*-blocks. Both of
-those make the corrected runs pessimistic to an unmeasured degree, so 0.749 and 0.930 are lower
-bounds on what a perfectly-dated correction would print, not estimates of it. The direction is now
-clear and the magnitude is not.
+The correction remains imperfect in known directions. Under the default reading **350** symbols have
+no usable join date and are dropped by `exclude` or back-dated by `include`; admitting the bounds
+instead leaves 96, at the cost of dating 254 joins too late and so over-blocking. That is not a
+choice between a good option and a bad one — it is the same missing information, priced two ways,
+and the 0.07 profit factor between them (measured above) is the size of the pricing.
 
-What has changed is which way the uncertainty runs. The previous reading was "the attribution
-over-read a bias the re-simulation cannot find". The current reading is that **the bias is large
-enough to erase the strategy's edge, and the open question is only how much of the erasure is the
-correction over-reaching.** That is a materially worse position for the stock-universe results, and
-§8's treatment of it is unchanged for the reason §8 gives.
+**Real bias or coverage artefact: still unresolved, and now honestly bracketed.** Three
+measurements, and the sign of the membership effect is not stable across them: +0.003 (attempt 1),
+−0.306 (attempt 2), +0.017 (attempt 3, defaults). What *is* stable is that no measurement has ever
+separated the effect from fold-to-fold noise. The exact-dated decomposition, where the artefact
+cannot operate, has shrunk from a +0.42 gap to **+0.113** — and the S&P 500, which has 100% exact
+coverage and is the one place the question could be settled cleanly, shows a *negative* gap in every
+reading ever taken (−0.18, now −0.503). The residue that attempt 2 called "evidence pointing the
+other way" is smaller than it was and rests on cells of 17–64 trades.
+
+So the position is not attempt 2's "the bias is large enough to erase the strategy's edge, and the
+only question is how much of the erasure is over-reach". Nor is it attempt 1's "the bias barely
+mattered". It is: **the look-ahead is visible in the attribution, it is concentrated exactly where
+the dates are weakest, and thirteen folds of a 700-trade backtest cannot measure it.** Settling it
+needs exact join dates for the S&P 600, which EDGAR's quarterly cadence structurally cannot give,
+or a longer sample.
+
+§8's treatment is unchanged, and this section is now the strongest available argument for why: a
+pre-committed haircut convention is exactly what you want when three successive measurements of the
+same quantity disagree in sign. Chasing the newest number would have moved the convention three
+times and landed it, on this evidence, nowhere.
 
 #### What every report now carries
 
@@ -922,35 +1103,42 @@ correction over-reaching.** That is a materially worse position for the stock-un
 because the useful question is not "was a correction applied" but "how big is the thing that was
 not corrected":
 
-This is the real block from `reports/backtest/ablate-edgar-off`, the uncorrected stocks run measured
-above. Its 1,505 symbols are the 1,506 stocks in the universe minus one with no price history, which
-is also why its counts sit one below the universe-wide figures quoted earlier:
+This is the real block from `reports/backtest/ablate-repro2-off`, the uncorrected stocks run
+measured above. Its 1,499 symbols are the 1,506 stocks in the universe minus seven with no price
+history, which is also why its counts sit slightly below the universe-wide figures quoted earlier:
 
 ```json
 "membership": {
-  "mode": "off", "applied": false, "unknown_policy": "exclude",
-  "symbols_gated": 1505, "symbols_ungated": 0,
-  "symbols_excluded": 0, "symbols_policy_sensitive": 405,
-  "symbols_unknown_join": 96, "symbols_no_membership_row": 0,
-  "join_date_coverage_pct": 93.621262,
+  "mode": "off", "applied": false,
+  "unknown_policy": "exclude", "bounded_policy": "unknown",
+  "symbols_gated": 1499, "symbols_ungated": 0,
+  "symbols_excluded": 0, "symbols_policy_sensitive": 768,
+  "symbols_unknown_join": 349, "symbols_bounded_join": 253,
+  "symbols_no_membership_row": 0,
+  "join_date_coverage_pct": 76.717812,
   "join_date_coverage": {
-    "sp500": {"members": 503, "with_join_date": 503},
-    "sp400": {"members": 400, "with_join_date": 369},
-    "sp600": {"members": 602, "with_join_date": 537}
+    "sp500": {"members": 501, "with_join_date": 501},
+    "sp400": {"members": 400, "with_join_date": 303},
+    "sp600": {"members": 598, "with_join_date": 346}
   },
-  "member_years": 25040.068446,
-  "member_years_point_in_time": 13672.298426,
-  "member_years_nominal": 25040.068446
+  "member_years": 23984.0,
+  "member_years_point_in_time": 8672.386037,
+  "member_years_nominal": 23984.0
 }
 ```
 
-Read it as: over its data span of 2010-01-01 to 2026-08-21 this run traded **25,040 member-years**,
-of which a membership file can vouch for **13,672**. It applied no correction (`applied: false`),
-and the unknown-date policy it *would* have used is one that 405 of its 1,505 symbols are sensitive
-to. The gap between those first two figures — 11,368 member-years the run traded but cannot
-justify — is the thing §7.1 measures, and the run that closes it loses money.
-(The 24,096 in the table above is the same arithmetic over the shorter 2010–2025 window, so that it
-lines up with [`survivorship.md`](survivorship.md) §5.2.)
+Read it as: over its pinned data span of 2010-01-01 to 2025-12-31 this run traded **23,984
+member-years**, of which a membership file can vouch for **8,672**. It applied no correction
+(`applied: false`); the unknown-date policy it *would* have used moves 768 of its 1,499 symbols, and
+253 of those turn on the bounded-date policy alone. The gap between the first two figures —
+**15,312 member-years the run traded but cannot justify** — is the thing §7.1 measures, and three
+attempts to price it have disagreed in sign.
+
+Note how much larger that gap is than the 11,368 attempt 2 reported for the same quantity. Nothing
+about the universe changed; the difference is entirely that a quarterly filing bound is no longer
+counted as a join date. (The 24,096 in the table above is the same arithmetic over the full 1,506
+stocks rather than the 1,499 with price history, so that it lines up with
+[`survivorship.md`](survivorship.md) §5.2.)
 
 `symbols_gated + symbols_ungated == n_symbols`, so a reader can check the block against the run it
 sits in. ETFs and `extra_symbols` are never index constituents, so they are counted as *ungated* and
@@ -979,9 +1167,10 @@ Measured today over the same 1,506-stock universe:
 `bounded_policy` says how a bounded join date was read; `symbols_bounded_join` says how many symbols
 that decided — the same kind of figure as `symbols_policy_sensitive`, for the other choice.
 
-**Those 254 symbols are why the two figures in the block above have moved.** `ablate-edgar-off` was
-written when a bound was read as the date itself, giving `symbols_unknown_join: 96` and
-`join_date_coverage_pct: 93.62`. The default is now `membership_bounded = "unknown"` — a bound is
+**Those 254 symbols are why the two figures in the block above have moved.** Attempt 2's
+`ablate-edgar-off` was written when a bound was read as the date itself, giving
+`symbols_unknown_join: 96` and `join_date_coverage_pct: 93.62`. The default is now
+`membership_bounded = "unknown"` — a bound is
 conservative at one end and permissive at the other, so only discarding it is conservative at both —
 and the same universe today reports **350** unknown joins and **76.76%** coverage. The report is
 quoted verbatim and is not wrong; it simply predates the policy. Re-running it would produce the
@@ -1064,19 +1253,20 @@ no survivorship haircut.
 These numbers are **conventions, not measurements.** They are stated so that the same haircut is
 applied to every run, including runs that would otherwise look good enough to deploy.
 
-**§7.1 now puts a re-simulation beside the Bias B allowance, and it is worse than the allowance.**
-The allowance above is ~2.0 pp of CAGR, set by judgment as "at least as large as Bias A". On
-membership data covering 93.6% of the universe, actually enforcing point-in-time eligibility takes
-the stock walk-forward from profit factor 1.055 to 0.749 and 0.930 under the two unknown-date
-policies — from marginally profitable to loss-making, with maximum drawdown rising from 46% to
-73–83%. That is far more than 2.0 pp of CAGR.
+**§7.1 now puts three re-simulations beside the Bias B allowance, and they disagree with each
+other.** The allowance above is ~2.0 pp of CAGR, set by judgment as "at least as large as Bias A".
+Enforcing point-in-time eligibility has since been measured three times and moved profit factor by
++0.003, −0.306 and +0.017 — in both directions, and never by more than fold-to-fold noise. The
+middle measurement, which showed drawdown rising from 46% to 73–83%, was made against an
+unrecorded earnings cache and an unpinned window and does not reproduce; §7.1 gives the detail.
 
-**The convention is nevertheless left alone**, and the reason is the one it was written for: it was
-fixed in advance precisely so that it could not be re-tuned every time a new measurement arrived,
-and §7.1 has now produced two measurements that disagree with each other about the size of this
-bias. Moving a fixed convention to chase the newer of two disagreeing numbers is exactly the
-behaviour the convention exists to prevent — particularly when the corrected runs are known to
-over-block (§7.1) and so are lower bounds rather than estimates.
+**The convention is nevertheless left alone**, and the case for that is now much stronger than when
+it was written. It was fixed in advance precisely so that it could not be re-tuned every time a new
+measurement arrived — and §7.1 has now produced **three** measurements that disagree with each
+other in sign about the size of this bias. Had the convention been re-tuned to each in turn it
+would have moved down, then sharply up, then back, and ended up approximately where it started.
+Moving a fixed convention to chase the newest of three disagreeing numbers is exactly the behaviour
+the convention exists to prevent.
 
 What changes is not the arithmetic but how much weight a stock-universe result can carry. A haircut
 prices a bias whose size you roughly know. **§7.1 no longer supports the claim that Bias B is
@@ -1383,17 +1573,17 @@ Collected in one place, ordered by how much they should worry a reader.
 
 1. **Survivorship bias in the stock universe (§7).** The largest and least fixable error. Priced by
    convention in §8; not removed.
-2. **Index-inclusion look-ahead is now correctable, and correcting it erases the edge (§7.1).**
-   This has been promoted above the small-sample caveat because it is the most serious thing in
-   this document. Bias B is correlated with the strategy's own signal, which makes it worse than a
-   generic return bias. `[backtest] membership = "point_in_time"` runs rather than refusing, and on
-   membership data covering 93.6% of the universe it takes the stock walk-forward from profit factor
-   **1.055 to 0.749 / 0.930** — from marginally profitable to loss-making — with drawdown rising
-   from 46% to 73–83%, and the corrected run worse in 11 of 13 folds. An earlier measurement on
-   77%-coverage data found no effect; that was the correction failing to bite, not the bias failing
-   to exist. The corrected runs still over-block (96 undated symbols, and a third of stints carrying
-   `no_later_than` bounds read as exact), so they are lower bounds, not estimates. The default
-   remains `off`, which means **every headline in this document carries this bias**.
+2. **Index-inclusion look-ahead is correctable, and its size is not known (§7.1).** This stays
+   above the small-sample caveat because it is still the most serious thing in this document: Bias
+   B is correlated with the strategy's own signal, which makes it worse than a generic return bias,
+   and the default remains `off`, so **every headline in this document carries it**. What is *not*
+   established is the magnitude. `[backtest] membership = "point_in_time"` runs rather than
+   refusing, and three measurements have moved profit factor by +0.003, −0.306 and +0.017 — in both
+   directions, none of them separable from fold-to-fold noise (|t| ≤ 0.8 across thirteen folds).
+   The −0.306 reading, which this list previously stated as fact, was made against an unrecorded
+   earnings cache and an unpinned window and does not reproduce. The trade-level attribution does
+   still show the look-ahead, concentrated exactly where the join dates are weakest — and the S&P
+   500, the one index with complete exact dates, has never shown it at all.
 3. **Every effect used is long-published** (§8, McLean & Pontiff 2016). Post-publication decay is
    acknowledged and not priced.
 4. **Small trade counts** (§5). Confidence intervals on every reported metric are wide; ablation
