@@ -1413,11 +1413,63 @@ def test_fundamentals_can_be_half_known(test_cfg: Config) -> None:
 
 
 def test_fundamentals_are_none_when_yahoo_has_nothing(test_cfg: Config) -> None:
+    """Yahoo *answered* — an empty profile, an empty statement — so this is a fact.
+
+    Free fundamentals are patchy and a small-cap with no usable growth figures
+    is ordinary. Worth caching for the week, unlike a refusal below.
+    """
+    factory = TickerFactory({"AAPL": FakeTicker(info={}, statement=None)})
+    out = build_provider(test_cfg, ticker_factory=factory).fundamentals(["AAPL"], now=NOW)
+
+    assert out["AAPL"] == Fundamentals(symbol="AAPL", eps_growth=None, revenue_growth=None)
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "fundamentals.json", timedelta(days=7))
+    assert "AAPL" in stored.read_all(), "an answer, even an empty one, is cached"
+
+
+def test_fundamentals_yahoo_refused_are_not_cached_as_an_empty_answer(
+    test_cfg: Config,
+) -> None:
+    """Audit COVER-1, third and last site.
+
+    Every source throwing is not a company without fundamentals; it is a
+    company we failed to ask about. Cached as the former it stood the screen
+    down for a whole week — milder than the earnings blackout's failure, but
+    the same bug, and this was the last place it lived.
+    """
+    factory = TickerFactory({"AAPL": FakeTicker(explode=True)})
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+
+    out = provider.fundamentals(["AAPL"], now=NOW)
+
+    assert "AAPL" not in out, "unknown, not 'no fundamentals'"
+    stored = TtlJsonCache(test_cfg.data.cache_dir / "fundamentals.json", timedelta(days=7))
+    assert stored.read_all() == {}, "nothing written down, so nothing to wait out"
+
+    # ...and the very next call asks again rather than serving a cached shrug.
+    before = factory.count
+    provider.fundamentals(["AAPL"], now=NOW + timedelta(minutes=1))
+    assert factory.count > before
+
+
+def test_a_symbol_we_could_not_ask_about_is_not_screened_out(test_cfg: Config) -> None:
+    """The one thing this change must not do.
+
+    ``rules.fundamentals_ok`` passes on missing data on purpose — punishing a
+    data gap would quietly bias the universe — and an unaskable symbol must
+    land in exactly that documented path, not in a rejection. Absence is the
+    shape callers already handle: the pipeline does ``fundamentals.get(symbol)``
+    and feeds the ``None`` straight in.
+    """
+    from swing.strategy import rules
+
     factory = TickerFactory({"AAPL": FakeTicker(explode=True)})
     out = build_provider(test_cfg, ticker_factory=factory, retries=1).fundamentals(
         ["AAPL"], now=NOW
     )
-    assert out["AAPL"] == Fundamentals(symbol="AAPL", eps_growth=None, revenue_growth=None)
+
+    assert test_cfg.strategy.fundamentals_filter, "the screen is on by default"
+    for below_median in (True, False):
+        assert rules.fundamentals_ok(out.get("AAPL"), below_median, test_cfg) is True
 
 
 def test_fundamentals_reject_junk_values(test_cfg: Config) -> None:

@@ -17,6 +17,29 @@ The per-symbol calls (quotes, earnings, fundamentals) run in a small thread
 pool and persist in chunks rather than in one final write, because serially
 walking 1,500 symbols took thousands of round trips and a Ctrl-C near the end
 threw all of them away (audit PERF-002, PERF-003).
+
+One rule runs through all of it (audit COVER-1). **"The vendor refused" and
+"the vendor says there is nothing" are different facts, and only the second may
+be cached.** They used to be the same value: every accessor went through
+``_safe_call``, which turns any exception into ``None``, so a rate-limited
+reply was written to disk as a statement about the company — 1,369 S&P
+constituents recorded as never having reported earnings, Microsoft among them.
+:func:`_ask` and :func:`_read_attr` report whether the vendor actually answered;
+a refusal is omitted from the fetch result, and since the TTL caches store only
+what they are handed, that symbol stays stale and is asked again.
+
+Three sites carried the bug and all three are now fixed: earnings history, the
+upcoming-date path that feeds the live scanner, and fundamentals.
+
+Two swallow sites were examined and *deliberately left*, so a future reader
+auditing ``_safe_call`` need not re-derive the reasoning:
+
+* :func:`_lookup`, on the quote path. A price that cannot be read makes
+  :meth:`YFinanceProvider.latest_quotes` skip the symbol with a warning, so it
+  fails *closed* — the symbol drops out of the scan rather than trading on a
+  wrong number. Nothing is cached, so there is nothing to poison.
+* :func:`_safe_call` itself, which survives only for callers where a refusal
+  and an absence genuinely lead to the same decision. Its docstring says so.
 """
 
 from __future__ import annotations
@@ -158,6 +181,20 @@ _PRICE_ATTRS = (
 )
 #: ``info``'s growth figures are quarter-over-quarter year-on-year.
 _INFO_BASIS = "quarterly"
+
+
+@dataclass
+class _Reached:
+    """Did *any* vendor endpoint actually answer about this symbol?
+
+    Threaded through the fundamentals lookup because that answer is assembled
+    from several sources — the company profile, then the quarterly and annual
+    income statements — and only the caller can see whether all of them
+    refused. "Every source said nothing useful" is a fact worth caching for a
+    week; "no source could be reached" is not (audit COVER-1).
+    """
+
+    any: bool = False
 
 
 @dataclass
@@ -578,12 +615,26 @@ class YFinanceProvider:
     def fundamentals(
         self, symbols: Sequence[str], *, now: datetime | None = None
     ) -> dict[str, Fundamentals]:
-        """Trailing EPS and revenue growth per symbol, cached for a week."""
+        """Trailing EPS and revenue growth per symbol, cached for a week.
+
+        A symbol the vendor could not be asked about is **absent** from the
+        result rather than present with empty figures, and nothing is cached
+        for it, so the next run asks again instead of waiting out the week
+        (audit COVER-1). Absence is already the shape callers handle:
+        :func:`swing.strategy.rules.fundamentals_ok` receives ``None`` and
+        passes the symbol, which is the documented behaviour for missing data
+        and deliberately *not* a rejection — punishing a data gap would bias
+        the universe.
+        """
         stamp = as_utc(now) if now is not None else utcnow()
         wanted = clean_symbols(symbols)
         return self._fundamentals_cache.get_or_fetch(
             wanted,
-            lambda keys: self._map(keys, self._fundamentals),
+            lambda keys: {
+                key: value
+                for key, value in self._map(keys, self._fundamentals).items()
+                if value is not None
+            },
             now=stamp,
             chunk_size=self._chunk_size,
             encode=lambda value: {
@@ -837,17 +888,36 @@ class YFinanceProvider:
 
     # -- fundamentals -----------------------------------------------------
 
-    def _fundamentals(self, symbol: str) -> Fundamentals:
-        """Best-effort growth figures; ``None`` beats a made-up number."""
+    def _fundamentals(self, symbol: str) -> Fundamentals | None:
+        """Best-effort growth figures; ``None`` beats a made-up number.
+
+        Returns:
+            The figures, with either growth field ``None`` where the vendor
+            answered but has no usable number — that is an ordinary, cacheable
+            fact about a small-cap. Or ``None`` for the whole record when
+            *nothing* could be read: no profile, no statement, no attribute.
+            Only the first may be written down (audit COVER-1, third site).
+
+            The two used to be the same value, so a rate-limited symbol was
+            cached as "no fundamentals" for a week, quietly standing the screen
+            down for it. The consequence is milder than the earnings blackout's
+            — see :func:`swing.strategy.rules.fundamentals_ok`, which passes on
+            missing data on purpose — but it is the same bug, and this is the
+            last place it lived.
+        """
+        reached = _Reached()
         info = (
-            self._with_retry(f"the company profile for {symbol}", lambda: self._info(symbol)) or {}
+            self._with_retry(
+                f"the company profile for {symbol}", lambda: self._info(symbol, reached)
+            )
+            or {}
         )
         eps = _first_number(info, _EPS_INFO_KEYS)
         revenue = _first_number(info, _REVENUE_INFO_KEYS)
         bases = {_INFO_BASIS} if (eps is not None or revenue is not None) else set()
 
         if eps is None or revenue is None:
-            for basis, statement in self._statements(symbol):
+            for basis, statement in self._statements(symbol, reached):
                 if eps is None:
                     eps = _growth_from_statement(statement, _EPS_ROWS)
                     if eps is not None:
@@ -858,18 +928,25 @@ class YFinanceProvider:
                         bases.add(basis)
                 if eps is not None and revenue is not None:
                     break
+        if not reached.any:
+            log.debug(
+                "Nothing could be read about %s's fundamentals, so nothing is cached.", symbol
+            )
+            return None
         return Fundamentals(
             symbol=symbol, eps_growth=eps, revenue_growth=revenue, basis=_basis_label(bases)
         )
 
-    def _info(self, symbol: str) -> dict[str, Any]:
+    def _info(self, symbol: str, reached: _Reached) -> dict[str, Any]:
         ticker = self._ticker(symbol)
-        info = _safe_call(ticker, "get_info")
+        info, answered = _ask(ticker, "get_info")
         if info is None:
-            info = getattr(ticker, "info", None)
+            info, attr_answered = _read_attr(ticker, "info")
+            answered |= attr_answered
+        reached.any |= answered
         return info if isinstance(info, dict) else {}
 
-    def _statements(self, symbol: str) -> Iterator[tuple[str, pd.DataFrame]]:
+    def _statements(self, symbol: str, reached: _Reached) -> Iterator[tuple[str, pd.DataFrame]]:
         """Yield ``(basis, income statement)``, quarterly before annual.
 
         The fallback used to be whatever ``get_income_stmt()`` returned, which
@@ -877,20 +954,26 @@ class YFinanceProvider:
         from ``info`` with a year-over-year year from here (audit BUG-037).
         Asking for the quarterly frequency first keeps the two comparable, and
         whichever one answers is recorded in ``Fundamentals.basis``.
+
+        Only non-empty frames are yielded, so ``reached`` carries the other
+        half of the story: whether the endpoints replied at all.
         """
         for basis, quarterly in (("quarterly", True), ("annual", False)):
             frame = self._with_retry(
                 f"the {basis} income statement for {symbol}",
-                lambda q=quarterly: self._financials(symbol, quarterly=q),
+                lambda q=quarterly: self._financials(symbol, quarterly=q, reached=reached),
             )
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 yield basis, frame
 
-    def _financials(self, symbol: str, *, quarterly: bool) -> pd.DataFrame | None:
+    def _financials(
+        self, symbol: str, *, quarterly: bool, reached: _Reached
+    ) -> pd.DataFrame | None:
         ticker = self._ticker(symbol)
         kwargs: dict[str, Any] = {"freq": "quarterly"} if quarterly else {}
         for name in ("get_income_stmt", "get_financials"):
-            frame = _safe_call(ticker, name, **kwargs)
+            frame, answered = _ask(ticker, name, **kwargs)
+            reached.any |= answered
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 return frame
         attrs = (
@@ -899,7 +982,8 @@ class YFinanceProvider:
             else ("income_stmt", "financials")
         )
         for attr in attrs:
-            frame = getattr(ticker, attr, None)
+            frame, answered = _read_attr(ticker, attr)
+            reached.any |= answered
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 return frame
         return None
