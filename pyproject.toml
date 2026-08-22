@@ -61,4 +61,32 @@ addopts = "-q"
 markers = [
   "network_ok: allow real network access for this test (the autouse socket block is skipped)",
 ]
-filterwarnings = ["ignore::DeprecationWarning"]
+# Warning policy — deliberately scoped. Do not flatten this back to a bare
+# `ignore::DeprecationWarning` for quiet; that blanket ignore is what made the
+# suite lie to us once already.
+#
+# The incident: `swing/universe.py` imported `importlib.abc.Traversable`, an
+# alias deprecated in Python 3.12 and REMOVED in 3.14. Python warned on every
+# single import. The blanket ignore ate the warning, so a fully green suite was
+# sitting on a hard ImportError that would land the day anyone upgraded the
+# interpreter. It was found by accident, which is not a strategy.
+#
+# So the baseline stays permissive for other people's code — we cannot fix
+# pandas, yfinance or schwab-py on their release schedule — and becomes fatal
+# for ours. The fourth field is a regex matched against the `__name__` of the
+# module the warning is *attributed* to, which is the caller rather than the
+# callee: a deprecated stdlib call made from swing code is correctly blamed on
+# swing, and a deprecated import in a swing module is blamed on that module.
+#
+# Order matters. pytest applies these in sequence and each one is prepended to
+# `warnings.filters`, so the LAST matching entry wins. The `error` rules must
+# stay below the `ignore` rules or they do nothing at all.
+#
+# tests/test_deprecations.py backstops this at import time and proves the guard
+# still fires — see the docstring there before changing anything here.
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::PendingDeprecationWarning",
+  'error::DeprecationWarning:swing($|\.)',
+  'error::PendingDeprecationWarning:swing($|\.)',
+]
