@@ -22,20 +22,70 @@ The only timestamp anywhere is ``generated_at`` in ``report.html``, and the only
 wall-clock-derived *name* is the default run label — pass ``label=`` explicitly
 when you want two runs to be comparable byte for byte.
 
+There is a second, quieter clock: ``end`` falls back to ``date.today()`` when
+neither the argument nor ``backtest.end`` pins it. Nothing wall-clock reaches
+the output files that way — ``end`` is clipped to the last available bar — but
+the *request* moves, and asking for a window that ends today collapses the
+settled-history TTL to its three-day floor, which is the mechanism behind the
+REPRO-1 divergence above. Pin ``backtest.end`` for any run you intend to
+compare. A walk-forward run that does not is warned about at WARNING level;
+see :func:`run_backtest`.
+
 PROVENANCE
 ----------
-Three hashes answer "what exactly produced this?":
+Four hashes answer "what exactly produced this?":
 
-* ``config_hash`` — SHA-256 over the strategy, backtest and gates settings. Two
+* ``config_hash``   — SHA-256 over the strategy, backtest and gates settings. Two
   reports with the same hash were run with the same rules.
-* ``code_ref``    — ``git rev-parse HEAD``, or ``"unknown"`` outside a checkout.
-* ``data_hash``   — SHA-256 over each symbol's (last bar date, row count). Cheap
+* ``code_ref``      — ``git rev-parse HEAD``, or ``"unknown"`` outside a checkout.
+* ``data_hash``     — SHA-256 over each symbol's (last bar date, row count). Cheap
   to compute, and it changes the moment the underlying data does.
+* ``earnings_hash`` — SHA-256 over the announcement dates the run consumed.
+
+The fourth is newer than the other three and exists because of a specific
+incident (audit REPRO-1). Earnings dates feed ``earnings_blackout``, which is
+part of the entry gate, so a re-download that moves one date moves the trade
+list — and none of the first three hashes can see it. Two runs of the *same*
+control diverged, 685 trades at PF 1.0663 against 717 at PF 1.0523, with
+identical ``config_hash``, ``data_hash`` **and** ``code_ref``, because the
+earnings cache silently refetched between them. Contract 11 and AC9 promise
+reproducibility; until this hash existed that promise was not checkable.
 
 ``summary.json`` additionally spells out ``tuning_grid``: the candidate values
 the walk-forward was allowed to choose between, whether or not they came from
 config. A hash tells you two reports differ; this tells you *how* the search
 differed, which is the thing most likely to explain a flattering number.
+
+EARNINGS COVERAGE, NOT AN EARNINGS FLAG
+----------------------------------------
+A hash says whether two runs read the same dates. It does not say whether there
+were *any*, and that number moves enormously: the historical earnings cache
+went from 8% populated to 99.7% populated in the course of a single afternoon,
+because a cold cache fills in over successive runs. A run against either state
+recorded exactly the same thing — ``earnings_blackout_simulated: true`` — while
+one of them applied the blackout to fewer than one symbol in ten.
+
+So every run publishes an ``earnings`` block counting how many of the symbols
+it asked about actually had a usable date, as a count and a percentage. A
+reader has to be able to tell "the blackout applied to 8% of the universe" from
+"the blackout applied", and no boolean can carry that: coverage is a matter of
+degree, so it is reported as a degree.
+
+ETFs are excluded from the denominator, because an ETF does not announce
+earnings and is therefore not a coverage hole. On the shipping universe they
+are 137 of the 142 symbols with no dates, so leaving them in would report 91%
+coverage where the truth for symbols that can announce is 99.7% — and would put
+a permanent "results are optimistic" banner on the ETF-only run, the one run in
+this repo that is *free* of the biases such a banner is about (docs §7.4).
+
+``earnings_blackout_simulated`` survives as a compatibility key — ``report.py``
+renders its warning off it — and now means what its name says: the blackout
+mechanism actually operated. That is a real tightening, because the old key
+read ``true`` for a stone-cold cache that returned nothing at all, purely
+because the provider *had* a history endpoint. It is deliberately not "every
+symbol was covered": a handful of names have no free announcement history and
+never will, so an all-or-nothing flag would warn on every stocks run forever,
+and a banner that is always on is one nobody reads.
 
 ABLATIONS
 ---------
@@ -85,7 +135,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -113,11 +163,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "ABLATION_PREFIX",
     "DAYS_PER_YEAR",
+    "EARNINGS_FROM_HISTORY",
+    "EARNINGS_FROM_UPCOMING",
+    "EARNINGS_HASH_UNAVAILABLE",
+    "EARNINGS_UNAVAILABLE",
     "FLOAT_PRECISION",
     "LABEL_PATTERN",
     "UNIVERSE_CHOICES",
     "config_hash",
     "data_hash",
+    "earnings_block",
     "membership_block",
     "run_backtest",
     "write_report",
@@ -127,6 +182,25 @@ log = logging.getLogger(__name__)
 
 #: Decimal places every float is rounded to before being written.
 FLOAT_PRECISION = 6
+
+#: ``earnings.source`` — the provider supplied *historical* announcement dates,
+#: so a historical bar inside a blackout was blocked the way the live scanner
+#: would have blocked it. Says nothing about how many symbols had any.
+EARNINGS_FROM_HISTORY = "history"
+
+#: ``earnings.source`` — the provider knows only each symbol's *next* date. That
+#: cannot block a single historical bar, so the blackout the live scanner
+#: applies is simply absent from the simulation (contract amendment A12).
+EARNINGS_FROM_UPCOMING = "upcoming_only"
+
+#: ``earnings.source`` — the lookup failed outright and nothing was returned.
+EARNINGS_UNAVAILABLE = "unavailable"
+
+#: ``earnings_hash`` when the digest itself could not be computed — the same
+#: escape hatch, and the same reasoning, as ``code_ref``'s ``"unknown"``. It is
+#: deliberately not 64 hex characters, so it can never be mistaken for a digest
+#: or collide with one.
+EARNINGS_HASH_UNAVAILABLE = "unavailable"
 
 #: A run label is one directory name: letters, digits, dot, dash, underscore.
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -193,6 +267,32 @@ def config_hash(cfg: Config) -> str:
         # different universe, which is a different experiment.
         payload["backtest"].pop("membership", None)
         payload["backtest"].pop("membership_unknown", None)
+    else:
+        # `[universe] membership_bounded` decides whether a join date a source
+        # states only as an upper bound is read as that date or as no date at
+        # all, and it moves the simulation hard: on the shipping files it takes
+        # vouchable exposure from 12,807 member-years to 8,672 (53.2% of
+        # nominal down to 36.0%) and symbols with no usable join date from 96
+        # to 350. It lives in `[universe]` rather than `[backtest]`, so the
+        # three-section enumeration above cannot see it, and two point-in-time
+        # runs differing only in this policy hashed identically — the same
+        # invisible-dependency failure as the earnings history, and it would
+        # have corrupted the next comparison the same way.
+        #
+        # Reached from `[universe]` rather than by moving the field, because
+        # the field belongs where it is: it describes how to read the
+        # membership files, which `swing scan` also does. Precedent is right
+        # here in this function — `account` and `regime` are already narrow
+        # slices lifted out of sections this hash does not otherwise cover.
+        #
+        # Only while the mode is ON, for the same reason `membership_unknown`
+        # is dropped while it is off: with no windows built the policy cannot
+        # change what the strategy did, and hashing it anyway would break every
+        # report ever written. It does still move the *diagnostic* member-year
+        # figures in an `off` run's summary, which is a statement about the
+        # files rather than about the run, and `config_hash` has never claimed
+        # to cover those.
+        payload["universe"] = {"membership_bounded": cfg.universe.membership_bounded}
     payload["account"] = {
         "max_positions": cfg.account.max_positions,
         "risk_pct": cfg.account.risk_pct,
@@ -351,15 +451,21 @@ def _load_bars(
 
 def _load_earnings(
     cfg: Config, symbols: Sequence[str], start: date, end: date
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], str]:
     """Best-effort earnings dates; a provider failure degrades to "unknown".
 
-    Returns ``(dates_by_symbol, simulated)``. ``simulated`` is True only when
-    the provider could supply *historical* announcement dates (contract
-    amendment A12). A provider that only knows the next upcoming date cannot
-    block a single historical bar, so the blackout the live scanner applies is
-    simply not present in the backtest — the summary carries the flag so that
-    divergence is declared rather than assumed away (audit BUG-036).
+    Returns ``(dates_by_symbol, source)``, where ``source`` is one of
+    :data:`EARNINGS_FROM_HISTORY`, :data:`EARNINGS_FROM_UPCOMING` or
+    :data:`EARNINGS_UNAVAILABLE`. Only the first can block a historical bar
+    (contract amendment A12); a provider that knows just the next upcoming date
+    leaves the blackout the live scanner applies simply absent from the
+    backtest, and the summary says so rather than assuming it away (BUG-036).
+
+    ``source`` is a three-way string rather than the boolean this used to
+    return because the boolean was doing two jobs and getting the second one
+    wrong: it distinguished "historical" from "not historical" correctly, and
+    was then read as "the blackout ran", which it never meant. What ran is a
+    matter of coverage, and coverage is counted in :func:`earnings_block`.
     """
     from swing.data import get_provider
 
@@ -367,15 +473,156 @@ def _load_earnings(
         provider = get_provider(cfg)
         history = getattr(provider, "earnings_history", None)
         if callable(history):
-            return dict(history(list(symbols), start, end)), True
-        return dict(provider.earnings_dates(list(symbols))), False
+            return dict(history(list(symbols), start, end)), EARNINGS_FROM_HISTORY
+        return dict(provider.earnings_dates(list(symbols))), EARNINGS_FROM_UPCOMING
     except Exception as exc:  # noqa: BLE001 - earnings are optional, never fatal
         log.warning(
             "Could not load earnings dates (%s); the backtest will run without an earnings "
             "blackout, which slightly overstates results.",
             exc,
         )
-        return {}, False
+        return {}, EARNINGS_UNAVAILABLE
+
+
+def _announcement_days(value: Any) -> tuple[date, ...]:
+    """One provider value as sorted, unique calendar days — never raising.
+
+    Deliberately the same reading as the private helper behind
+    :func:`~swing.data.cache.earnings_fingerprint`, so the coverage counts and
+    the digest can never disagree about what "has a date" means: ``None``,
+    ``pd.NaT``, ``()`` and absent all come back empty, a lone date-ish scalar
+    comes back as one day, and an iterable is de-duplicated with its missing
+    entries dropped.
+
+    One difference, and it is on purpose. The fingerprint raises on a value it
+    cannot read, because a digest that guessed would be a false claim about
+    what was consumed. This counts such a value as *no dates* instead: it feeds
+    a diagnostic, the conservative reading understates coverage rather than
+    overstating it, and :func:`_load_earnings` has never let a vendor's bad day
+    be fatal.
+    """
+    from swing.data.provider import as_date
+
+    if value is None or value is pd.NaT:
+        return ()
+    try:
+        if isinstance(value, str | date | datetime):  # pd.Timestamp subclasses datetime
+            return (as_date(value),)
+        if isinstance(value, Iterable):
+            return tuple(
+                sorted({as_date(item) for item in value if item is not None and item is not pd.NaT})
+            )
+        return (as_date(value),)
+    except (TypeError, ValueError):
+        return ()
+
+
+def earnings_block(
+    symbols: Sequence[str],
+    earnings: Mapping[str, Any],
+    source: str,
+    *,
+    is_etf: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
+    """The ``summary.json`` block saying how much earnings data this run actually had.
+
+    Replaces a boolean that was technically accurate and practically useless.
+    ``earnings_blackout_simulated: true`` meant "the provider exposes historical
+    announcement dates", and every reader took it to mean "the blackout ran" —
+    but the same ``true`` covered a cache that was 8% populated and one that was
+    99.7% populated, states this repo's own cache passed through hours apart.
+    The summary said the mechanism was present; how much of the universe it
+    reached was nowhere in the record.
+
+    So this reports the thing a reader needs to weigh the result — how much of
+    the universe the blackout could touch — as counts and a percentage:
+
+    * ``symbols_requested``  — every symbol the run asked about.
+    * ``symbols_exempt``     — the ETFs among them. An ETF does not announce
+      earnings, so it is not a coverage hole and must not be counted as one:
+      leaving ETFs in the denominator puts a "results are optimistic" warning
+      on the ETF-only run, which is the one run in this repo that is *free* of
+      the biases the warning is about (§7.4).
+    * ``symbols_applicable`` — requested minus exempt. The blackout's real
+      denominator.
+    * ``symbols_with_dates`` — applicable symbols that came back with at least
+      one usable day.
+    * ``symbols_without_dates`` — the rest, and the number that matters: these
+      went through the entry gate with no blackout in it.
+    * ``coverage_pct``       — with-dates as a percentage of applicable.
+    * ``announcements``      — total distinct days across the universe. Worth
+      having beside the symbol count, because one date over a sixteen-year
+      window and sixty-four of them both read as "covered" and are not the
+      same thing.
+
+    Coverage is counted over the symbols the run *asked* about, never over the
+    keys the provider answered with. A symbol that came back empty is a symbol
+    the blackout did not cover, and dropping it from the denominator would turn
+    a coverage problem into a perfect score.
+
+    ``source`` rides along because coverage alone cannot express the A12 case:
+    a provider that returns every symbol's next upcoming date scores 100%
+    coverage and still blocks no historical bar.
+
+    Args:
+        symbols: the symbols the run asked the provider about.
+        earnings: what came back, in either shape ``_load_earnings`` returns.
+        source: one of :data:`EARNINGS_FROM_HISTORY`,
+            :data:`EARNINGS_FROM_UPCOMING`, :data:`EARNINGS_UNAVAILABLE`.
+        is_etf: per-symbol ETF flag, the same mapping the engine is handed. A
+            symbol missing from it is treated as a stock, which is the
+            conservative reading: it stays in the denominator.
+    """
+    etfs = {str(key).strip().upper(): bool(flag) for key, flag in (is_etf or {}).items()}
+    lookup = {str(key).strip().upper(): value for key, value in earnings.items()}
+    requested = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    applicable = [symbol for symbol in requested if not etfs.get(symbol, False)]
+
+    days = [_announcement_days(lookup.get(symbol)) for symbol in applicable]
+    covered = sum(1 for entry in days if entry)
+
+    return {
+        "source": source,
+        "symbols_requested": len(requested),
+        "symbols_exempt": len(requested) - len(applicable),
+        "symbols_applicable": len(applicable),
+        "symbols_with_dates": covered,
+        "symbols_without_dates": len(applicable) - covered,
+        "coverage_pct": 100.0 * covered / len(applicable) if applicable else 0.0,
+        "announcements": sum(len(entry) for entry in days),
+    }
+
+
+def _earnings_hash(symbols: Sequence[str], earnings: Mapping[str, Any]) -> str:
+    """:func:`~swing.data.earnings_fingerprint`, degrading rather than dying.
+
+    The fingerprint refuses a value it cannot read as a date, which is right
+    for a digest and wrong as a way to end a forty-minute run: earnings are
+    optional everywhere else in this file, and a vendor returning one piece of
+    nonsense must not destroy the simulation that already completed around it.
+    So an unreadable payload costs the hash, loudly, and nothing else — the
+    same bargain :func:`code_ref` strikes with a missing git.
+
+    Not a hypothetical divergence. ``swing.strategy.rules`` normalises
+    announcements with ``pd.Timestamp``, which reads a large integer as
+    nanoseconds since the epoch, while ``as_date`` under the fingerprint
+    refuses to guess at one. A provider returning epoch integers therefore
+    yields a run that simulates a real blackout and a digest that cannot be
+    computed, and the run is the part worth keeping.
+    """
+    from swing.data import earnings_fingerprint
+
+    try:
+        return earnings_fingerprint(symbols, earnings)
+    except Exception as exc:  # noqa: BLE001 - a missing hash beats a lost run
+        log.warning(
+            "Could not fingerprint the earnings dates (%s), so this report records "
+            "earnings_hash=%r. The run itself is unaffected, but it cannot be checked for "
+            "reproducibility against another run — re-run it once the provider is behaving.",
+            exc,
+            EARNINGS_HASH_UNAVAILABLE,
+        )
+        return EARNINGS_HASH_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +668,14 @@ def membership_block(
     as ``symbols_ungated`` and appear in neither figure; an ETF-only run reports
     zero member-years, which is the correct answer rather than a missing one.
 
+    Two of the keys describe the *evidence* rather than the run.
+    ``bounded_policy`` and ``symbols_bounded_join`` say how a join date stated
+    only as an upper bound was read and how many symbols that decided, and
+    ``stint_date_quality`` counts rows of the membership files by how well
+    dated they are. The composition is a property of the files, so it does not
+    move when a policy does — which is exactly why it is worth printing beside
+    a point-in-time number that does.
+
     An unreadable membership file does **not** stop the run — this block is
     provenance, not simulation input, and a diagnostic must never be the thing
     that kills forty minutes of work. It degrades to an ``error`` key instead,
@@ -456,6 +711,10 @@ def membership_block(
             "mode": mode,
             "applied": False,
             "unknown_policy": policy,
+            # Both policies come from config rather than from the file, so they
+            # are still knowable when the file is not, and a reader of a
+            # degraded block can still see which reading was asked for.
+            "bounded_policy": cfg.universe.membership_bounded,
             "error": str(exc),
         }
 
@@ -483,10 +742,40 @@ def membership_block(
         "symbols_policy_sensitive": policy_sensitive,
         "symbols_unknown_join": coverage.unknown_join,
         "symbols_no_membership_row": coverage.no_membership_row,
+        # Which reading of an upper-bound date produced every count above, and
+        # how many symbols it decided. A bounded join sits inside
+        # `symbols_unknown_join` under the "unknown" policy and inside the
+        # stated ones under "exact", so this is the size of that choice in the
+        # same sense `symbols_policy_sensitive` is for the other one.
+        "bounded_policy": coverage.bounded_policy,
+        "symbols_bounded_join": coverage.bounded_join,
         "join_date_coverage_pct": coverage.coverage_pct,
         "join_date_coverage": {
             source: {"members": members, "with_join_date": stated}
             for source, members, stated in coverage.by_source
+        },
+        # How much of the underlying evidence is approximate, counted over rows
+        # of the membership files rather than over this run's symbols. It does
+        # not move with either policy — a file that is half upper bounds is
+        # half upper bounds whatever a run decides to do about it — and on the
+        # shipping files most stints rest on an approximation. Published
+        # because a reader should be able to see that from the report instead
+        # of discovering it in a log line.
+        "stint_date_quality": {
+            "stints": coverage.stints,
+            "exact": coverage.stints_exact,
+            "bounded": coverage.stints_bounded,
+            "undated": coverage.stints_undated,
+            "approximate_pct": coverage.approximate_pct,
+            "by_source": {
+                counts.source: {
+                    "stints": counts.stints,
+                    "exact": counts.exact,
+                    "bounded": counts.bounded,
+                    "undated": counts.undated,
+                }
+                for counts in coverage.by_source_stints
+            },
         },
         "member_years": point_in_time if applied else nominal,
         "member_years_point_in_time": point_in_time,
@@ -720,6 +1009,26 @@ def run_backtest(
 
     run_start = start or cfg.backtest.start
     run_end = end or cfg.backtest.end or date.today()
+    if walkforward and end is None and cfg.backtest.end is None:
+        # Not a behaviour change and not a mistake to make a research run this
+        # way — but it is the mechanism behind the REPRO-1 divergence, so it is
+        # said out loud rather than left in the docs. Asking for a window that
+        # ends today means asking for earnings dates that are not yet settled,
+        # which collapses the settled-history TTL to its three-day floor; the
+        # cache then refetches under a later run and the "same" comparison
+        # quietly reads different announcement dates. Warned only for a
+        # walk-forward run: those are the ones the gate reads and the ones
+        # ablations compare against each other.
+        log.warning(
+            "This walk-forward run ends today (%s) because neither --end nor backtest.end is "
+            "set. Nothing is wrong with the run, but it is not safely comparable with another: "
+            "an unsettled window keeps the earnings cache on its 3-day floor, so a later run of "
+            "the same config can read different announcement dates and produce different trades "
+            "under an identical config_hash and data_hash (audit REPRO-1). Pin backtest.end to "
+            "a settled date for any run you intend to compare, and check earnings_hash in "
+            "summary.json matches before believing a difference.",
+            run_end.isoformat(),
+        )
     # Data always starts at data.start_date, whatever the simulation window is:
     # indicators need a year of warm-up before the first simulated bar, and a
     # walk-forward fold three years in still needs everything before it.
@@ -731,7 +1040,24 @@ def run_backtest(
             "the data provider and the cache directory."
         )
     emit(f"Loaded {len(bars)} symbols with data.")
-    earnings, earnings_simulated = _load_earnings(cfg, sorted(bars), cfg.data.start_date, run_end)
+    # Counted over the symbols that actually had bars rather than the ones the
+    # config asked for, matching `n_symbols` and the membership block: this is
+    # the set the entry gate ran over, so it is the set coverage is a fraction
+    # of. Both the block and the hash below read the same list.
+    earnings_symbols = sorted(bars)
+    earnings, earnings_source = _load_earnings(cfg, earnings_symbols, cfg.data.start_date, run_end)
+    earnings_coverage = earnings_block(earnings_symbols, earnings, earnings_source, is_etf=is_etf)
+    log.info(
+        "Earnings blackout coverage: %d of %d symbols that can announce (%.1f%%) had at least "
+        "one usable announcement date, %d in total, from source %r. Entries for the other %d "
+        "were gated with no blackout at all.",
+        earnings_coverage["symbols_with_dates"],
+        earnings_coverage["symbols_applicable"],
+        earnings_coverage["coverage_pct"],
+        earnings_coverage["announcements"],
+        earnings_source,
+        earnings_coverage["symbols_without_dates"],
+    )
 
     last_bar = max(frame.index[-1].date() for frame in bars.values())
     effective_end = min(run_end, last_bar)
@@ -770,7 +1096,35 @@ def run_backtest(
         "start": run_start.isoformat(),
         "end": effective_end.isoformat(),
         "walkforward": bool(walkforward),
-        "earnings_blackout_simulated": bool(earnings_simulated),
+        # How much of the universe the earnings blackout could actually touch,
+        # as numbers rather than as a claim. See `earnings_block`.
+        "earnings": earnings_coverage,
+        # Retained for readers written against the old schema — `report.py`
+        # renders its "no historical announcement dates were available" banner
+        # off this key — and redefined to mean what its name says: the blackout
+        # mechanism actually operated in this run. The old key meant only "the
+        # provider exposes a history endpoint", which is equally true of a
+        # completely cold cache that returned nothing whatsoever, and that is
+        # the case this tightening catches.
+        #
+        # Deliberately NOT "every symbol was covered". Five S&P names (CWEN-A,
+        # MCRI, MFP, PAYX, SEI) have no announcement history from the free
+        # provider and are unlikely ever to get one, so an all-or-nothing flag
+        # would put a permanent banner on every stocks run — and a banner that
+        # is always on is a banner nobody reads, which would bury the real
+        # signal more thoroughly than the old flag ever did. Partial coverage
+        # is a matter of degree; degree is what the `earnings` block is for,
+        # and a boolean that tried to carry it would only be precise by being
+        # useless.
+        #
+        # The `symbols_applicable == 0` arm keeps the ETF-only run quiet: with
+        # nothing in the universe that announces earnings the blackout is not
+        # missing, it is inapplicable — and a spurious warning on the
+        # survivorship lower bound (§7.4) would be its own kind of dishonesty.
+        "earnings_blackout_simulated": (
+            earnings_source == EARNINGS_FROM_HISTORY and earnings_coverage["symbols_with_dates"] > 0
+        )
+        or earnings_coverage["symbols_applicable"] == 0,
         "n_symbols": len(bars),
         "initial_equity": float(cfg.backtest.initial_equity),
         # Which universe this run really traded, and how much of it a
@@ -784,6 +1138,12 @@ def run_backtest(
         "config_hash": config_hash(cfg),
         "code_ref": code_ref(),
         "data_hash": data_hash(bars),
+        # The fourth hash. `data_hash` covers the price bars and nothing else,
+        # so before this existed two runs could agree on all three of the
+        # others and still trade differently, because the earnings cache had
+        # refetched between them (audit REPRO-1). Two reports are the same
+        # experiment only if all four match.
+        "earnings_hash": _earnings_hash(earnings_symbols, earnings),
         "costs": {
             "slippage_bps": float(cfg.backtest.slippage_bps),
             "spread_atr_frac": float(cfg.backtest.spread_atr_frac),

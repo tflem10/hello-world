@@ -476,6 +476,58 @@ def test_every_summary_says_which_universe_it_traded(tmp_path, wired):
     assert block["symbols_excluded"] == 0
 
 
+def test_the_membership_block_publishes_the_date_quality_behind_it(tmp_path, wired):
+    """The composition of the evidence, not just the mode that read it.
+
+    A point-in-time number is only as good as the dates under it, and most of
+    the stints under this one rest on an upper bound rather than a stated day.
+    Published so a reader sees that beside the result instead of discovering it
+    in a log line.
+    """
+    block = membership_of(tmp_path, label="membership-quality")
+
+    assert block["bounded_policy"] == "unknown", "the conservative default moved"
+    assert block["symbols_bounded_join"] >= 0
+
+    quality = block["stint_date_quality"]
+    # Rows of the real membership files, so no exact figures are asserted —
+    # those CSVs belong to another package and move when it rebuilds them.
+    assert quality["stints"] == quality["exact"] + quality["bounded"] + quality["undated"]
+    if quality["stints"]:
+        share = 100.0 * (quality["bounded"] + quality["undated"]) / quality["stints"]
+        assert quality["approximate_pct"] == pytest.approx(share, abs=1e-6)
+    assert set(quality["by_source"]) <= {"sp500", "sp400", "sp600"}
+
+
+def test_the_date_quality_describes_the_files_not_the_policy(tmp_path, wired):
+    """It must not move when a policy moves: a file is what it is."""
+    strict = membership_of(tmp_path, label="quality-strict")
+    loose = membership_of(
+        tmp_path,
+        runner_cfg(tmp_path, universe={"membership_bounded": "exact"}),
+        label="quality-loose",
+    )
+
+    assert strict["bounded_policy"] == "unknown"
+    assert loose["bounded_policy"] == "exact"
+    assert strict["stint_date_quality"] == loose["stint_date_quality"]
+
+
+def test_a_degraded_membership_block_still_names_both_policies(tmp_path, wired, monkeypatch):
+    """Both come from config, so they survive an unreadable file."""
+    from swing.universe import UniverseError
+
+    def broken(cfg, **kwargs):
+        raise UniverseError("sp500-membership.csv is missing")
+
+    monkeypatch.setattr("swing.universe.membership_coverage", broken)
+    block = membership_of(tmp_path, label="quality-degraded")
+
+    assert block["error"]
+    assert block["unknown_policy"] == "exclude"
+    assert block["bounded_policy"] == "unknown"
+
+
 def test_the_membership_block_separates_gated_stocks_from_ungated_etfs(tmp_path, wired):
     """AAA is an S&P 500 stock; BBB is an ETF and was never in an index."""
     block = membership_of(tmp_path, label="membership-counts")
@@ -1065,6 +1117,41 @@ def test_the_shipping_config_still_hashes_to_what_it_always_did(tmp_path):
     )
 
 
+def test_the_bounded_date_policy_reaches_the_hash_when_membership_is_enforced(tmp_path):
+    """``[universe] membership_bounded`` changes results, so it must change the hash.
+
+    It decides whether a join date a source states only as an upper bound is
+    read as that date or as no date at all, and on the shipping membership
+    files that moves vouchable exposure from 12,807 member-years to 8,672 and
+    symbols with no usable join date from 96 to 350. It lives in ``[universe]``,
+    which ``config_hash`` does not otherwise enumerate, so two point-in-time
+    runs differing only in this policy used to hash identically — the same
+    invisible-dependency failure as the earnings history.
+    """
+    enforced = {"membership": "point_in_time"}
+    strict = build_config(tmp_path, backtest=enforced, universe={"membership_bounded": "unknown"})
+    loose = build_config(tmp_path, backtest=enforced, universe={"membership_bounded": "exact"})
+
+    assert strict.universe.membership_bounded == "unknown", "the conservative default moved"
+    assert config_hash(strict) != config_hash(loose), (
+        "two point-in-time runs reading bounded join dates differently are different "
+        "experiments and must not share a config_hash"
+    )
+
+
+def test_the_bounded_date_policy_is_invisible_while_membership_is_off(tmp_path):
+    """Inert knobs stay out, exactly as ``membership_unknown`` does.
+
+    With no windows built the policy cannot change what the strategy did, and
+    hashing it anyway would retire every report ever written.
+    """
+    base = build_config(tmp_path)
+    flipped = build_config(tmp_path, universe={"membership_bounded": "exact"})
+
+    assert base.backtest.membership == "off"
+    assert config_hash(flipped) == config_hash(base) == SHIPPING_CONFIG_HASH
+
+
 def test_an_unset_or_default_tuning_grid_does_not_move_the_hash(tmp_path):
     """Same rules, same hash: the knob's default must be invisible to provenance."""
     base = build_config(tmp_path)
@@ -1477,12 +1564,39 @@ def test_a_walkforward_report_does_call_its_chart_out_of_sample(tmp_path, wf_wir
 # ---------------------------------------------------------------------------
 
 
+#: ``INSTRUMENTS`` has BBB down as an ETF, and an ETF never announces earnings,
+#: so it is exempt from the coverage denominator. Coverage arithmetic needs two
+#: symbols that can actually announce.
+STOCK_INSTRUMENTS = [
+    Instrument(symbol="AAA", name="Alpha", kind="stock", source="sp500"),
+    Instrument(symbol="BBB", name="Beta", kind="stock", source="sp500"),
+]
+
+
+def with_earnings(monkeypatch, history, instruments=None):
+    """Wire a provider whose ``earnings_history`` returns ``history``.
+
+    ``history`` is either a mapping to serve verbatim or a callable taking the
+    requested symbol list. Returns the provider so a test can read back what
+    was asked of it.
+    """
+    provider = FakeProvider(fake_universe())
+    provider.earnings_history = lambda symbols, start, end: (
+        history(list(symbols)) if callable(history) else dict(history)
+    )
+    wanted = list(INSTRUMENTS if instruments is None else instruments)
+    monkeypatch.setattr("swing.universe.load", lambda cfg: wanted)
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, _p=provider, **kw: _p)
+    return provider
+
+
 def test_a_provider_without_earnings_history_declares_the_divergence(tmp_path, wired):
     """The FakeProvider only knows the next upcoming date, like yfinance did."""
     cfg = runner_cfg(tmp_path)
     directory = go(cfg, label="no-history")
     summary = json.loads((directory / "summary.json").read_text())
 
+    assert summary["earnings"]["source"] == runner.EARNINGS_FROM_UPCOMING
     assert summary["earnings_blackout_simulated"] is False
     assert "Earnings blackout not simulated" in (directory / "report.md").read_text()
     assert "Earnings blackout NOT simulated" in (directory / "report.html").read_text()
@@ -1490,22 +1604,20 @@ def test_a_provider_without_earnings_history_declares_the_divergence(tmp_path, w
 
 def test_a_provider_with_earnings_history_is_used_and_not_flagged(tmp_path, monkeypatch):
     """A12: when real announcement dates exist the runner passes SEQUENCES through."""
-    provider = FakeProvider(fake_universe())
     seen: dict[str, object] = {}
 
-    def earnings_history(symbols, start, end):
+    def earnings_history(symbols):
         seen["symbols"] = list(symbols)
-        seen["window"] = (start, end)
         return {symbol: (date(2021, 3, 1), date(2021, 6, 1)) for symbol in symbols}
 
-    provider.earnings_history = earnings_history
-    monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
-    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: provider)
+    with_earnings(monkeypatch, earnings_history)
 
     cfg = runner_cfg(tmp_path)
     directory = go(cfg, label="with-history")
     summary = json.loads((directory / "summary.json").read_text())
 
+    assert summary["earnings"]["source"] == runner.EARNINGS_FROM_HISTORY
+    # Every requested symbol had dates, so the strict flag is legitimately true.
     assert summary["earnings_blackout_simulated"] is True
     assert seen["symbols"] == ["AAA", "BBB"]
     assert "Earnings blackout not simulated" not in (directory / "report.md").read_text()
@@ -1523,51 +1635,349 @@ def test_a_broken_earnings_history_endpoint_still_does_not_stop_the_run(tmp_path
 
     cfg = runner_cfg(tmp_path)
     directory = go(cfg, label="history-broken")
-    assert json.loads((directory / "summary.json").read_text())["earnings_blackout_simulated"] is (
-        False
-    )
+    summary = json.loads((directory / "summary.json").read_text())
+    assert summary["earnings"]["source"] == runner.EARNINGS_UNAVAILABLE
+    assert summary["earnings_blackout_simulated"] is False
     assert pd.read_csv(directory / "trades.csv").shape[0] > 0
 
 
-def test_the_identity_triple_does_not_pin_the_earnings_history(tmp_path, monkeypatch):
-    """A known reproducibility hole, pinned so it is discovered on purpose next time.
+# ---------------------------------------------------------------------------
+# REPRO-1 — the earnings dependency is visible in the record
+#
+# The hole these close: earnings dates feed `earnings_blackout`, which is part
+# of the entry gate, and `config_hash` / `data_hash` / `code_ref` could all
+# match while the dates underneath had moved. It cost a real comparison — two
+# runs of one control, 685 trades at PF 1.0663 against 717 at PF 1.0523, every
+# hash identical, because the cache refetched between them.
+# ---------------------------------------------------------------------------
 
-    Historical earnings drive ``earnings_blackout``, which is part of the entry
-    gate — but nothing in the identity triple covers them. ``data_hash`` scans
-    price bars only, and ``earnings_blackout_simulated`` records *whether*
-    dates were available, not *which*. Two runs can therefore agree on
-    ``config_hash`` and ``data_hash`` and still produce different trades.
 
-    This is not hypothetical: it invalidated a first attempt at the §7.1
-    measurement when the three-day earnings TTL expired mid-comparison and
-    1,504 symbols were re-fetched. Whoever closes it should delete this test
-    and assert the opposite.
+def test_the_summary_records_a_hash_of_the_earnings_it_read(tmp_path, monkeypatch):
+    with_earnings(monkeypatch, lambda symbols: dict.fromkeys(symbols, (date(2021, 3, 1),)))
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="earnings-hashed") / "summary.json").read_text()
+    )
+
+    digest = summary["earnings_hash"]
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
+    # Beside the other three, not instead of them: all four have to match for
+    # two reports to be the same experiment.
+    assert len(summary["data_hash"]) == len(summary["config_hash"]) == 64
+
+
+def test_two_runs_over_the_same_earnings_hash_identically(tmp_path, monkeypatch):
+    """The claim AC9 makes, now checkable for the fourth input as well."""
+    digests = []
+    for label in ("repro-a", "repro-b"):
+        with_earnings(monkeypatch, lambda symbols: dict.fromkeys(symbols, (date(2021, 3, 1),)))
+        directory = go(runner_cfg(tmp_path), label=label)
+        digests.append(json.loads((directory / "summary.json").read_text())["earnings_hash"])
+
+    assert digests[0] == digests[1]
+
+
+def test_the_identity_hashes_now_pin_the_earnings_history(tmp_path, monkeypatch):
+    """The inversion of ``test_the_identity_triple_does_not_pin_...``, which this replaces.
+
+    That test existed to hold a known hole open until someone closed it, and
+    said in its own docstring that whoever did should assert the opposite. So:
+    two runs whose *only* difference is one announcement date still agree on
+    ``config_hash`` and ``data_hash`` — and now disagree on ``earnings_hash``,
+    which is the number that explains why the trades differ.
     """
-    bars = fake_universe()
     summaries = []
     for label, announcements in (
         ("earnings-a", (date(2021, 3, 1),)),
         ("earnings-b", (date(2021, 4, 15),)),
     ):
-        provider = FakeProvider(bars)
-        provider.earnings_history = lambda symbols, start, end, a=announcements: dict.fromkeys(
-            symbols, a
-        )
-        monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
-        monkeypatch.setattr("swing.data.get_provider", lambda cfg, _p=provider, **kw: _p)
+        with_earnings(monkeypatch, lambda symbols, a=announcements: dict.fromkeys(symbols, a))
         directory = go(runner_cfg(tmp_path), label=label)
         summaries.append((json.loads((directory / "summary.json").read_text()), traded(directory)))
 
     (first, trades_a), (second, trades_b) = summaries
-    # The triple says these two runs are the same experiment...
     assert first["data_hash"] == second["data_hash"]
     assert first["config_hash"] == second["config_hash"]
-    assert first["earnings_blackout_simulated"] == second["earnings_blackout_simulated"] is True
-    # ...and the trades say otherwise.
-    assert not trades_a.equals(trades_b), (
-        "the earnings history no longer leaks past the identity triple — if a fingerprint was "
-        "added, delete this test and assert reproducibility instead"
+    # The trades differ, as they always did...
+    assert not trades_a.equals(trades_b)
+    # ...and something in the record finally says so.
+    assert first["earnings_hash"] != second["earnings_hash"], (
+        "the earnings history is leaking past the identity hashes again: two runs read "
+        "different announcement dates, traded differently, and recorded the same provenance"
     )
+
+
+#: A value the strategy layer accepts and the fingerprint refuses, which is the
+#: whole reason the hash is computed defensively. ``rules._announcement_days``
+#: normalises with ``pd.Timestamp``, which reads a large integer as nanoseconds
+#: since the epoch — this one is 2020-09-13 — while ``as_date`` refuses to
+#: guess. So a provider handing back epoch integers produces a run that
+#: simulates a real blackout and a digest that cannot be computed.
+EPOCH_NANOS = 1_600_000_000_000_000_000
+
+
+def test_an_unreadable_earnings_payload_costs_the_hash_and_nothing_else(tmp_path, monkeypatch):
+    """A digest that cannot be computed must not destroy a completed simulation.
+
+    ``earnings_fingerprint`` refuses a value it cannot read as a date, which is
+    correct for a digest and would be a terrible way to end a forty-minute run
+    — earnings are optional everywhere else in the runner. The sentinel says
+    so in the one place that matters, and the report is written either way.
+    """
+    with_earnings(monkeypatch, lambda symbols: dict.fromkeys(symbols, [EPOCH_NANOS]))
+    directory = go(runner_cfg(tmp_path), label="earnings-garbage")
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["earnings_hash"] == runner.EARNINGS_HASH_UNAVAILABLE
+    assert len(summary["earnings_hash"]) != 64, "the sentinel must not look like a digest"
+    assert pd.read_csv(directory / "trades.csv").shape[0] > 0
+    # Unreadable reads as "no dates": the conservative direction for a coverage
+    # figure, and the same reading the digest took. It does mean this run's
+    # block understates a blackout the engine really did apply — the price of
+    # not letting a diagnostic guess.
+    assert summary["earnings"]["symbols_with_dates"] == 0
+
+
+# ---------------------------------------------------------------------------
+# REPRO-2 — coverage, because "the blackout applied" was not a true sentence
+# ---------------------------------------------------------------------------
+
+
+def test_the_summary_counts_how_much_of_the_universe_the_blackout_covered(tmp_path, monkeypatch):
+    """One of two symbols has dates, so the run must say 50% rather than "yes".
+
+    The denominator is the set of symbols the run *asked* about, not the keys
+    the provider happened to answer with — ``BBB`` is absent from the reply and
+    ``ZZZ`` was never requested. Counting the reply instead would turn a
+    coverage problem into a perfect score.
+    """
+    with_earnings(
+        monkeypatch,
+        {"AAA": (date(2021, 3, 1), date(2021, 6, 1)), "ZZZ": (date(2021, 4, 1),)},
+        instruments=STOCK_INSTRUMENTS,
+    )
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="coverage-half") / "summary.json").read_text()
+    )
+    block = summary["earnings"]
+
+    assert block["symbols_requested"] == 2
+    assert block["symbols_applicable"] == 2
+    assert block["symbols_with_dates"] == 1
+    assert block["symbols_without_dates"] == 1
+    assert block["coverage_pct"] == 50.0
+    # ZZZ's date is not in the universe and must not inflate the total.
+    assert block["announcements"] == 2
+
+
+def test_a_cold_cache_is_no_longer_reported_as_a_simulated_blackout(tmp_path, monkeypatch):
+    """The bug in one assertion.
+
+    A provider that *has* a history endpoint and returns nothing from it used
+    to stamp ``earnings_blackout_simulated: true`` and render no warning at
+    all, because the old flag recorded the endpoint's existence rather than its
+    output. Every entry in the run went through the gate unblocked.
+    """
+    with_earnings(monkeypatch, {}, instruments=STOCK_INSTRUMENTS)
+    directory = go(runner_cfg(tmp_path), label="coverage-cold")
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["earnings"]["source"] == runner.EARNINGS_FROM_HISTORY
+    assert summary["earnings"]["symbols_with_dates"] == 0
+    assert summary["earnings_blackout_simulated"] is False
+    assert "Earnings blackout not simulated" in (directory / "report.md").read_text()
+    assert "Earnings blackout NOT simulated" in (directory / "report.html").read_text()
+
+
+def test_partial_coverage_is_reported_as_a_degree_not_as_a_banner(tmp_path, monkeypatch):
+    """Half a universe covered is neither "applied" nor "not available".
+
+    The boolean deliberately does not try to carry this: five S&P names have no
+    free announcement history and never will, so an all-or-nothing flag would
+    warn on every stocks run forever and stop meaning anything. The degree
+    lives in the block, where a reader can weigh it.
+    """
+    with_earnings(monkeypatch, {"AAA": (date(2021, 3, 1),)}, instruments=STOCK_INSTRUMENTS)
+    directory = go(runner_cfg(tmp_path), label="coverage-partial")
+    summary = json.loads((directory / "summary.json").read_text())
+
+    assert summary["earnings"]["coverage_pct"] == 50.0
+    assert summary["earnings"]["symbols_without_dates"] == 1
+    assert summary["earnings_blackout_simulated"] is True
+
+
+@pytest.mark.parametrize("nothing", [None, (), []])
+def test_the_spellings_of_no_dates_all_count_as_uncovered(tmp_path, monkeypatch, nothing):
+    """``None``, ``()`` and absent are one state, because the blackout cannot tell them apart."""
+    with_earnings(
+        monkeypatch,
+        {"AAA": (date(2021, 3, 1),), "BBB": nothing},
+        instruments=STOCK_INSTRUMENTS,
+    )
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="coverage-empty") / "summary.json").read_text()
+    )
+
+    assert summary["earnings"]["symbols_with_dates"] == 1
+    assert summary["earnings"]["coverage_pct"] == 50.0
+
+
+def test_etfs_are_exempt_from_the_coverage_denominator(tmp_path, monkeypatch):
+    """An ETF does not announce earnings, so it is not a coverage hole.
+
+    BBB is an ETF in the shared fixture and gets no dates. Counting it as
+    uncovered would report 50% for a run whose every announcing symbol was
+    fully covered.
+    """
+    with_earnings(monkeypatch, {"AAA": (date(2021, 3, 1),)})
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="coverage-etf-exempt") / "summary.json").read_text()
+    )
+    block = summary["earnings"]
+
+    assert block["symbols_requested"] == 2
+    assert block["symbols_exempt"] == 1
+    assert block["symbols_applicable"] == 1
+    assert block["coverage_pct"] == 100.0
+    assert summary["earnings_blackout_simulated"] is True
+
+
+def test_an_etf_only_run_is_not_warned_about_earnings_it_could_never_have(tmp_path, wired):
+    """The ETF-only run is the survivorship lower bound (§7.4); a false alarm on it is its own lie.
+
+    Nothing in the universe announces earnings, so every symbol that needed a
+    blackout got one — vacuously, but truthfully. The report must stay quiet
+    rather than claim the results are optimistic for want of data that does not
+    exist.
+    """
+    directory = go(runner_cfg(tmp_path), label="coverage-etf-only", universe="etf")
+    summary = json.loads((directory / "summary.json").read_text())
+    block = summary["earnings"]
+
+    assert block["symbols_applicable"] == 0
+    assert block["symbols_without_dates"] == 0
+    assert summary["earnings_blackout_simulated"] is True
+    assert "Earnings blackout not simulated" not in (directory / "report.md").read_text()
+    assert "Earnings blackout NOT simulated" not in (directory / "report.html").read_text()
+
+
+def test_full_coverage_reads_as_a_simulated_blackout(tmp_path, monkeypatch):
+    with_earnings(
+        monkeypatch,
+        lambda symbols: dict.fromkeys(symbols, (date(2021, 3, 1),)),
+        instruments=STOCK_INSTRUMENTS,
+    )
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="coverage-full") / "summary.json").read_text()
+    )
+
+    assert summary["earnings"]["coverage_pct"] == 100.0
+    assert summary["earnings"]["symbols_without_dates"] == 0
+    assert summary["earnings_blackout_simulated"] is True
+
+
+def test_upcoming_dates_are_never_a_simulated_blackout_however_complete(tmp_path, monkeypatch):
+    """A12 survives the rewrite: 100% coverage of *next* dates still blocks no historical bar."""
+    provider = FakeProvider(fake_universe())
+    provider.earnings_dates = lambda symbols: dict.fromkeys(symbols, date(2026, 3, 1))
+    monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: provider)
+
+    summary = json.loads(
+        (go(runner_cfg(tmp_path), label="coverage-upcoming") / "summary.json").read_text()
+    )
+
+    assert summary["earnings"]["source"] == runner.EARNINGS_FROM_UPCOMING
+    assert summary["earnings"]["coverage_pct"] == 100.0
+    assert summary["earnings_blackout_simulated"] is False
+
+
+def test_earnings_coverage_and_the_fingerprint_agree_on_what_a_date_is(tmp_path):
+    """The two readings must not drift apart.
+
+    ``earnings_block`` counts coverage and ``earnings_fingerprint`` digests the
+    dates, and they are separate implementations of "what counts as a usable
+    announcement". Pinned behaviourally rather than by importing the data
+    layer's private helper: anything the block counts as uncovered must also be
+    invisible to the digest.
+    """
+    from swing.data import earnings_fingerprint
+
+    universe = ["AAA", "BBB"]
+    for nothing in (None, (), [pd.NaT, None]):
+        block = runner.earnings_block(
+            universe, {"AAA": (date(2021, 3, 1),), "BBB": nothing}, runner.EARNINGS_FROM_HISTORY
+        )
+        assert block["symbols_with_dates"] == 1
+        assert earnings_fingerprint(universe, {"AAA": (date(2021, 3, 1),), "BBB": nothing}) == (
+            earnings_fingerprint(universe, {"AAA": (date(2021, 3, 1),)})
+        )
+
+
+def test_earnings_coverage_deduplicates_repeated_announcements(tmp_path):
+    """A vendor repeating a quarter is one announcement, matching the digest's reading."""
+    block = runner.earnings_block(
+        ["AAA"],
+        {"AAA": [date(2021, 3, 1), pd.Timestamp("2021-03-01"), "2021-03-01", date(2021, 6, 1)]},
+        runner.EARNINGS_FROM_HISTORY,
+    )
+    assert block["announcements"] == 2
+    assert block["symbols_with_dates"] == 1
+
+
+def test_an_empty_universe_reports_zero_coverage_rather_than_dividing_by_it(tmp_path):
+    block = runner.earnings_block([], {}, runner.EARNINGS_UNAVAILABLE)
+    assert block["symbols_requested"] == 0
+    assert block["symbols_applicable"] == 0
+    assert block["coverage_pct"] == 0.0
+
+
+def test_a_symbol_missing_from_the_etf_map_stays_in_the_denominator(tmp_path):
+    """The conservative reading: unknown kind counts as something that can announce."""
+    block = runner.earnings_block(
+        ["AAA", "BBB"], {"AAA": (date(2021, 3, 1),)}, runner.EARNINGS_FROM_HISTORY, is_etf={}
+    )
+    assert block["symbols_applicable"] == 2
+    assert block["symbols_without_dates"] == 1
+
+
+# ---------------------------------------------------------------------------
+# REPRO-2 — an unpinned window is the mechanism, so the runner says so
+# ---------------------------------------------------------------------------
+
+
+def test_a_walkforward_run_with_no_pinned_end_warns_that_it_is_not_comparable(
+    tmp_path, wf_wired, caplog
+):
+    """``end`` defaulting to today collapses the settled-history TTL to its floor.
+
+    Not a behaviour change — the default is deliberately left alone — but the
+    hazard is the one that produced the REPRO-1 divergence, so it is stated at
+    the point it happens rather than only in the docs.
+    """
+    cfg = runner_cfg(tmp_path, backtest={"is_years": 1, "oos_years": 1})
+    assert cfg.backtest.end is None
+    with caplog.at_level("WARNING", logger="swing.backtest.runner"):
+        go(cfg, label="unpinned", walkforward=True, start=date(2021, 6, 1), end=None)
+
+    assert "backtest.end" in caplog.text
+    assert "earnings" in caplog.text
+
+
+def test_a_pinned_end_does_not_warn(tmp_path, wf_wired, caplog):
+    cfg = runner_cfg(tmp_path, backtest={"is_years": 1, "oos_years": 1})
+    with caplog.at_level("WARNING", logger="swing.backtest.runner"):
+        go(cfg, label="pinned", walkforward=True, start=date(2021, 6, 1), end=date(2025, 5, 31))
+
+    assert "not safely comparable" not in caplog.text
+
+
+def test_a_non_walkforward_run_is_not_nagged(tmp_path, wired, caplog):
+    """The warning is scoped to the runs people compare: gate references and ablations."""
+    with caplog.at_level("WARNING", logger="swing.backtest.runner"):
+        go(runner_cfg(tmp_path), label="quick-look", end=None)
+
+    assert "not safely comparable" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

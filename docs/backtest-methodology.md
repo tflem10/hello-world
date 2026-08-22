@@ -28,6 +28,7 @@ than to eliminate it, because it cannot be eliminated with the data available.
    — incl. [7.1 Index-membership look-ahead, measured](#71-index-membership-look-ahead-measured-and-only-half-fixable-here)
 8. [The haircut convention and the deployment decision rule](#8-the-haircut-convention-and-the-deployment-decision-rule)
 9. [Reproducibility](#9-reproducibility)
+   — incl. [earnings coverage](#earnings-coverage-how-much-of-the-blackout-actually-ran)
 10. [The gate](#10-the-gate)
 11. [Known limitations](#11-known-limitations)
 
@@ -829,8 +830,9 @@ assumed:
   synthetic date on the first ineligible bar also blocks the **eight trading bars before it** (ten
   calendar days) — including the last eligible day, whose legitimate signal then disappears: on the
   fixture the correct mask yields one trade and this encoding yields none. The membership edge would
-  also move whenever that knob moved, and `earnings_blackout_simulated` would no longer mean what it
-  says.
+  also move whenever that knob moved, and neither `earnings_blackout_simulated` nor the
+  `earnings` coverage block would mean what it says — synthetic dates would be counted as
+  announcement coverage, inflating the one figure that exists to be honest about the gap.
 
 #### What the correction actually costs: the re-simulation
 
@@ -955,6 +957,43 @@ sits in. ETFs and `extra_symbols` are never index constituents, so they are coun
 appear in no member-year figure: an ETF-only run reports zero member-years, which is the correct
 answer rather than a missing one.
 
+Three further keys describe the **evidence** rather than the run. They arrived with the
+`[universe] membership_bounded` knob, which made a join date a three-state affair — stated exactly,
+stated only as an upper bound, or not stated at all — and they postdate the block quoted above.
+Measured today over the same 1,506-stock universe:
+
+```json
+"bounded_policy": "unknown",
+"symbols_bounded_join": 254,
+"stint_date_quality": {
+  "stints": 4106, "exact": 1688, "bounded": 1397, "undated": 1021,
+  "approximate_pct": 58.88943,
+  "by_source": {
+    "sp500": {"stints": 1004, "exact": 636, "bounded": 110, "undated": 258},
+    "sp400": {"stints": 1303, "exact": 576, "bounded": 384, "undated": 343},
+    "sp600": {"stints": 1799, "exact": 476, "bounded": 903, "undated": 420}
+  }
+}
+```
+
+`bounded_policy` says how a bounded join date was read; `symbols_bounded_join` says how many symbols
+that decided — the same kind of figure as `symbols_policy_sensitive`, for the other choice.
+
+**Those 254 symbols are why the two figures in the block above have moved.** `ablate-edgar-off` was
+written when a bound was read as the date itself, giving `symbols_unknown_join: 96` and
+`join_date_coverage_pct: 93.62`. The default is now `membership_bounded = "unknown"` — a bound is
+conservative at one end and permissive at the other, so only discarding it is conservative at both —
+and the same universe today reports **350** unknown joins and **76.76%** coverage. The report is
+quoted verbatim and is not wrong; it simply predates the policy. Re-running it would produce the
+larger, more honest numbers, and a different `config_hash`, which is exactly what that hash is for.
+
+`stint_date_quality` counts **rows of the membership files**, not symbols of this run, so unlike
+everything above it does not move when a policy moves: a file that is half upper bounds is half
+upper bounds whatever a run decides to do about it. **58.9% of all stints rest on an
+approximation**, and the concentration is very uneven — sp600 alone has 903 of its 1,799 stints
+resting on a bound, against sp500's 110 of 1,004. That is the ceiling on how precise any
+point-in-time answer here can be, so it belongs beside the answer rather than in a log line.
+
 An unreadable membership file does not stop the run — the block is provenance, not simulation input,
 and a diagnostic that can kill forty minutes of work is a worse bug than the one it reports on. It
 degrades to a single `error` key instead of to a row of zeros, so a reader can never mistake "we
@@ -964,12 +1003,15 @@ could not look" for "we looked and there is no bias".
 
 The knobs default to today's behaviour, and that was verified rather than asserted:
 
-- **`config_hash` is unchanged** — still `c6782f8d…` for the shipping configuration. Both new keys
-  are dropped from the hash payload while `membership = "off"`, on the same argument
-  [`[backtest.tuning_grid]`](#the-candidate-values-backtesttuning_grid) uses: a config that leaves
-  them alone, a config that spells the defaults out, and every report written before they existed
-  all describe the same experiment. Turning the mode on *does* move the hash, because a different
-  universe is a different experiment.
+- **`config_hash` is unchanged** — still `c6782f8d…` for the shipping configuration. All three
+  membership keys (`backtest.membership`, `backtest.membership_unknown` and
+  `universe.membership_bounded`) are dropped from the hash payload while `membership = "off"`, on
+  the same argument [`[backtest.tuning_grid]`](#the-candidate-values-backtesttuning_grid) uses: a
+  config that leaves them alone, a config that spells the defaults out, and every report written
+  before they existed all describe the same experiment. Turning the mode on *does* move the hash,
+  because a different universe is a different experiment — and with the mode on, flipping
+  `membership_bounded` alone moves it too, because reading 254 symbols' join dates differently is a
+  different universe as surely as switching the mode is.
 - **Two control runs are byte-identical.** The ETF walk-forward (unaffected by construction — ETFs
   have no membership data) was run from a clean checkout of the previous commit and from the changed
   tree, same config, same cache: `trades.csv` and `equity.csv` match byte for byte, `data_hash` and
@@ -1088,15 +1130,32 @@ interpretation — but it should not be forgotten when the ablation table looks 
 Two runs with the same inputs must produce **byte-identical** `trades.csv` and `equity.csv`
 (SPEC AC9). This is a hard requirement, tested, not an aspiration.
 
-### Identity triple in `summary.json`
+### Identity hashes in `summary.json`
 
-Every run records three hashes (SPEC Contract 11):
+Every run records four hashes (SPEC Contract 11). Two reports describe the same experiment only if
+**all four** match; for years there were three, and the missing fourth cost a real comparison.
 
 | Key | Content |
 |-----|---------|
-| `config_hash` | SHA-256 over a canonical serialisation (keys sorted, `Path`s stringified, dates ISO-formatted) of the settings that decide what the strategy would have done: the whole `[strategy]`, `[backtest]` and `[gates]` sections, plus `account.max_positions` / `risk_pct` / `max_position_pct` and `regime.enabled` / `symbol` / `sma_window`. **Deliberately not the whole config** — account size, alert channels, paths and broker credentials are excluded, so the same rules hash identically on two machines and a deposit does not invalidate a report. |
+| `config_hash` | SHA-256 over a canonical serialisation (keys sorted, `Path`s stringified, dates ISO-formatted) of the settings that decide what the strategy would have done: the whole `[strategy]`, `[backtest]` and `[gates]` sections, plus `account.max_positions` / `risk_pct` / `max_position_pct`, `regime.enabled` / `symbol` / `sma_window`, and — only while `backtest.membership` is enforced — `universe.membership_bounded`. **Deliberately not the whole config** — account size, alert channels, paths and broker credentials are excluded, so the same rules hash identically on two machines and a deposit does not invalidate a report. |
 | `code_ref` | `git rev-parse HEAD`, or the literal `"unknown"` outside a checkout or when git cannot answer within five seconds. It records the commit, **not** whether the tree was clean — a run made on top of uncommitted edits reports the parent commit and is not reproducible by anyone else, so do not base a deployment decision on a run you have not committed. |
 | `data_hash` | SHA-256 over `"{SYMBOL}:{last bar date}:{row count}"` for every symbol in the run, symbols sorted ascending, joined with a pipe character; a symbol that returned nothing contributes `"{SYMBOL}:empty:0"`. Deliberately cheap — it does not scan the price columns. |
+| `earnings_hash` | SHA-256 over the announcement dates the run actually consumed: `"{SYMBOL}:{comma-separated ISO dates}"` for every **requested** symbol, sorted and de-duplicated, joined with a pipe. `None`, `()` and "absent from the reply" all digest identically, because `earnings_blackout` cannot tell them apart. `fetched_at` stamps, cache paths and which provider answered are all excluded, so two caches holding the same dates fingerprint the same however far apart they were downloaded. The literal `"unavailable"` when the digest could not be computed — deliberately not 64 hex characters, so it cannot be mistaken for one. |
+
+Two of the four are worth a note on why they hash what they do.
+
+`config_hash` reaches outside `[backtest]` for `universe.membership_bounded`, and only while
+point-in-time membership is on. That knob decides whether a join date a source states as an upper
+bound is read as that date or as no date at all, and it is not cosmetic: it moves vouchable exposure
+from 12,807 member-years to 8,672 (53.2% of nominal down to 36.0%) and symbols with no usable join
+date from 96 to 350. It lives in `[universe]`, which the three-section enumeration cannot see, so
+two point-in-time runs differing only in this policy used to hash identically. While the mode is
+`off` it stays out, exactly as `membership_unknown` does: with no windows built it cannot change
+what the strategy did, and hashing an inert knob would retire every report ever written. The
+shipping default therefore still hashes to `c6782f8d…`.
+
+`earnings_hash` exists because of the incident below, and closes it: the announcement dates are the
+one entry-gate input the other three hashes never covered.
 
 `data_hash` matters more than it looks. yfinance's adjusted history is **not stable**: a split or a
 dividend restatement rewrites the entire past series. Without `data_hash`, a run that fails to
@@ -1106,24 +1165,72 @@ while a restatement that rewrites past closes **without** changing the last bar 
 does not. The cache's own overlap check is the layer that catches that one — it re-fetches a symbol's
 whole history when the freshly downloaded overlap disagrees with what is stored.
 
-**The identity triple does not cover the earnings history, and that is a live reproducibility hole.**
-Historical announcement dates are a second input to the entry gate (they drive
-`earnings_blackout`, §1), they come from the same unstable upstream, and they are cached with a
-three-day TTL — so a run made four days after the last one silently re-fetches them. Nothing in
-`summary.json` records which earnings data was used: `earnings_blackout_simulated` says only
-*whether* historical dates were available, not *which*. This was found the hard way while measuring
-§7.1. Two stocks runs with **identical `config_hash`, identical `data_hash` and provably identical
-engine behaviour** produced 685 and 700 trades, and out-of-sample profit factors of 1.0663 and
-1.0551, because the earnings cache expired between them and 1,504 symbols were re-fetched from
+**The earnings history used to escape the identity hashes, and `earnings_hash` is what closed it.**
+Historical announcement dates are a second input to the entry gate (they drive `earnings_blackout`,
+§1), and they come from the same unstable upstream as the bars. This was found the hard way while
+measuring §7.1. Two stocks runs with **identical `config_hash`, identical `data_hash` and provably
+identical engine behaviour** produced 685 and 700 trades, and out-of-sample profit factors of 1.0663
+and 1.0551, because the earnings cache expired between them and 1,504 symbols were re-fetched from
 Yahoo. The engine was ruled out by running the two code revisions against one warm cache and getting
-byte-identical `trades.csv`; only the data had moved.
+byte-identical `trades.csv`; only the data had moved. Every report now carries `earnings_hash`, so
+that comparison is one `diff` rather than a day of elimination.
 
-Two practical consequences, both of which §7.1 follows. Treat runs separated by more than the
-earnings TTL as **not comparable**, and re-run the baseline alongside any comparison rather than
-reusing an older report as a control. And never run a comparison as concurrent processes on a cold
-cache: three parallel runs each re-fetched the earnings history independently, which silently gave
-the three arms of a controlled comparison three different sets of announcement dates. That batch was
-discarded and re-run serially against a warm cache.
+**Recording the dependency is not the same as removing it.** Two runs that disagree on
+`earnings_hash` are still not comparable; the difference is that you now find out in a second
+instead of concluding the strategy changed. Three habits follow.
+
+1. **Pin `backtest.end` for anything you intend to compare.** This is the sharpest edge in the
+   whole section. With neither `--end` nor `backtest.end` set, the runner asks for a window ending
+   **today** — and a window that ends today is a window whose earnings are not yet settled, which
+   collapses the settled-history TTL to its three-day floor and puts you straight back in the churn
+   the TTL was rewritten to avoid. Pinning the end to a settled date makes the cache entries
+   immutable and the run repeatable. A walk-forward run with an unpinned end logs a warning saying
+   exactly this; it is a warning and not an error because a quick research run is a perfectly
+   reasonable thing to want.
+2. **Compare `earnings_hash` before believing any difference.** If two arms disagree on it, the
+   comparison is invalid whatever the metrics say — re-run them against one warm cache.
+3. **Never run a comparison as concurrent processes on a cold cache.** Three parallel runs each
+   re-fetched the earnings history independently, silently giving the three arms of a controlled
+   comparison three different sets of announcement dates. That batch was discarded and re-run
+   serially against a warm cache. The hash makes this detectable after the fact; running serially
+   avoids it in the first place.
+
+### Earnings coverage: how much of the blackout actually ran
+
+A hash tells you two runs read the same dates. It does not tell you whether there were any, and that
+number moves far more than anyone expects. This repo's own cache went from **8% populated to 99.7%
+populated in a single afternoon** as a cold cache filled in over successive runs — and under the old
+schema both states recorded the identical `earnings_blackout_simulated: true`, while one of them
+applied the blackout to fewer than one symbol in ten.
+
+So every run publishes an `earnings` block: the source, and coverage as a count and a percentage.
+
+| Key | Meaning |
+|-----|---------|
+| `source` | `history` (real announcement dates, the only kind that can block a historical bar), `upcoming_only` (the provider knows just the next date per symbol — amendment A12), or `unavailable` (the lookup failed) |
+| `symbols_requested` | every symbol the run asked about |
+| `symbols_exempt` | the ETFs among them — an ETF does not announce earnings, so it is not a coverage hole |
+| `symbols_applicable` | requested minus exempt: the blackout's real denominator |
+| `symbols_with_dates` / `symbols_without_dates` | applicable symbols that did and did not have at least one usable date |
+| `coverage_pct` | `symbols_with_dates` as a percentage of `symbols_applicable` |
+| `announcements` | total distinct announcement days across the universe — one date over sixteen years and sixty-four of them both read as "covered", and are not the same thing |
+
+The ETF exemption is not a rounding detail. On the shipping universe, ETFs are **137 of the 142
+symbols with no dates**: counted as holes they drag reported coverage to 91%, when the truth for
+symbols that can actually announce is 99.7%. They would also put a permanent "results are
+optimistic" banner on the ETF-only run — the one run in this repo that is *free* of the survivorship
+and membership biases such a banner is about (§7.4).
+
+`earnings_blackout_simulated` is retained for readers written against the old schema and now means
+what its name says: the blackout mechanism actually operated, i.e. the source was `history` and at
+least one applicable symbol had dates, or nothing in the universe announces at all. That is a real
+tightening — the old key read `true` for a stone-cold cache that returned nothing, purely because
+the provider *had* a history endpoint. It is deliberately **not** "every symbol was covered": five
+S&P names (`CWEN-A`, `MCRI`, `MFP`, `PAYX`, `SEI`) have no free announcement history and are
+unlikely ever to get one, so an all-or-nothing flag would warn on every stocks run forever, and a
+banner that is always on is a banner nobody reads. Coverage is a matter of degree; read the degree
+off the block. `report.md` and `report.html` still render only the boolean, so a run at 40% coverage
+looks the same there as one at 99.7% — the numbers are in `summary.json`.
 
 ### Determinism requirements on the engine
 
@@ -1167,7 +1274,7 @@ deletes itself is not much use; delete old runs by hand when you want the disk b
 
 ### What is in `summary.json`
 
-Beyond the identity triple, the keys a reader is most likely to need:
+Beyond the four identity hashes, the keys a reader is most likely to need:
 
 | Key | Meaning |
 |-----|---------|
@@ -1176,7 +1283,8 @@ Beyond the identity triple, the keys a reader is most likely to need:
 | `start`, `end` | the simulation window; `end` is clipped to the last available bar |
 | `oos_start`, `oos_end` | first and last day actually **measured** out-of-sample. Present only for a walk-forward run with at least one fold (audit BUG-043) |
 | `initial_equity` | the reference capital the run traded (§4.1) |
-| `earnings_blackout_simulated` | whether the run could apply a historical earnings blackout (§11, limitation 7) |
+| `earnings` | the coverage block: source, requested/exempt/applicable counts, `coverage_pct`, `announcements` (§9). **Read this rather than the boolean** — it is the difference between "the blackout applied to 8% of the universe" and "the blackout applied" |
+| `earnings_blackout_simulated` | whether the blackout mechanism operated at all: `history` source with at least one covered symbol, or a universe where nothing announces. Compatibility key; the degree is in `earnings` (§9, §11 limitation 7) |
 | `objective` | the selection rule quoted in §5; `""` for a non-walk-forward run |
 | `tuning_grid` | the candidate values the tuner was actually offered (§5); `{}` for a non-walk-forward run, which tunes nothing. A grid other than the default also changes `config_hash` |
 | `oos` | the headline metric block — the concatenated OOS curve. **For a non-walk-forward run this is a copy of `full_period`**, so the presence of an `oos` block says nothing about whether the run was walk-forward |
@@ -1295,17 +1403,22 @@ Collected in one place, ordered by how much they should worry a reader.
 6. **Intrabar path is not modelled.** Stop-versus-target ordering within a bar is resolved
    pessimistically, but real intrabar sequences (a stop touched then reversed) are not reproducible
    from daily bars.
-7. **Earnings-date coverage is incomplete, and the run says when it had none** (`strategy-spec.md`
+7. **Earnings-date coverage is incomplete, and every run now measures its own** (`strategy-spec.md`
    §7). The runner asks the provider for each symbol's **historical** announcement dates over the
    loaded window and feeds them to the same `earnings_blackout` rule the scanner uses, so a
    historical bar inside a blackout is blocked in the backtest the way it would have been live
-   (amendment A12). Two honest caveats remain. First, coverage is still partial: an announcement the
-   free provider does not know about blocks nothing, and that fraction is not random — it correlates
-   with company size. Second, when no historical earnings source is available at all — the provider
-   exposes only "the next date", or the lookup fails — the run sets
-   `summary.json["earnings_blackout_simulated"] = false` and every report renders a warning saying
-   the backtest took entries the live scanner would have blocked and is therefore slightly
-   optimistic. The flag records that the *mechanism* ran, not that any particular symbol had dates.
+   (amendment A12). Two honest caveats remain. First, coverage is still partial, and the gap is not
+   random — an announcement the free provider does not know about blocks nothing, and the misses
+   correlate with company size. That is why `summary.json["earnings"]` reports coverage as a count
+   and a percentage rather than a yes/no: on a warm cache it is 99.7% of announcing symbols, on a
+   cold one it can be under 10%, and the two used to be indistinguishable in the record (§9).
+   Second, when the blackout mechanism did not operate at all — the provider exposes only "the next
+   date", the lookup fails, or the cache returned nothing — the run sets
+   `earnings_blackout_simulated = false` and every report renders a warning saying the backtest took
+   entries the live scanner would have blocked and is therefore slightly optimistic. Note the
+   asymmetry that remains: the rendered reports show only that boolean, so a run at 40% coverage
+   renders the same as one at 99.7%. Check `earnings.coverage_pct` in `summary.json` before treating
+   a report's silence as a clean bill of health.
 8. **The backtest runs at reference capital, not at the live balance** (§4.1). It simulates from
    `backtest.initial_equity = 10_000.0`, so it takes trades a $100–$500 live account cannot afford.
    This is deliberate — the alternative measures rounding rather than the strategy — but it means
