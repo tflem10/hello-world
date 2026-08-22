@@ -1529,6 +1529,47 @@ def test_a_broken_earnings_history_endpoint_still_does_not_stop_the_run(tmp_path
     assert pd.read_csv(directory / "trades.csv").shape[0] > 0
 
 
+def test_the_identity_triple_does_not_pin_the_earnings_history(tmp_path, monkeypatch):
+    """A known reproducibility hole, pinned so it is discovered on purpose next time.
+
+    Historical earnings drive ``earnings_blackout``, which is part of the entry
+    gate — but nothing in the identity triple covers them. ``data_hash`` scans
+    price bars only, and ``earnings_blackout_simulated`` records *whether*
+    dates were available, not *which*. Two runs can therefore agree on
+    ``config_hash`` and ``data_hash`` and still produce different trades.
+
+    This is not hypothetical: it invalidated a first attempt at the §7.1
+    measurement when the three-day earnings TTL expired mid-comparison and
+    1,504 symbols were re-fetched. Whoever closes it should delete this test
+    and assert the opposite.
+    """
+    bars = fake_universe()
+    summaries = []
+    for label, announcements in (
+        ("earnings-a", (date(2021, 3, 1),)),
+        ("earnings-b", (date(2021, 4, 15),)),
+    ):
+        provider = FakeProvider(bars)
+        provider.earnings_history = lambda symbols, start, end, a=announcements: dict.fromkeys(
+            symbols, a
+        )
+        monkeypatch.setattr("swing.universe.load", lambda cfg: list(INSTRUMENTS))
+        monkeypatch.setattr("swing.data.get_provider", lambda cfg, _p=provider, **kw: _p)
+        directory = go(runner_cfg(tmp_path), label=label)
+        summaries.append((json.loads((directory / "summary.json").read_text()), traded(directory)))
+
+    (first, trades_a), (second, trades_b) = summaries
+    # The triple says these two runs are the same experiment...
+    assert first["data_hash"] == second["data_hash"]
+    assert first["config_hash"] == second["config_hash"]
+    assert first["earnings_blackout_simulated"] == second["earnings_blackout_simulated"] is True
+    # ...and the trades say otherwise.
+    assert not trades_a.equals(trades_b), (
+        "the earnings history no longer leaks past the identity triple — if a fingerprint was "
+        "added, delete this test and assert reproducibility instead"
+    )
+
+
 # ---------------------------------------------------------------------------
 # LEAK-006 — a failed chart render must not strand the figure
 # ---------------------------------------------------------------------------
