@@ -18,6 +18,14 @@ separable jobs, one per subcommand:
     other or fall silent, the date is written as the literal ``unknown`` and the case is counted in
     the gap report rather than being papered over.
 
+    **This command refuses to run against a membership CSV that someone else has extended.** A
+    later package merged SEC EDGAR rosters into these files, adding provenance and bound columns
+    *and* revising the two date columns this script writes. A plain rebuild would silently undo
+    all of it. :func:`preflight_write` checks every target before any of them is opened and raises
+    :class:`SchemaConflict` — exit code 3, nothing written — unless ``--force`` is given, which
+    overwrites and says exactly what it destroyed. See that function for why the writer refuses
+    rather than merging.
+
 ``crosscheck``
     Grade those change tables. The constituent table as it stood on 1 January of two consecutive
     years implies how many changes happened in between; the change table says how many it recorded.
@@ -121,6 +129,13 @@ SOURCES: Final[dict[str, dict[str, str]]] = {
 
 #: Sentinel written into a date column when a boundary provably exists but no source states it.
 UNKNOWN: Final = "unknown"
+
+#: The only columns this script is the authority for. A membership CSV carrying anything else has
+#: been extended by another package, and this writer must not rewrite it — see `preflight_write`.
+OWNED_COLUMNS: Final[tuple[str, ...]] = ("symbol", "name", "added", "removed")
+#: Losing more than this share of a file's rows in a rebuild is treated as an accident, not an
+#: update. Wikipedia editing a table away costs a handful of rows; a lost merge costs hundreds.
+MAX_ROW_SHRINK: Final = 0.05
 
 _MONTH_DAY_YEAR: Final = re.compile(r"([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})")
 _ISO_DATE: Final = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -639,10 +654,86 @@ def build_index(
     return rows, gaps
 
 
+#: Why the guard refuses instead of merging. Stated in the error itself, because the next person
+#: to hit this will reasonably wonder why a writer cannot just preserve the columns it does not own.
+_WHY_NO_MERGE: Final = """\
+This script is the authority for {owned} and nothing else, and it cannot
+merge its output into an extended file. A downstream source does not merely add columns — it also
+*revises* the two date columns, filling dates this script leaves empty and replacing its 'unknown'
+sentinels with real ones. So (symbol, added, removed) is not a stable key between the two versions,
+and carrying the extra columns across on a partial match would attach provenance to dates that no
+longer match it. A merge here would produce coherent-looking rows that are wrong.
+
+Rebuild the base and re-run the downstream merge that produced those columns, or pass --force to
+overwrite and lose them."""
+
+
+class SchemaConflict(RuntimeError):
+    """Raised when a membership CSV on disk holds more than this script is the authority for."""
+
+
+def read_existing_shape(path: Path) -> tuple[list[str], int]:
+    """Header and data-row count of an existing membership CSV. ``([], 0)`` if there is none."""
+    if not path.exists():
+        return [], 0
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, [])
+        return [column.strip() for column in header], sum(1 for _ in reader)
+
+
+def preflight_write(targets: dict[Path, list[MembershipRow]], *, force: bool) -> list[str]:
+    """Refuse to rewrite files this script no longer owns. Returns notes for the caller to print.
+
+    Every path is checked *before* any path is written, so a conflict on the third index cannot
+    leave the first two clobbered.
+
+    Two ways a rewrite is rejected:
+
+    * **Foreign columns.** The file carries columns outside :data:`OWNED_COLUMNS`. Something else
+      extended the schema and this writer would drop what it added.
+    * **Material row loss.** The file has meaningfully more rows than the rebuild produces, which
+      is what a schema-stripping edit followed by a rebuild looks like from here.
+
+    ``--force`` converts both into loud notes. Nothing about this is silent in either direction.
+    """
+    conflicts: list[str] = []
+    notes: list[str] = []
+    for path, rows in sorted(targets.items()):
+        header, existing_rows = read_existing_shape(path)
+        if not header:
+            continue
+        foreign = [column for column in header if column not in OWNED_COLUMNS]
+        if foreign:
+            conflicts.append(
+                f"{path.name} carries {len(foreign)} column(s) this script does not manage "
+                f"({', '.join(foreign)}). Rewriting it would discard them."
+            )
+        shrink = existing_rows - len(rows)
+        if existing_rows and shrink > existing_rows * MAX_ROW_SHRINK:
+            conflicts.append(
+                f"{path.name} has {existing_rows} rows and the rebuild produces {len(rows)} "
+                f"— a loss of {shrink} ({shrink / existing_rows:.0%}). Another source has added "
+                f"rows this rebuild does not know about."
+            )
+    if not conflicts:
+        return notes
+    if not force:
+        raise SchemaConflict(
+            "Refusing to rewrite the membership CSVs.\n  - "
+            + "\n  - ".join(conflicts)
+            + "\n\n"
+            + _WHY_NO_MERGE.format(owned=", ".join(OWNED_COLUMNS))
+        )
+    notes.extend(f"--force: OVERWRITING ANYWAY — {conflict}" for conflict in conflicts)
+    return notes
+
+
 def write_membership_csv(path: Path, rows: list[MembershipRow]) -> None:
+    """Write the four columns this script owns. Guarded by :func:`preflight_write`."""
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(["symbol", "name", "added", "removed"])
+        writer.writerow(list(OWNED_COLUMNS))
         for row in rows:
             writer.writerow([row.symbol, row.name, row.added, row.removed])
 
@@ -786,9 +877,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     current_universe = load_current_universe()
     departures = compute_departures(per_index, events_by_index, current_universe)
 
+    targets = {
+        UNIVERSE_DIR / f"{index}-membership.csv": rows for index, (rows, _) in per_index.items()
+    }
+    write_notes: list[str] = []
     if not args.dry_run:
-        for index, (rows, _) in per_index.items():
-            write_membership_csv(UNIVERSE_DIR / f"{index}-membership.csv", rows)
+        # Check every target before touching any of them: a conflict on sp600 must not leave
+        # sp500 and sp400 already clobbered.
+        write_notes = preflight_write(targets, force=args.force)
+        for path, rows in targets.items():
+            write_membership_csv(path, rows)
 
     summary: dict[str, Any] = {
         "fetched": fetched,
@@ -833,8 +931,10 @@ def cmd_build(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("(--dry-run: no CSVs written)")
     else:
-        for index in per_index:
-            print(f"wrote {UNIVERSE_DIR / f'{index}-membership.csv'}")
+        for note in write_notes:
+            print(note, file=sys.stderr)
+        for path in targets:
+            print(f"wrote {path}  ({', '.join(OWNED_COLUMNS)})")
     return 0
 
 
@@ -1295,6 +1395,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     build = subparsers.add_parser("build", help="reconstruct membership CSVs from Wikipedia")
     build.add_argument("--dry-run", action="store_true", help="compute everything, write no CSVs")
+    build.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite membership CSVs even when they carry columns or rows this script does "
+        "not manage (discards them)",
+    )
     build.set_defaults(func=cmd_build)
 
     snapshots = subparsers.add_parser("snapshots", help="probe past revisions as a PIT source")
@@ -1327,7 +1433,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except SchemaConflict as exc:
+        # A refusal is a designed outcome, not a crash: report it as one, without a traceback.
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 3
     return result
 
 
