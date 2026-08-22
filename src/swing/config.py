@@ -34,10 +34,15 @@ from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
+from swing.universe import UNKNOWN_EXCLUDE, UNKNOWN_POLICIES
+
 __all__ = [
     "MAX_LOOKBACK_BARS",
     "MAX_MOMENTUM_LOOKBACK_BARS",
     "MAX_TUNING_COMBINATIONS",
+    "MEMBERSHIP_MODES",
+    "MEMBERSHIP_OFF",
+    "MEMBERSHIP_POINT_IN_TIME",
     "TUNABLE_PARAMS",
     "AccountCfg",
     "AlertsCfg",
@@ -93,6 +98,19 @@ TUNABLE_PARAMS: tuple[str, ...] = (
     "donchian_window",
     "volume_mult",
 )
+
+#: Today's index membership applied to all of history — what every report
+#: written so far used, and still the default so those reports stay
+#: reproducible. It is a *look-ahead*: a company is traded during years when it
+#: was not in the index, and index inclusion is itself an outcome of past
+#: growth (``docs/backtest-methodology.md`` §7).
+MEMBERSHIP_OFF = "off"
+
+#: A symbol is tradable only on days a membership file says it was in an index.
+MEMBERSHIP_POINT_IN_TIME = "point_in_time"
+
+#: How ``[backtest] membership`` may decide who was in the universe when.
+MEMBERSHIP_MODES: tuple[str, ...] = (MEMBERSHIP_OFF, MEMBERSHIP_POINT_IN_TIME)
 
 #: The most parameter combinations one ``[backtest.tuning_grid]`` may ask for.
 #:
@@ -630,6 +648,23 @@ class BacktestCfg:
     #: fixed, comparable capital base. Sized on a real $100 account, whole-share
     #: rounding would reject nearly every entry and the run would prove nothing.
     initial_equity: float = 10_000.0
+    #: Which universe the backtest trades on each historical day.
+    #: :data:`MEMBERSHIP_OFF` (the default) applies *today's* index membership
+    #: to all of history, which is what every existing report did and is a
+    #: look-ahead worth 30–64% of the nominal member-years depending on how
+    #: unstated join dates are read (``docs/backtest-methodology.md`` §7.1).
+    #: :data:`MEMBERSHIP_POINT_IN_TIME` makes a symbol tradable only between its
+    #: stated join and removal dates. The default stays ``off`` so existing
+    #: reports remain reproducible, and so this knob cannot change a number
+    #: nobody asked it to change.
+    membership: str = MEMBERSHIP_OFF
+    #: What point-in-time membership does about a symbol whose join date no
+    #: source states — ``"exclude"`` (the default, conservative: it is not
+    #: treated as a member) or ``"include"`` (it is a member from the beginning
+    #: of the data). Not a detail: 42% of current S&P 600 members have no
+    #: stated join date, so ``"include"`` quietly reinstates the bias for them.
+    #: Inert while ``membership`` is ``off``.
+    membership_unknown: str = UNKNOWN_EXCLUDE
     #: Candidate values the walk-forward may choose between, one list per
     #: parameter, written as a ``[backtest.tuning_grid]`` table. ``None`` — the
     #: default — means the standard grid in
@@ -687,6 +722,17 @@ class BacktestCfg:
             "initial_equity",
             "the reference capital the backtest trades with — below $100 whole-share rounding "
             "rejects almost every entry, so the run would measure nothing",
+        )
+        _one_of(self.membership, MEMBERSHIP_MODES, "backtest", "membership")
+        _require(
+            self.membership_unknown in UNKNOWN_POLICIES,
+            f"backtest.membership_unknown must be one of {', '.join(UNKNOWN_POLICIES)}, but it "
+            f"is {self.membership_unknown!r}. 'exclude' leaves a symbol out on the days no "
+            f"source says it was in an index; 'include' treats an unstated join date as "
+            f"'a member from the beginning of the data', which reinstates the very look-ahead "
+            f"backtest.membership exists to remove.",
+            "backtest",
+            "membership_unknown",
         )
         self._check_tuning_grid()
 

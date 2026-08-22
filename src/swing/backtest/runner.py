@@ -54,6 +54,19 @@ stale while the user believed they had refreshed it, and slipping an
 ``ablate``-prefixed run past the guard by burying the prefix in a subdirectory.
 ``latest.json`` is now always located by :func:`swing.backtest.gate.latest_path`,
 never derived from the run directory.
+
+INDEX MEMBERSHIP (``[backtest] membership``)
+--------------------------------------------
+The universe is *today's* S&P 500/400/600 membership, applied to every
+historical day, so a run trades a company during the years before it joined the
+index it is being backtested as a member of. That is look-ahead rather than
+survivorship, and it flatters a momentum strategy specifically, because index
+inclusion is itself an outcome of past growth.
+
+Every run therefore publishes a ``membership`` block in ``summary.json`` saying
+which universe it used and how large the untraded-but-claimed exposure is —
+``member_years`` against ``member_years_point_in_time``. The default mode is
+``off``, which is the behaviour every existing report was written under.
 """
 
 from __future__ import annotations
@@ -81,17 +94,21 @@ from swing.backtest.walkforward import (
     run_walkforward,
     sensitivity_table,
 )
+from swing.config import MEMBERSHIP_OFF, MEMBERSHIP_POINT_IN_TIME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
+    from swing.universe import Instrument, Window
 
 __all__ = [
     "ABLATION_PREFIX",
+    "DAYS_PER_YEAR",
     "FLOAT_PRECISION",
     "LABEL_PATTERN",
     "UNIVERSE_CHOICES",
     "config_hash",
     "data_hash",
+    "membership_block",
     "run_backtest",
     "write_report",
 ]
@@ -105,6 +122,11 @@ FLOAT_PRECISION = 6
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 UNIVERSE_CHOICES: tuple[str, ...] = ("full", "etf", "stocks")
+
+#: Calendar days per year, for turning eligible-day counts into member-years.
+#: Calendar days rather than trading days on purpose: ``docs/survivorship.md``
+#: counts member-years the same way, and the two figures have to be comparable.
+DAYS_PER_YEAR = 365.25
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +172,17 @@ def config_hash(cfg: Config) -> str:
     }
     if is_default_grid(cfg.backtest.tuning_grid):
         payload["backtest"].pop("tuning_grid", None)
+    if cfg.backtest.membership == MEMBERSHIP_OFF:
+        # Same argument as the grid above. A config that leaves the membership
+        # knobs alone, a config that spells the defaults out, and every report
+        # written before the knobs existed all describe the same experiment —
+        # today's index membership applied to all of history — so they keep the
+        # same hash. `membership_unknown` goes with it because it is inert
+        # while the mode is off: it cannot change what the strategy did.
+        # Turning the mode on DOES change the hash, and should: it is a
+        # different universe, which is a different experiment.
+        payload["backtest"].pop("membership", None)
+        payload["backtest"].pop("membership_unknown", None)
     payload["account"] = {
         "max_positions": cfg.account.max_positions,
         "risk_pct": cfg.account.risk_pct,
@@ -335,6 +368,153 @@ def _load_earnings(
         return {}, False
 
 
+# ---------------------------------------------------------------------------
+# index membership
+# ---------------------------------------------------------------------------
+
+
+def _eligible_days(windows: tuple[Window, ...], start: date, end: date) -> int:
+    """How many calendar days of ``[start, end]`` these windows cover.
+
+    Windows arrive disjoint and sorted from
+    :func:`swing.universe.membership_windows`, so overlaps cannot double-count.
+    """
+    total = 0
+    for window_start, window_end in windows:
+        first = start if window_start is None else max(start, window_start)
+        last = end if window_end is None else min(end, window_end)
+        if first <= last:
+            total += (last - first).days + 1
+    return total
+
+
+def membership_block(
+    cfg: Config,
+    instruments: Sequence[Instrument],
+    start: date,
+    end: date,
+) -> dict[str, Any]:
+    """The ``summary.json`` block saying which universe this run actually traded.
+
+    Every run writes one, including a default ``mode = "off"`` run, because the
+    thing a reader needs is not "was a correction applied" but "how big is the
+    thing that was not corrected". Two figures answer that:
+
+    * ``member_years`` — the exposure the run really traded. With the mode off
+      that is every gated symbol for the whole window, which is the look-ahead
+      in full.
+    * ``member_years_point_in_time`` — the exposure a membership file can
+      actually vouch for, under this config's unknown-date policy. The gap
+      between the two is the size of the bias, in the run's own units.
+
+    ETFs and ``extra_symbols`` are not index constituents, so they are counted
+    as ``symbols_ungated`` and appear in neither figure; an ETF-only run reports
+    zero member-years, which is the correct answer rather than a missing one.
+
+    An unreadable membership file does **not** stop the run — this block is
+    provenance, not simulation input, and a diagnostic must never be the thing
+    that kills forty minutes of work. It degrades to an ``error`` key instead,
+    so the zeros beside it can never be mistaken for a measurement of no bias.
+    """
+    from swing import universe as universe_module
+
+    mode = cfg.backtest.membership
+    policy = cfg.backtest.membership_unknown
+    try:
+        coverage = universe_module.membership_coverage(cfg, instruments=instruments, unknown=policy)
+        windows = universe_module.membership_windows(cfg, instruments=instruments, unknown=policy)
+        # How many symbols the unknown-date policy is actually deciding for,
+        # measured rather than inferred: the ones the two readings disagree
+        # about. Reported whatever the mode, because it is the size of the
+        # choice, and a reader of an `off` report should be able to see it.
+        other = (
+            universe_module.UNKNOWN_INCLUDE
+            if policy == universe_module.UNKNOWN_EXCLUDE
+            else universe_module.UNKNOWN_EXCLUDE
+        )
+        alternative = universe_module.membership_windows(
+            cfg, instruments=instruments, unknown=other
+        )
+        policy_sensitive = sum(1 for s, w in windows.items() if alternative.get(s) != w)
+    except universe_module.UniverseError as exc:
+        log.warning(
+            "Could not read the index membership files (%s); this run's summary cannot say how "
+            "much of its universe was actually in an index. The simulation itself is unaffected.",
+            exc,
+        )
+        return {
+            "mode": mode,
+            "applied": False,
+            "unknown_policy": policy,
+            "error": str(exc),
+        }
+
+    window_days = max((end - start).days + 1, 0)
+    gated = [i for i in instruments if i.source in universe_module.MEMBERSHIP_SOURCES]
+    nominal = coverage.gated * window_days / DAYS_PER_YEAR
+    point_in_time = (
+        sum(_eligible_days(windows.get(i.symbol, ()), start, end) for i in gated) / DAYS_PER_YEAR
+    )
+    applied = mode == MEMBERSHIP_POINT_IN_TIME
+
+    return {
+        "mode": mode,
+        "applied": applied,
+        "unknown_policy": policy,
+        "symbols_gated": coverage.gated,
+        "symbols_ungated": coverage.ungated,
+        # What this run dropped. With the mode off nothing is dropped, and
+        # saying so is the point: the count is not "how many could have been".
+        "symbols_excluded": coverage.excluded if applied else 0,
+        # The size of the unknown-date choice: symbols the two policies would
+        # treat differently. Under "include" these are the ones being handed a
+        # membership no source states, which is the quiet way the bias comes
+        # back.
+        "symbols_policy_sensitive": policy_sensitive,
+        "symbols_unknown_join": coverage.unknown_join,
+        "symbols_no_membership_row": coverage.no_membership_row,
+        "join_date_coverage_pct": coverage.coverage_pct,
+        "join_date_coverage": {
+            source: {"members": members, "with_join_date": stated}
+            for source, members, stated in coverage.by_source
+        },
+        "member_years": point_in_time if applied else nominal,
+        "member_years_point_in_time": point_in_time,
+        "member_years_nominal": nominal,
+    }
+
+
+def _refuse_point_in_time(cfg: Config) -> None:
+    """Refuse a point-in-time run the simulator cannot yet honour.
+
+    Membership has to gate **entries per symbol per day**, and the only place
+    that decision exists is ``engine._build_plan``, where ``signal = trend &
+    entry & liquid & ~blackout``. The engine takes no eligibility argument, so
+    from here there is no way to hand it one — and every alternative reachable
+    from the runner corrupts something else:
+
+    * trimming a symbol's bars to its membership window restarts every
+      indicator's warm-up at the join date, so the symbol stays untradable for
+      a further year and rolling windows silently span the hole;
+    * encoding the excluded days as synthetic earnings dates bleeds
+      ``earnings_blackout_days`` past both boundaries and falsifies
+      ``earnings_blackout_simulated``.
+
+    Refusing is the only honest option left: a report labelled point-in-time
+    that quietly traded the full universe would be worse than no report.
+    """
+    if cfg.backtest.membership != MEMBERSHIP_POINT_IN_TIME:
+        return
+    raise ValueError(
+        f"backtest.membership is set to {MEMBERSHIP_POINT_IN_TIME!r}, but the simulator cannot "
+        f"run that way yet: swing.backtest.engine.run_engine takes no per-symbol eligibility "
+        f"argument, so there is no way to tell it a symbol was not in the index on a given day. "
+        f"Set backtest.membership = {MEMBERSHIP_OFF!r} to run the documented universe (every "
+        f"report so far used it), and see docs/backtest-methodology.md section 7.1 for the size "
+        f"of the bias that leaves in place and the engine seam that would close it."
+    )
+
+
 def _validate_label(label: str) -> str:
     """Return ``label`` if it names one directory, else refuse in plain English (BUG-042).
 
@@ -451,6 +631,9 @@ def run_backtest(
     # given" — an empty string is a mistake, and gets said so.
     default_label = f"backtest-{datetime.now():%Y%m%d-%H%M%S}"
     run_label = _validate_label(default_label if label is None else label)
+    # Same reasoning as the label: a mode the engine cannot honour should cost
+    # a sentence, not forty minutes and a mislabelled report.
+    _refuse_point_in_time(cfg)
 
     instruments = _select_universe(cfg, universe)
     symbols = sorted({instrument.symbol for instrument in instruments})
@@ -508,6 +691,19 @@ def run_backtest(
         "earnings_blackout_simulated": bool(earnings_simulated),
         "n_symbols": len(bars),
         "initial_equity": float(cfg.backtest.initial_equity),
+        # Which universe this run really traded, and how much of it a
+        # membership file can vouch for. Written for every run, including the
+        # default one, so no report can be read as point-in-time when it is not
+        # — or as unaware of the gap when it is. Counted over the symbols that
+        # actually had bars, not the ones the config asked for, so
+        # ``symbols_gated + symbols_ungated == n_symbols`` and the member-year
+        # figures describe what was simulated rather than what was requested.
+        "membership": membership_block(
+            cfg,
+            [instrument for instrument in instruments if instrument.symbol in bars],
+            run_start,
+            effective_end,
+        ),
         "config_hash": config_hash(cfg),
         "code_ref": code_ref(),
         "data_hash": data_hash(bars),

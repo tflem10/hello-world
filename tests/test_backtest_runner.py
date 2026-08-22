@@ -454,6 +454,228 @@ def test_no_price_history_is_refused(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# index membership — what universe did this report actually trade?
+# ---------------------------------------------------------------------------
+
+
+def membership_of(tmp_path, wired_cfg=None, **kwargs):
+    """Run a backtest and hand back its ``summary.json`` membership block."""
+    cfg = wired_cfg if wired_cfg is not None else runner_cfg(tmp_path)
+    directory = go(cfg, **kwargs)
+    return json.loads((directory / "summary.json").read_text())["membership"]
+
+
+def test_every_summary_says_which_universe_it_traded(tmp_path, wired):
+    """Contract: a report can never be misread about the universe behind it."""
+    block = membership_of(tmp_path, label="membership-off")
+    assert block["mode"] == "off"
+    assert block["applied"] is False
+    assert block["unknown_policy"] == "exclude"
+    assert block["symbols_excluded"] == 0
+
+
+def test_the_membership_block_separates_gated_stocks_from_ungated_etfs(tmp_path, wired):
+    """AAA is an S&P 500 stock; BBB is an ETF and was never in an index."""
+    block = membership_of(tmp_path, label="membership-counts")
+    assert block["symbols_gated"] == 1
+    assert block["symbols_ungated"] == 1
+    # AAA is invented, so no committed membership file has a row for it — a
+    # coverage hole, counted rather than waved through.
+    assert block["symbols_no_membership_row"] == 1
+    assert block["member_years_point_in_time"] == 0.0
+
+
+def test_member_years_cover_the_whole_window_when_the_mode_is_off(tmp_path, wired):
+    """With the mode off the run really does trade every symbol for every day."""
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label="membership-years")
+    summary = json.loads((directory / "summary.json").read_text())
+    block = summary["membership"]
+    days = (date.fromisoformat(summary["end"]) - date.fromisoformat(summary["start"])).days + 1
+    expected = round(block["symbols_gated"] * days / runner.DAYS_PER_YEAR, 6)
+    assert block["member_years"] == expected == block["member_years_nominal"]
+
+
+def test_an_etf_only_run_reports_no_member_years_rather_than_a_missing_number(tmp_path, wired):
+    """ETFs are not index constituents; zero is the answer, not an absence."""
+    block = membership_of(tmp_path, label="membership-etf", universe="etf")
+    assert block["symbols_gated"] == 0
+    assert block["symbols_ungated"] == 1
+    assert block["member_years"] == 0.0
+    assert block["join_date_coverage_pct"] == 0.0
+
+
+@pytest.mark.parametrize("universe", ["full", "etf", "stocks"])
+def test_the_block_counts_the_symbols_that_had_bars_not_the_ones_requested(
+    tmp_path, wired, universe
+):
+    """``symbols_gated + symbols_ungated == n_symbols``, so a reader can check it.
+
+    A symbol the config asked for and the provider could not serve trades
+    nothing, so counting it would overstate the exposure the run really had.
+    """
+    cfg = runner_cfg(tmp_path)
+    directory = go(cfg, label=f"membership-count-{universe}", universe=universe)
+    summary = json.loads((directory / "summary.json").read_text())
+    block = summary["membership"]
+    assert block["symbols_gated"] + block["symbols_ungated"] == summary["n_symbols"]
+
+
+def test_a_symbol_the_provider_could_not_serve_is_left_out_of_the_count(tmp_path, monkeypatch):
+    """CCC is in the universe and has no bars: it cannot have traded a member-year."""
+    bars = fake_universe()
+    monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: FakeProvider(bars))
+    monkeypatch.setattr(
+        "swing.universe.load",
+        lambda cfg: [*INSTRUMENTS, Instrument("CCC", "Gamma", "stock", "sp500")],
+    )
+    cfg = runner_cfg(tmp_path)
+    summary = json.loads((go(cfg, label="membership-nodata") / "summary.json").read_text())
+    assert summary["n_symbols"] == 2
+    assert summary["membership"]["symbols_gated"] == 1
+
+
+def test_the_block_publishes_the_size_of_the_look_ahead_on_the_real_universe(tmp_path):
+    """The honest number an 'off' report has to carry: how much is unvouched-for.
+
+    No exact figures — the membership CSVs are another package's and are being
+    improved — but a stock run must show a materially smaller point-in-time
+    exposure than the one it actually traded, and the coverage must be
+    reported per index so an uneven fix is visible.
+    """
+    from swing import universe as universe_module
+
+    cfg = build_config(tmp_path)
+    stocks = [i for i in universe_module.load(cfg) if i.kind != "etf"]
+    block = runner.membership_block(cfg, stocks, date(2010, 1, 1), date(2025, 12, 31))
+
+    assert block["symbols_gated"] == len(stocks) > 1_400
+    assert block["member_years_nominal"] > 20_000
+    # Loose thresholds on purpose: better join-date coverage moves these, and
+    # the membership CSVs belong to another package. What is asserted is what
+    # cannot change — hundreds of today's members joined after 2010, so the
+    # provable exposure is materially below the nominal one either way.
+    assert block["member_years_point_in_time"] < block["member_years_nominal"] * 0.9
+    assert 50.0 < block["join_date_coverage_pct"] <= 100.0
+    assert block["join_date_coverage"]["sp500"]["with_join_date"] > 480
+    # The size of the unknown-date choice, measured rather than inferred: never
+    # smaller than the unknown-join count, because a stint whose *end* is
+    # unstated is relaxed by the permissive policy too.
+    assert block["symbols_policy_sensitive"] >= block["symbols_unknown_join"]
+
+
+def test_the_policy_sensitive_count_is_the_symbols_the_two_readings_disagree_about(tmp_path):
+    """It is a property of the data, so both policies report the same figure."""
+    from swing import universe as universe_module
+
+    cfg = build_config(tmp_path)
+    stocks = [i for i in universe_module.load(cfg) if i.kind != "etf"]
+    start, end = date(2010, 1, 1), date(2025, 12, 31)
+
+    strict = runner.membership_block(cfg, stocks, start, end)["symbols_policy_sensitive"]
+    loose = runner.membership_block(
+        build_config(tmp_path, backtest={"membership_unknown": "include"}), stocks, start, end
+    )["symbols_policy_sensitive"]
+    assert strict == loose
+
+    expected = sum(
+        1
+        for symbol, window in universe_module.membership_windows(
+            cfg, instruments=stocks, unknown="exclude"
+        ).items()
+        if universe_module.membership_windows(cfg, instruments=stocks, unknown="include")[symbol]
+        != window
+    )
+    assert strict == expected
+
+
+def test_with_the_mode_on_the_block_reports_the_restricted_universe(tmp_path):
+    """The block the engine seam would let a real run write, built directly.
+
+    ``run_backtest`` refuses this mode today, so this exercises what the block
+    says once it does not: the exclusions become real and ``member_years`` drops
+    to the exposure a membership file can actually vouch for.
+    """
+    from swing import universe as universe_module
+
+    stocks = [i for i in universe_module.load(build_config(tmp_path)) if i.kind != "etf"]
+    start, end = date(2010, 1, 1), date(2025, 12, 31)
+
+    off = runner.membership_block(build_config(tmp_path), stocks, start, end)
+    on = runner.membership_block(
+        build_config(tmp_path, backtest={"membership": "point_in_time"}), stocks, start, end
+    )
+    loose = runner.membership_block(
+        build_config(
+            tmp_path,
+            backtest={"membership": "point_in_time", "membership_unknown": "include"},
+        ),
+        stocks,
+        start,
+        end,
+    )
+
+    assert (off["applied"], on["applied"]) == (False, True)
+    assert off["symbols_excluded"] == 0
+    assert on["symbols_excluded"] == on["symbols_unknown_join"] > 0
+    assert on["member_years"] == on["member_years_point_in_time"] < off["member_years"]
+    # The permissive policy excludes nobody and vouches for strictly more.
+    assert loose["symbols_excluded"] == 0
+    assert on["member_years"] < loose["member_years"] < off["member_years"]
+
+
+def test_an_unreadable_membership_file_does_not_stop_the_run(tmp_path, wired, monkeypatch):
+    """Provenance must never be the thing that kills forty minutes of simulation.
+
+    It degrades to an ``error`` key rather than to a quiet row of zeros, so the
+    block can never be read as "measured, and there is no bias".
+    """
+    from swing.universe import UniverseError
+
+    def broken(*args, **kwargs):
+        raise UniverseError("sp500-membership.csv is missing")
+
+    monkeypatch.setattr("swing.universe.membership_coverage", broken)
+    block = membership_of(tmp_path, label="membership-broken")
+    assert block["error"] == "sp500-membership.csv is missing"
+    assert block["applied"] is False
+    assert "member_years" not in block
+
+
+def test_a_point_in_time_run_is_refused_in_plain_english(tmp_path, wired):
+    """The mode the engine cannot honour must stop, not approximate.
+
+    A report labelled point-in-time that had quietly traded the full universe
+    would be worse than no report at all, so the run refuses and says exactly
+    what is missing.
+    """
+    cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
+    with pytest.raises(ValueError) as excinfo:
+        go(cfg, label="membership-pit")
+    message = str(excinfo.value)
+    assert "point_in_time" in message
+    assert "run_engine" in message
+    assert "eligibility" in message
+    assert "backtest-methodology.md" in message
+
+
+def test_the_point_in_time_refusal_costs_a_sentence_not_a_simulation(tmp_path, wired):
+    """Refused before the universe is loaded or a single bar is fetched."""
+    cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
+    with pytest.raises(ValueError, match="point_in_time"):
+        go(cfg, label="membership-early")
+    assert wired.requested == []
+    assert not (cfg.paths.reports_dir / "backtest" / "membership-early").exists()
+
+
+def test_a_bad_label_is_still_refused_before_the_membership_mode(tmp_path, wired):
+    """Ordering: the cheapest check first, so the message names the real mistake."""
+    cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
+    with pytest.raises(ValueError, match="not usable as a directory name"):
+        go(cfg, label="../escape")
+
+
+# ---------------------------------------------------------------------------
 # provenance hashes
 # ---------------------------------------------------------------------------
 
@@ -513,6 +735,48 @@ def test_a_custom_tuning_grid_changes_the_hash(tmp_path, grid):
     """A different search is a different experiment, and must not look identical."""
     base = build_config(tmp_path)
     assert config_hash(build_config(tmp_path, backtest={"tuning_grid": grid})) != config_hash(base)
+
+
+def test_the_membership_defaults_do_not_move_the_hash(tmp_path):
+    """Same rules, same hash: a knob whose default is 'behave as before' is invisible.
+
+    Every report in this repo was written before ``[backtest] membership``
+    existed, and all of them describe the same experiment — today's index
+    membership applied to all of history. Leaking the new keys into the hash
+    would have made every one of them incomparable with a run made today.
+    """
+    base = build_config(tmp_path)
+    spelled_out = build_config(
+        tmp_path, backtest={"membership": "off", "membership_unknown": "exclude"}
+    )
+    assert (base.backtest.membership, base.backtest.membership_unknown) == ("off", "exclude")
+    assert config_hash(spelled_out) == config_hash(base) == SHIPPING_CONFIG_HASH
+
+
+def test_the_unknown_policy_cannot_move_the_hash_while_the_mode_is_off(tmp_path):
+    """It is inert with the mode off, so it cannot have changed what happened."""
+    base = build_config(tmp_path)
+    loosened = build_config(tmp_path, backtest={"membership_unknown": "include"})
+    assert config_hash(loosened) == config_hash(base) == SHIPPING_CONFIG_HASH
+
+
+@pytest.mark.parametrize("unknown", ["exclude", "include"])
+def test_turning_point_in_time_on_changes_the_hash(tmp_path, unknown):
+    """A different universe is a different experiment and must not look identical."""
+    base = build_config(tmp_path)
+    corrected = build_config(
+        tmp_path, backtest={"membership": "point_in_time", "membership_unknown": unknown}
+    )
+    assert config_hash(corrected) != config_hash(base)
+
+
+def test_the_two_unknown_policies_hash_differently(tmp_path):
+    """With the mode on, the policy decides the universe, so it is part of the rules."""
+    strict = build_config(tmp_path, backtest={"membership": "point_in_time"})
+    loose = build_config(
+        tmp_path, backtest={"membership": "point_in_time", "membership_unknown": "include"}
+    )
+    assert config_hash(strict) != config_hash(loose)
 
 
 def test_data_hash_changes_when_the_data_does():

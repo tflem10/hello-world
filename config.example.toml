@@ -137,6 +137,42 @@ oos_years = 1                   # out-of-sample years per fold
 # capital base the reported CAGR and drawdown are measured against.
 initial_equity = 10000.0        # must be at least 100
 
+# Which universe the backtest trades on each historical day.
+#
+#   "off"           today's S&P 500/400/600 membership applied to ALL of
+#                   history. This is what every report in this repo used, and
+#                   it is the default so those reports stay reproducible. It is
+#                   also a LOOK-AHEAD: a company is traded during the years
+#                   before it joined the index, and index inclusion is itself
+#                   an outcome of past growth, so it flatters a momentum
+#                   strategy specifically. Between 30% and 64% of the
+#                   member-years a stock run nominally trades cannot be shown
+#                   to be index membership at all (docs/backtest-methodology.md
+#                   section 7.1).
+#   "point_in_time" a symbol is tradable only between its stated join and
+#                   removal dates, read from
+#                   src/swing/assets/universe/sp*-membership.csv.
+#
+# NOTE: "point_in_time" is currently REFUSED with a plain-English error. The
+# membership data and the eligibility windows are here, but the simulator takes
+# no per-symbol eligibility argument, so a run cannot be told a symbol was not
+# in the index that day. A report labelled point-in-time that quietly traded
+# the full universe would be worse than no report, so the run stops instead.
+# See docs/backtest-methodology.md section 7.1.
+membership = "off"
+
+# What point-in-time membership does about a symbol whose join date no source
+# states. Inert while `membership = "off"`.
+#
+#   "exclude"  it is not treated as a member — a smaller honest universe
+#   "include"  it is treated as a member from the beginning of the data
+#
+# Not a detail. Join-date coverage is 100% of current S&P 500 members, 76% of
+# the 400 and 58% of the 600, so "include" silently reinstates the whole bias
+# for 42% of the S&P 600. Every run reports how many symbols the policy
+# affects, in summary.json under `membership.symbols_policy_sensitive`.
+membership_unknown = "exclude"
+
 # The candidate values each walk-forward fold may choose between, one list per
 # parameter. Leave this out — the default — and every fold searches exactly the
 # grid below, which is what every existing report used. The default form, as a

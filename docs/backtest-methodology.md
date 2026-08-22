@@ -25,6 +25,7 @@ than to eliminate it, because it cannot be eliminated with the data available.
    — incl. [the candidate values (`[backtest.tuning_grid]`)](#the-candidate-values-backtesttuning_grid)
 6. [Parameter sensitivity (±25%)](#6-parameter-sensitivity-25)
 7. [Survivorship bias](#7-survivorship-bias)
+   — incl. [7.1 Index-membership look-ahead, measured](#71-index-membership-look-ahead-measured-and-only-half-fixable-here)
 8. [The haircut convention and the deployment decision rule](#8-the-haircut-convention-and-the-deployment-decision-rule)
 9. [Reproducibility](#9-reproducibility)
 10. [The gate](#10-the-gate)
@@ -65,7 +66,7 @@ each is closed explicitly:
 |------|-----------|
 | Donchian channel including the current bar's high | `donchian_high`/`donchian_low` are shifted by one bar (SPEC Contract 5) |
 | Rolling statistics computed over the whole series then sliced | All indicators are causal rolling/`ewm` operations; no centred windows, no `bfill` |
-| Universe membership known in advance | **Not closed.** This is the survivorship problem — see §7 |
+| Universe membership known in advance | **Not closed.** This is the survivorship problem — see §7. The half of it that *is* fixable from data already on disk — trading a company before it joined its index — is measured in §7.1, and in aggregate it accounts for more than the stock run's whole profit |
 
 **No wall-clock in logic.** `asof` is passed down from the entry point; `datetime.now()` is never
 called inside strategy or engine code. This is what makes a rerun of a historical date reproduce that
@@ -577,6 +578,248 @@ than the arithmetic mean would suggest.
 
 Both runs are executed as part of integration (SPEC AC18) and both reports are retained.
 
+### 7.1 Index-membership look-ahead: measured, and only half-fixable here
+
+Bias B above — trading a company during the years before it joined the index — is the half of §7
+that does **not** need delisted prices to attack. The join dates are already on disk. This section
+records what was built, what it measures, and why the correction is not yet switched on.
+
+#### The data, and its uneven coverage
+
+Beside each index snapshot sits `src/swing/assets/universe/<index>-membership.csv`, one row per
+membership *stint*: `symbol,name,added,removed`. A blank `removed` means "still a member"; the
+literal `unknown` means the stint ended and no source records when. `swing.universe.membership()`
+reads a file, `membership_windows()` turns it into disjoint eligible windows per symbol (both ends
+inclusive), and `members_asof(day, cfg)` answers who was in an index on a given day.
+
+**Coverage is uneven and that is the caveat that governs everything below.** Of the 1,506 stocks in
+today's universe, a source states a join date for 1,156 — **76.8%** — and the shortfall is
+concentrated:
+
+| Index | current members | with a stated join date | coverage |
+|---|---|---|---|
+| S&P 500 | 503 | 503 | 100% |
+| S&P 400 | 400 | 303 | 76% |
+| S&P 600 | 603 | 350 | 58% |
+
+So a point-in-time correction is *itself* uneven: nearly perfect for large caps, half-blind for
+small caps, which is the opposite of where a momentum strategy's most flattering trades live.
+
+Eligibility is read as the **union of a symbol's stints across every enabled index**, not just the
+index it sits in today. A company in the S&P 500 until 2016 and in the S&P 400 since 2021 was an
+index constituent throughout both, and reading only its current index would delete a decade of
+legitimate membership.
+
+None of this touches `swing scan`. The live scanner asks who is in an index *today*, and today's
+snapshot is the point-in-time answer for today; there is no look-ahead to remove. This is a backtest
+problem exclusively, which is why the knobs live under `[backtest]`.
+
+#### The unknown-join-date policy, and why the default is the conservative one
+
+A symbol whose join date no source states must **not** default to "member since the dawn of time" —
+that silently reinstates the whole bias for 42% of the S&P 600. `[backtest] membership_unknown`
+makes the choice explicit and reportable:
+
+- `"exclude"` (the default) — no stated date, no membership. Conservative, and it **over**-corrects:
+  absence of evidence is treated as evidence of absence, so genuine members are dropped.
+- `"include"` — an unstated join date means "a member from the beginning of the data". This is the
+  flattering reading, and it **under**-corrects.
+
+The two bracket the truth; neither is it. Every run reports which was in force and how many symbols
+it moves, in `summary.json` under `membership` — and that count is measured, not inferred: the
+policy changes the eligible windows of **610** of the 1,506 stocks, more than the 350 with no stated
+join date, because a stint whose *end* is unstated is relaxed by `"include"` as well.
+
+#### How big is the bias? Three readings of the same window
+
+Window 2010-01-01 to 2025-12-31, 1,506 stocks, so **24,096 nominal member-years** — the same
+denominator [`survivorship.md`](survivorship.md) §5.2 uses.
+
+| Reading | provable member-years | unvouched-for | share |
+|---|---|---|---|
+| Per index, stated join dates only (`survivorship.md` §5.2) | 13,527 | **10,569** | 44% |
+| Union across indices, unstated dates assumed present (`include`) | 16,897 | **7,199** | 30% |
+| Union across indices, unstated dates excluded (`exclude`, the default) | 8,672 | **15,424** | 64% |
+
+The middle row corrects the first: 3,370 of §5.2's 10,569 member-years were not pre-membership at
+all, they were spent in a *different* S&P index, and §5.2's per-index arithmetic counted the move as
+an arrival. The bottom row is what the shipping default would actually enforce, and it is much
+larger because it also drops the 350 symbols with no stated join date entirely.
+
+The same thing said as a universe size, under the default policy: on 2010-01-04 the backtest trades
+1,506 stocks, of which **273 (18%)** can be shown to have been in an index that day. By 2019 it is
+531 (35%); by the end of 2025, 1,060 (70%). That last 30% is pure coverage gap, not departure —
+every one of those names is in today's snapshot by definition, so it *is* a member; no source simply
+dates the stint it is in. It is the clearest illustration of how far `"exclude"` over-corrects.
+
+#### What it costs the headline numbers
+
+Measured on a real stocks walk-forward — `reports/backtest/ablate-membership-off`, 1,505 symbols,
+OOS 2013-01-01 to 2025-12-31, 685 trades, profit factor **1.066**, net **+$3,523** on $10,000 of
+reference capital — by asking of every trade whether its symbol was an index member on the day it
+was *entered*:
+
+| Subset (`include` policy — only demonstrably pre-membership trades are separated) | trades | net P&L | profit factor |
+|---|---|---|---|
+| Entered **before** the symbol's stated join date | 201 (29%) | **+$6,683** | **1.399** |
+| Everything else | 484 (71%) | **−$3,160** | **0.913** |
+| All trades (the reported result) | 685 | +$3,523 | 1.066 |
+
+Under the conservative `exclude` policy the split is 260 provable-member trades (+$616, PF 1.036)
+against 425 unprovable ones (+$2,907, PF 1.081).
+
+**In aggregate the split is stark: the 201 entries taken before their company joined an index
+account for more than the entire profit of the run, and the other 484 trades lose money.** That is
+consistent with the mechanism — index inclusion is an outcome of past growth, and this strategy buys
+past growth — but the aggregate is the least informative view of it.
+
+##### The same split, per index — and this is what stops it being a headline
+
+| Index | join-date coverage | pre-membership entries | member entries |
+|---|---|---|---|
+| S&P 500 | 100% | 47 trades, PF **1.168**, +$747 | 220 trades, PF **1.209**, +$2,797 |
+| S&P 400 | 76% | 69 trades, PF **1.646**, +$3,397 | 117 trades, PF **0.849**, −$1,371 |
+| S&P 600 | 58% | 85 trades, PF **1.359**, +$2,539 | 147 trades, PF **0.670**, −$4,586 |
+
+**On the S&P 500 — the one index whose join dates are complete — the effect is absent.** Trades
+taken before a company joined performed *slightly worse* than trades taken while it was a member.
+The whole of the aggregate effect lives in the mid- and small-cap names, and that is exactly where
+the two candidate explanations are impossible to tell apart:
+
+(This table uses the `include` reading deliberately. It is the only one that separates
+*demonstrably* pre-membership entries — the symbol has a stated join date and the entry predates it
+— from everything else. The conservative `exclude` reading also throws stints with an unstated
+*removal* date into the "pre" bucket, which is not the same claim, and under it even the S&P 500
+splits 1.348 against 1.118. Read that as a reason to trust the `include` table for this question,
+not as a second result.)
+
+- **It is real.** A company promoted to the S&P 600 in 2020 was a much smaller company in 2014, and
+  buying its 2014 momentum is precisely the look-ahead. Small caps are where index inclusion is most
+  informative about past growth, so this is where the bias *should* be largest.
+- **It is an artefact.** The 400 and 600 change tables only begin in 2012 and 2019
+  ([`survivorship.md`](survivorship.md) §3), so for those names "before the stated join date" is
+  largely "before the source starts", and the pre/member split is partly a split by *date* rather
+  than by membership — which then picks up whatever the market did in each period.
+
+The year-by-year breakdown argues against the artefact being the whole story: comparing the two
+buckets *within* each calendar year, which controls for the market, pre-membership entries have the
+higher profit factor in 9 of the 13 out-of-sample years. But 685 trades split thirteen ways is not
+evidence anyone should lean on.
+
+Four honest qualifications, because the top table is easy to over-read:
+
+1. **It is an attribution, not a re-simulation.** Removing an entry frees cash and a slot, and the
+   next-ranked candidate takes them, so a genuine point-in-time run would not produce the 484-trade
+   row. The direction is credible; the magnitude is not a forecast of what the corrected run would
+   print.
+2. **The per-index table is the load-bearing one, and it is not one-way.** Where the data is good,
+   the effect is not there. "The strategy's entire edge is look-ahead" is a fair description of the
+   aggregate arithmetic and an overstatement of what has actually been shown.
+3. **The 685 trades are a small sample** (§5). A profit-factor gap of 0.49 between two subsets of a
+   685-trade run has a wide confidence interval around it.
+4. **`min_dollar_volume` already screens some pre-inclusion exposure**, since companies are smaller
+   before they are promoted. How much is not measured.
+
+The honest summary: the look-ahead is measurable, it is large in aggregate, it is concentrated
+exactly where the membership data is weakest, and settling whether that concentration is the bias or
+the data requires the re-simulation the next section explains is not yet possible.
+
+#### Why the correction is not switched on
+
+`[backtest] membership` accepts `"point_in_time"`, validates it, and then **refuses the run** with a
+plain-English error. The default is `"off"`, which is what every report in this repo used.
+
+Membership has to gate **entries, per symbol, per day**, exactly as the SPY regime filter does — and
+the only place that decision exists is `engine._build_plan`, where
+`signal = trend & entry & liquid & ~blackout`. `run_engine` takes no per-symbol eligibility
+argument, so the runner has no way to hand it one. The two things the runner *could* do instead were
+rejected:
+
+- **Trim each symbol's bars to its membership window.** Every indicator's warm-up then restarts at
+  the join date, so the symbol stays untradable for a further year, and a symbol with two stints
+  gets rolling windows that silently span the gap. It changes the indicators to fix the universe.
+- **Encode the excluded days as synthetic earnings dates.** The blackout bleeds
+  `earnings_blackout_days` past both boundaries, moves the membership edge whenever that knob moves,
+  and falsifies `earnings_blackout_simulated`.
+
+A report labelled point-in-time that had quietly traded the full universe would be worse than no
+report, so the run stops instead. The seam that would close it is small and provably inert when
+unused: an `eligible: dict[str, np.ndarray] | None = None` argument on `run_engine`, ANDed into
+`signal` inside `_build_plan` (the composed `signal` is not itself cached, so no cache key changes),
+forwarded by `run_walkforward` and `sensitivity_table` to their three `run_engine` calls.
+
+Two semantics are fixed here in advance so that wiring is a mechanical change rather than a design
+one. **Membership gates entries only**, exactly as the regime filter does (§1): a position already
+open when its company leaves an index keeps trailing its stop until a stop, the time stop or the end
+of data takes it out — being dropped from an index is not a reason to sell at the open, and forcing
+one would invent an exit the live system does not have. And **both ends of a window are inclusive**:
+a symbol is a member on its join date and on its removal date. Signals are generated at a close and
+filled at the next open, so a signal generated on the removal date still fills the following
+morning — the same one-bar lag every other gate in the engine carries.
+
+#### What every report now carries
+
+`summary.json` gained a `membership` block, written for **every** run including a default one,
+because the useful question is not "was a correction applied" but "how big is the thing that was
+not corrected":
+
+This is the real block from `reports/backtest/ablate-membership-off`, the stocks run measured above.
+Its 1,505 symbols are the 1,506 stocks in the universe minus one with no price history, which is
+also why its counts sit one below the universe-wide figures quoted earlier:
+
+```json
+"membership": {
+  "mode": "off", "applied": false, "unknown_policy": "exclude",
+  "symbols_gated": 1505, "symbols_ungated": 0,
+  "symbols_excluded": 0, "symbols_policy_sensitive": 609,
+  "symbols_unknown_join": 349, "symbols_no_membership_row": 0,
+  "join_date_coverage_pct": 76.810631,
+  "join_date_coverage": {
+    "sp500": {"members": 503, "with_join_date": 503},
+    "sp400": {"members": 400, "with_join_date": 303},
+    "sp600": {"members": 602, "with_join_date": 350}
+  },
+  "member_years": 25040.068446,
+  "member_years_point_in_time": 9374.691307,
+  "member_years_nominal": 25040.068446
+}
+```
+
+Read it as: over its data span of 2010-01-01 to 2026-08-21 this run traded **25,040 member-years**,
+of which a membership file can vouch for **9,375**. It applied no correction (`applied: false`), and
+the unknown-date policy it *would* have used is one that 609 of its 1,505 symbols are sensitive to.
+(The 24,096 in the table above is the same arithmetic over the shorter 2010–2025 window, so that it
+lines up with [`survivorship.md`](survivorship.md) §5.2.)
+
+`symbols_gated + symbols_ungated == n_symbols`, so a reader can check the block against the run it
+sits in. ETFs and `extra_symbols` are never index constituents, so they are counted as *ungated* and
+appear in no member-year figure: an ETF-only run reports zero member-years, which is the correct
+answer rather than a missing one.
+
+An unreadable membership file does not stop the run — the block is provenance, not simulation input,
+and a diagnostic that can kill forty minutes of work is a worse bug than the one it reports on. It
+degrades to a single `error` key instead of to a row of zeros, so a reader can never mistake "we
+could not look" for "we looked and there is no bias".
+
+#### The default path is provably unchanged
+
+The knobs default to today's behaviour, and that was verified rather than asserted:
+
+- **`config_hash` is unchanged** — still `c6782f8d…` for the shipping configuration. Both new keys
+  are dropped from the hash payload while `membership = "off"`, on the same argument
+  [`[backtest.tuning_grid]`](#the-candidate-values-backtesttuning_grid) uses: a config that leaves
+  them alone, a config that spells the defaults out, and every report written before they existed
+  all describe the same experiment. Turning the mode on *does* move the hash, because a different
+  universe is a different experiment.
+- **Two control runs are byte-identical.** The ETF walk-forward (unaffected by construction — ETFs
+  have no membership data) was run from a clean checkout of the previous commit and from the changed
+  tree, same config, same cache: `trades.csv` and `equity.csv` match byte for byte, `data_hash` and
+  `config_hash` match, and `summary.json` differs by exactly one added key. The **stocks**
+  walk-forward — the affected universe, 1,505 symbols, thirteen folds — was then run before and
+  after the change and produced the same two files byte for byte, the same `data_hash`, and the same
+  out-of-sample profit factor of 1.0663 over 685 trades.
+- **`latest.json` was not touched.** Every run above carried the `ablate` label prefix.
+
 ---
 
 ## 8. The haircut convention and the deployment decision rule
@@ -598,6 +841,16 @@ no survivorship haircut.
 
 These numbers are **conventions, not measurements.** They are stated so that the same haircut is
 applied to every run, including runs that would otherwise look good enough to deploy.
+
+**§7.1 puts a measurement beside the Bias B allowance for the first time, and it does not settle
+it.** The allowance above is ~2.0 pp of CAGR, set by judgment as "at least as large as Bias A". The
+trade-level attribution finds pre-membership entries accounting for more than all of the stock run's
+profit in aggregate — far more than 2.0 pp — but finds no effect at all on the one index whose join
+dates are complete. **The convention is deliberately left alone**, in both directions: it was fixed
+in advance precisely so it could not be tuned after seeing a result, and an attribution over 685
+trades is not the re-simulation that would justify moving it. Read it as a reason to distrust a
+stock-universe result that lands close to the deployment bar until §7.1's engine seam is wired and
+the number is re-measured properly.
 
 ### Relationship to the mechanical gate
 
@@ -813,8 +1066,16 @@ Collected in one place, ordered by how much they should worry a reader.
 
 1. **Survivorship bias in the stock universe (§7).** The largest and least fixable error. Priced by
    convention in §8; not removed.
-2. **Point-in-time universe membership is unavailable at all**, so Bias B (index-inclusion
-   look-ahead) is correlated with the strategy's own signal — worse than a generic return bias.
+2. **Index-inclusion look-ahead is measured but not removed (§7.1).** Bias B is correlated with the
+   strategy's own signal, which makes it worse than a generic return bias. In aggregate it accounts
+   for more than the entire reported profit — the 201 out-of-sample trades entered before their
+   company joined an index earned a profit factor of 1.40 against 0.913 for the other 484 — but the
+   whole of that effect sits in the mid- and small-cap names, where join-date coverage is 76% and
+   58%; on the S&P 500, where coverage is complete, there is no effect to find. Whether that
+   concentration is the bias or the data cannot be settled by attribution. Point-in-time membership
+   data *is* on disk (unlike the delisted prices Bias A would need) and
+   `[backtest] membership = "point_in_time"` is defined and validated, but the run refuses, because
+   the simulator takes no per-symbol eligibility argument.
 3. **Every effect used is long-published** (§8, McLean & Pontiff 2016). Post-publication decay is
    acknowledged and not priced.
 4. **Small trade counts** (§5). Confidence intervals on every reported metric are wide; ablation
