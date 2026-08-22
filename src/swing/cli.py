@@ -419,6 +419,99 @@ def kill(
     broker_kill(cfg, off=off)
 
 
+shadow_app = typer.Typer(
+    name="shadow",
+    help=(
+        "Forward paper trading. Record what each tracked configuration WOULD do, score those "
+        "decisions against real bars as they arrive, and compare. No broker, no money, and no "
+        "conclusions until the sample is large."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(shadow_app)
+
+
+def _shadow_error() -> type[Exception]:
+    """The shadow harness's refusal exception, imported when it is needed.
+
+    Same reasoning as :func:`_scan_error`: the CLI must survive a checkout in
+    which the module is absent, and in such a checkout nothing can raise it.
+    """
+    try:
+        from swing.shadow import ShadowError
+    except (ImportError, AttributeError):  # pragma: no cover - shadow always ships
+        return _Unreachable
+    return ShadowError
+
+
+_CONFIG_OPTION = typer.Option(
+    "--config-name",
+    metavar="NAME",
+    help="Only this tracked configuration (repeatable). Default: all of them.",
+)
+
+
+@shadow_app.command("run")
+def shadow_run(
+    ctx: typer.Context,
+    asof: Annotated[
+        str | None,
+        typer.Option("--asof", metavar="YYYY-MM-DD", help="Pretend today is this date."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be recorded; write nothing.")
+    ] = False,
+    config_name: Annotated[list[str] | None, _CONFIG_OPTION] = None,
+) -> None:
+    """Record today's hypothetical picks for every tracked configuration.
+
+    Deliberately ignores the trading gate — these are hypothetical decisions
+    whose job is to generate the evidence the gate wants — but stamps every
+    record with the gate's verdict so nothing here can be mistaken for a
+    validated pick.
+    """
+    cfg = _load_cfg(ctx)
+    day = _parse_date(asof, "--asof")
+    run = _entry("swing.shadow", "run", "shadow run")
+    try:
+        run(cfg, asof=day, dry_run=dry_run, names=config_name or None, emit=typer.echo)
+    except _shadow_error() as exc:
+        raise _refuse(exc) from exc
+
+
+@shadow_app.command("score")
+def shadow_score(
+    ctx: typer.Context,
+    asof: Annotated[
+        str | None,
+        typer.Option("--asof", metavar="YYYY-MM-DD", help="Score against bars up to this date."),
+    ] = None,
+    config_name: Annotated[list[str] | None, _CONFIG_OPTION] = None,
+) -> None:
+    """Walk recorded positions forward against real bars and close the finished ones."""
+    cfg = _load_cfg(ctx)
+    day = _parse_date(asof, "--asof")
+    score = _entry("swing.shadow", "score", "shadow score")
+    try:
+        score(cfg, asof=day, names=config_name or None, emit=typer.echo)
+    except _shadow_error() as exc:
+        raise _refuse(exc) from exc
+
+
+@shadow_app.command("report")
+def shadow_report(
+    ctx: typer.Context,
+    config_name: Annotated[list[str] | None, _CONFIG_OPTION] = None,
+) -> None:
+    """Compare the tracked configurations side by side, small print first."""
+    cfg = _load_cfg(ctx)
+    build = _entry("swing.shadow", "report", "shadow report")
+    try:
+        typer.echo(build(cfg, names=config_name or None))
+    except _shadow_error() as exc:
+        raise _refuse(exc) from exc
+
+
 @app.command()
 def universe(
     ctx: typer.Context,

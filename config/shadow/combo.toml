@@ -1,0 +1,158 @@
+# SHADOW TRACKED CONFIGURATION — "combo"
+# ---------------------------------------------------------------------------
+# The leading candidate out of the eleven backtest experiments: baseline plus
+# a strict breakout (no "close enough" band) and a WIDER TUNING GRID for the
+# walk-forward tuner to search.
+#
+# WHY IT IS BEING SHADOWED RATHER THAN SHIPPED
+#   It won on the same 2013-2025 out-of-sample window that all eleven
+#   experiments were scored against. After the eleventh look, that window is
+#   not out of sample any more in any sense that matters — "best of eleven on
+#   one dataset" is a selection, and selections beat their honest expectation
+#   by construction. Forward data is the only way to find out whether this
+#   configuration is actually better than the control or merely luckier on the
+#   history that chose it.
+#
+# WHAT "COMBO" MEANS IN THE BACKTEST PROGRAMME
+#   Two ideas stacked: STRICT ENTRY (no proximity band) and WIDE STOPS. In the
+#   backtest, wide stops were expressed by widening [backtest.tuning_grid] and
+#   letting the walk-forward tuner pick a value per fold. That works for a
+#   backtest and does not work here — see the next block.
+#
+# HOW IT DIFFERS FROM baseline.toml — three things, all of them live:
+#   1. strategy.breakout_proximity_pct  2.0 -> 0.0
+#      Only a genuine new N-day high is an entry; being within 2% of one is
+#      not. Fewer, cleaner signals.
+#   2. strategy.atr_stop_mult           2.0 -> 3.5
+#   3. strategy.chandelier_mult         3.0 -> 5.0
+#      The wide-stops half of the hypothesis, written as fixed values the
+#      scanner actually reads.
+#
+# WHY THE STOPS ARE HARD-CODED HERE, AND WHY THESE TWO NUMBERS
+#   A tuning grid is invisible to a daily scan. The live scanner — and
+#   therefore the shadow scanner, which is the same code — reads
+#   strategy.atr_stop_mult and strategy.chandelier_mult straight from this
+#   file; only the walk-forward's per-fold parameter search ever looks at
+#   [backtest.tuning_grid]. Leaving the grid to carry the wide-stops idea meant
+#   this arm was quietly running baseline's 2.0/3.0 stops, i.e. testing strict
+#   entry alone. A year of that would have answered a question nobody asked.
+#
+#   Forward trading cannot tune: there is no in-sample fold to select from, so
+#   one fixed pair has to stand in for whatever the tuner would have chosen.
+#
+#     atr_stop_mult = 3.5   Across the wide-stops and combo runs the tuner
+#                           chose 3.5 more often than any other value. It is
+#                           the modal selection, so it is the least arbitrary
+#                           single number available.
+#
+#     chandelier_mult = 5.0 The modal pick was 6.0 — but 6.0 was the TOP OF THE
+#                           OFFERED GRID [4.0, 5.0, 6.0]. A tuner pinned to the
+#                           boundary of its own grid is not reporting a
+#                           discovered optimum; it is reporting that the
+#                           in-sample optimum wants to run off the edge, which
+#                           is a classic overfitting signature. Taking the
+#                           interior value 5.0 is the deliberately conservative
+#                           reading of that result.
+#
+#   Both numbers are a DEFENSIBLE JUDGEMENT CALL, not a measured optimum. If
+#   this arm ever wins, that win belongs to the pair 3.5/5.0 as written here
+#   and to nothing else.
+#
+#   [backtest.tuning_grid] is kept below anyway. It is inert for the scanner,
+#   and it keeps this file honest about where the arm came from.
+#
+# READ THIS BEFORE INTERPRETING THE SHADOW COMPARISON
+#   Entry and exit now differ TOGETHER. This is a legitimate A/B of two whole
+#   configurations — "strict breakout + wide stops" against "2% band + default
+#   stops" — and that is the only claim the forward record can support. It
+#   cannot attribute any future difference to the entry rule or to the stops
+#   individually; separating those would need a third and fourth arm.
+#
+# See config/shadow/baseline.toml for what this file may and may not contain,
+# and docs/paper-trading.md for how the comparison is run and read.
+# ---------------------------------------------------------------------------
+
+
+[account]
+equity = 100.0
+risk_pct = 2.5
+max_positions = 4
+max_position_pct = 25.0
+
+
+[universe]
+sp500 = true
+sp400 = true
+sp600 = true
+etfs = true
+extra_symbols = []
+
+
+[strategy]
+# --- liquidity floor -------------------------------------------------------
+min_price = 5.0
+min_dollar_volume = 5000000.0
+
+# --- trend template --------------------------------------------------------
+sma_fast = 50
+sma_mid = 150
+sma_slow = 200
+sma_slow_rising_days = 21
+min_above_low_mult = 1.25
+max_below_high_pct = 25.0
+adx_min = 20.0
+
+# --- entry trigger ---------------------------------------------------------
+donchian_window = 20
+breakout_proximity_pct = 0.0    # DIFFERENCE 1: strict breakout, no proximity band
+volume_mult = 1.3
+volume_avg_window = 50
+
+# --- exits -----------------------------------------------------------------
+atr_window = 14
+atr_stop_mult = 3.5     # DIFFERENCE 2: wide initial stop (modal tuner pick)
+chandelier_mult = 5.0   # DIFFERENCE 3: wide trail (interior value, NOT the modal 6.0 — see header)
+time_stop_days = 40
+earnings_blackout_days = 10
+
+# --- ranking ---------------------------------------------------------------
+mom_weight_126 = 0.6
+mom_weight_63 = 0.4
+mom_skip_days = 5
+
+# --- optional --------------------------------------------------------------
+rsi2_enabled = false
+fundamentals_filter = true
+
+
+[regime]
+enabled = true
+symbol = "SPY"
+sma_window = 200
+
+
+[backtest]
+start = 2010-01-01
+slippage_bps = 5.0
+spread_atr_frac = 0.05
+is_years = 3
+oos_years = 1
+initial_equity = 10000.0
+
+
+# The wider walk-forward tuning grid this arm was born from.
+# INERT FOR THE SCANNER. `swing backtest --walkforward` searches it; the daily
+# scan — live or shadow — uses the fixed [strategy] values above. It is kept
+# here for lineage, not because it changes what this arm trades. See the header
+# for why the wide stops had to be written out as fixed multiples instead.
+[backtest.tuning_grid]
+atr_stop_mult = [2.5, 3.5, 4.5]
+chandelier_mult = [4.0, 5.0, 6.0]
+donchian_window = [15, 20, 25]
+volume_mult = [1.0, 1.3, 1.6]
+
+
+[gates]
+min_profit_factor = 1.3
+max_drawdown_pct = 35.0
+min_trades = 30
