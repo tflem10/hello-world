@@ -29,7 +29,8 @@ ENTRY GATE
 ----------
 A symbol is a candidate on bar ``t`` when ALL of these are true at ``t``::
 
-    trend_template & entry_signal & liquidity_ok & entries_allowed & ~earnings_blackout
+    trend_template & entry_signal & liquidity_ok & entries_allowed
+        & ~earnings_blackout & eligible
 
 ...and its momentum score is a finite number. A NaN score means the symbol is
 still warming up or its ATR% is under the floor
@@ -40,6 +41,14 @@ outright, so the engine drops them too rather than merely ranking them last
 ``entries_allowed`` (the SPY regime filter) gates **entries only**. A regime
 that turns off does not close existing positions; they keep trailing their
 stops until a stop, the time stop, or the end of data takes them out.
+
+``eligible`` is the optional per-symbol mask the ``eligible=`` argument of
+:func:`run_engine` supplies — point-in-time index membership is the caller that
+uses it. It gates **entries only**, on exactly the same argument as the regime
+filter: a company dropped from an index keeps trailing its stop until the
+normal ladder takes it out, because being dropped from an index is not an exit
+the live system has. Omitting the argument leaves the composition above
+literally unchanged, which is what makes the default path provably inert.
 
 EXIT LADDER (evaluated in this order, first match wins)
 -------------------------------------------------------
@@ -563,6 +572,36 @@ def _plan_static(
     return (open_, high, low, close, row_of_day, day_of_row)
 
 
+def _eligibility_mask(symbol: str, mask: np.ndarray, frame: pd.DataFrame) -> np.ndarray:
+    """Validate one caller-supplied eligibility mask before it reaches ``signal``.
+
+    Strict rather than forgiving, because both ways of being wrong here fail
+    *silently* and produce a plausible report:
+
+    * a length mismatch that happens to broadcast, or
+    * a non-boolean array. ``signal`` is consumed as ``day_of_row[signal]``, so
+      an integer mask would quietly become fancy indexing — picking rows *by
+      position* instead of filtering them — and the run would still finish.
+
+    A mask is aligned to ``frame``'s own index by position, so it must be a
+    boolean array of exactly ``len(frame)`` entries.
+    """
+    array = np.asarray(mask)
+    if array.dtype != np.bool_:
+        raise ValueError(
+            f"The eligibility mask for {symbol!r} has dtype {array.dtype}, but it must be a "
+            f"boolean array: the engine uses it to filter rows, and a non-boolean mask would "
+            f"silently be read as a list of row positions instead."
+        )
+    if array.shape != (len(frame),):
+        raise ValueError(
+            f"The eligibility mask for {symbol!r} has shape {array.shape}, but that symbol has "
+            f"{len(frame)} bars. A mask is aligned to the symbol's own bar index by position, "
+            f"so it must have exactly one entry per bar."
+        )
+    return array
+
+
 def _build_plan(
     symbol: str,
     frame: pd.DataFrame,
@@ -573,6 +612,7 @@ def _build_plan(
     earnings_date: date | Sequence[date] | None,
     cache: SignalCache,
     calendar_ident: str,
+    eligible: np.ndarray | None = None,
 ) -> _SymbolPlan | None:
     """Compute every array this symbol needs.
 
@@ -585,6 +625,12 @@ def _build_plan(
     Everything is memoised as a flat numpy array rather than as a Series
     (audit PERF-001): the alignment work is part of the cached value, so the
     81st grid point pays a dict lookup instead of eleven pandas round-trips.
+
+    ``eligible`` is the one input that is deliberately **not** memoised. It is
+    ANDed into the composed ``signal`` below, and that composition already
+    happens outside the cache on every call, so an eligibility mask needs no
+    cache key of its own — and, more to the point, cannot invalidate anyone
+    else's. Passing ``None`` reproduces the previous expression exactly.
     """
     from swing.strategy import rules, scoring
 
@@ -659,6 +705,16 @@ def _build_plan(
         lambda: _plan_static(symbol, frame, calendar),
     )
 
+    # Composed here, on every call, from cached parts — never itself cached.
+    # That is what lets `eligible` join the expression without a cache key, and
+    # `&` allocates a fresh array at every step, so no cached component is
+    # mutated. Do NOT rewrite this as `signal &= elig`: today `signal` is
+    # provably a fresh array, but an in-place AND would corrupt the cache the
+    # moment a future edit let it alias a cached one.
+    signal = trend & entry & liquid & ~blackout
+    if eligible is not None:
+        signal = signal & _eligibility_mask(symbol, eligible, frame)
+
     mapped_days = np.flatnonzero(row_of_day >= 0)
     return _SymbolPlan(
         symbol=symbol,
@@ -671,7 +727,7 @@ def _build_plan(
         chandelier=chandelier,
         score=score,
         high_prox=prox,
-        signal=trend & entry & liquid & ~blackout,
+        signal=signal,
         row_of_day=row_of_day,
         day_of_row=day_of_row,
         last_valid_day=int(mapped_days[-1]) if len(mapped_days) else -1,
@@ -721,6 +777,7 @@ def run_engine(
     start: date | None = None,
     end: date | None = None,
     cache: SignalCache | None = None,
+    eligible: dict[str, np.ndarray] | None = None,
 ) -> EngineResult:
     """Simulate the strategy over ``bars_by_symbol`` and return the result.
 
@@ -739,6 +796,23 @@ def run_engine(
         end: last simulated date (inclusive). ``None`` means the last bar.
         cache: optional :class:`SignalCache` shared across runs over the same
             data — a pure speed knob, it cannot change results.
+        eligible: optional per-symbol entry gate, ``{symbol: bool array}``, each
+            array aligned **by position** to that symbol's own bar index (so
+            ``len(mask) == len(bars_by_symbol[symbol])``). False on a bar means
+            "no entry may be *decided* on this bar"; the fill still lands at the
+            next open, the same one-bar lag every other gate carries. Like the
+            regime filter this gates entries only — a position already open on a
+            bar that turns ineligible keeps trailing its stop until the normal
+            exit ladder takes it out. A symbol absent from the dict is
+            unrestricted, matching how ``earnings`` and ``is_etf`` treat a
+            missing key; ``None`` (the default) skips the mechanism entirely and
+            leaves every signal bit-for-bit as it was before this argument
+            existed. Point-in-time index membership is the caller this exists
+            for — see ``swing.backtest.runner``.
+
+    Raises:
+        ValueError: if an ``eligible`` mask is not a boolean array with exactly
+            one entry per bar of the symbol it names.
 
     Returns:
         An :class:`EngineResult`. Every position is closed in ``trades``; any
@@ -777,6 +851,7 @@ def run_engine(
             earnings_date=earnings.get(symbol),
             cache=cache,
             calendar_ident=calendar_ident,
+            eligible=None if eligible is None else eligible.get(symbol),
         )
         if plan is not None:
             plans.append(plan)

@@ -66,7 +66,7 @@ each is closed explicitly:
 |------|-----------|
 | Donchian channel including the current bar's high | `donchian_high`/`donchian_low` are shifted by one bar (SPEC Contract 5) |
 | Rolling statistics computed over the whole series then sliced | All indicators are causal rolling/`ewm` operations; no centred windows, no `bfill` |
-| Universe membership known in advance | **Not closed.** This is the survivorship problem — see §7. The half of it that *is* fixable from data already on disk — trading a company before it joined its index — is measured in §7.1, and in aggregate it accounts for more than the stock run's whole profit |
+| Universe membership known in advance | **Not closed by default.** This is the survivorship problem — see §7. The half of it that *is* fixable from data already on disk — trading a company before it joined its index — is measured in §7.1, and `[backtest] membership = "point_in_time"` will remove it, at the cost of a universe that is itself only 77% dated. The default is `off`, so every headline in this document carries the bias |
 
 **No wall-clock in logic.** `asof` is passed down from the entry point; `datetime.now()` is never
 called inside strategy or engine code. This is what makes a rerun of a historical date reproduce that
@@ -582,7 +582,8 @@ Both runs are executed as part of integration (SPEC AC18) and both reports are r
 
 Bias B above — trading a company during the years before it joined the index — is the half of §7
 that does **not** need delisted prices to attack. The join dates are already on disk. This section
-records what was built, what it measures, and why the correction is not yet switched on.
+records what was built, what it measures, what happened when the correction was actually applied,
+and why the default is nevertheless still `off`.
 
 #### The data, and its uneven coverage
 
@@ -720,42 +721,100 @@ Four honest qualifications, because the top table is easy to over-read:
 4. **`min_dollar_volume` already screens some pre-inclusion exposure**, since companies are smaller
    before they are promoted. How much is not measured.
 
-The honest summary: the look-ahead is measurable, it is large in aggregate, it is concentrated
-exactly where the membership data is weakest, and settling whether that concentration is the bias or
-the data requires the re-simulation the next section explains is not yet possible.
+The honest summary of the attribution: the look-ahead is measurable, it is large in aggregate, and
+it is concentrated exactly where the membership data is weakest. The next section re-simulates it
+properly, and the re-simulation does not agree with the aggregate.
 
-#### Why the correction is not switched on
+#### The correction, switched on
 
-`[backtest] membership` accepts `"point_in_time"`, validates it, and then **refuses the run** with a
-plain-English error. The default is `"off"`, which is what every report in this repo used.
+`[backtest] membership = "point_in_time"` used to validate and then refuse the run. It now runs.
+The default is still `"off"`, which is what every report in this repo outside this section used.
 
-Membership has to gate **entries, per symbol, per day**, exactly as the SPY regime filter does — and
-the only place that decision exists is `engine._build_plan`, where
-`signal = trend & entry & liquid & ~blackout`. `run_engine` takes no per-symbol eligibility
-argument, so the runner has no way to hand it one. The two things the runner *could* do instead were
-rejected:
+Membership gates **entries, per symbol, per day**, exactly as the SPY regime filter does, and the
+only place that decision exists is `engine._build_plan`. The seam is one optional argument:
 
-- **Trim each symbol's bars to its membership window.** Every indicator's warm-up then restarts at
-  the join date, so the symbol stays untradable for a further year, and a symbol with two stints
-  gets rolling windows that silently span the gap. It changes the indicators to fix the universe.
-- **Encode the excluded days as synthetic earnings dates.** The blackout bleeds
-  `earnings_blackout_days` past both boundaries, moves the membership edge whenever that knob moves,
-  and falsifies `earnings_blackout_simulated`.
+```python
+run_engine(..., eligible: dict[str, np.ndarray] | None = None)   # mask per symbol, per bar
+signal = trend & entry & liquid & ~blackout          # unchanged when eligible is None
+signal = signal & eligible[symbol]                   # one extra AND when it is not
+```
 
-A report labelled point-in-time that had quietly traded the full universe would be worse than no
-report, so the run stops instead. The seam that would close it is small and provably inert when
-unused: an `eligible: dict[str, np.ndarray] | None = None` argument on `run_engine`, ANDed into
-`signal` inside `_build_plan` (the composed `signal` is not itself cached, so no cache key changes),
-forwarded by `run_walkforward` and `sensitivity_table` to their three `run_engine` calls.
+`run_walkforward` and `sensitivity_table` forward it to their three `run_engine` calls — the
+in-sample tuning runs included, so the tuner searches the same universe the out-of-sample stretch
+will be allowed to trade. `runner.run_backtest` builds the masks from `membership_windows` against
+each symbol's own bar index. **The composed `signal` is not itself cached** (only its components
+are, and `_candidates_by_day` is rebuilt per call), so no cache key changes and `eligible=None` is
+provably inert — see "The default path is provably unchanged" below.
 
-Two semantics are fixed here in advance so that wiring is a mechanical change rather than a design
-one. **Membership gates entries only**, exactly as the regime filter does (§1): a position already
-open when its company leaves an index keeps trailing its stop until a stop, the time stop or the end
-of data takes it out — being dropped from an index is not a reason to sell at the open, and forcing
-one would invent an exit the live system does not have. And **both ends of a window are inclusive**:
-a symbol is a member on its join date and on its removal date. Signals are generated at a close and
-filled at the next open, so a signal generated on the removal date still fills the following
-morning — the same one-bar lag every other gate in the engine carries.
+Two semantics, unchanged from when they were fixed in advance. **Membership gates entries only**,
+exactly as the regime filter does (§1): a position already open when its company leaves an index
+keeps trailing its stop until a stop, the time stop or the end of data takes it out — being dropped
+from an index is not a reason to sell at the open, and forcing one would invent an exit the live
+system does not have. And **both ends of a window are inclusive**: a symbol is a member on its join
+date and on its removal date. Signals are generated at a close and filled at the next open, so a
+signal generated on the removal date still fills the following morning — the same one-bar lag every
+other gate in the engine carries.
+
+Two alternatives reachable from the runner alone were rejected, and each was checked rather than
+assumed:
+
+- **Trim each symbol's bars to its membership window.** Every indicator's warm-up restarts at the
+  join date. Measured on the test fixture: a symbol whose window opens 50 bars before a valid
+  breakout keeps that signal under a mask and *loses* it under trimming, because
+  `trend_template` is still False 50 bars in. It changes the indicators to fix the universe.
+- **Encode the excluded days as synthetic earnings dates.** With `earnings_blackout_days = 10`, one
+  synthetic date on the first ineligible bar also blocks the **eight trading bars before it** (ten
+  calendar days) — including the last eligible day, whose legitimate signal then disappears: on the
+  fixture the correct mask yields one trade and this encoding yields none. The membership edge would
+  also move whenever that knob moved, and `earnings_blackout_simulated` would no longer mean what it
+  says.
+
+#### What the correction actually costs: the re-simulation
+
+Three runs over the identical universe, window and price data (`data_hash` `d2696839…` on all
+three, 1,505 stocks, OOS 2013-01-01 to 2025-12-31):
+
+| Run | `membership` | policy | trades | profit factor | net P&L | CAGR | max DD |
+|---|---|---|---|---|---|---|---|
+| `ablate-membership-off` | off | — | 685 | **1.0663** | +$3,523 | 0.88% | 51.5% |
+| `ablate-membership-pit-include` | point_in_time | `include` | 717 | **1.0692** | +$3,251 | 1.52% | 43.5% |
+| `ablate-membership-pit-exclude` | point_in_time | `exclude` | 692 | **1.0639** | +$2,659 | 0.74% | 54.1% |
+
+The gate demonstrably bit. Re-checking every trade against the membership windows, the `off` run
+took **201 entries (29%)** on days before their company's stated join date; both corrected runs took
+**zero**, under their own policy. The correction is fully applied in both.
+
+**And the headline profit factor did not move: 1.0663 → 1.0692 (`include`) → 1.0639 (`exclude`), a
+spread of 0.005.** That is an order of magnitude below the ~0.2 this document already calls noise at
+this sample size (§5). Under the permissive policy the corrected run is *very slightly better* than
+the uncorrected one on profit factor, drawdown and Sharpe — though not on net P&L, which falls in
+both corrected runs (−8% under `include`, −25% under `exclude`). This is stated plainly because it
+is the opposite of what the attribution table above implies. What follows reconciles the two; none
+of it should be read as explaining the result away.
+
+Three things make the two results compatible, and the first was written down in advance:
+
+1. **Qualification 1 above was right, and larger than expected.** Removing an entry frees cash and a
+   slot and the next-ranked candidate takes them. Trade counts go *up* under enforcement (685 → 717
+   and 692), not down: the strategy simply bought the next name on the list. The +$6,683 attributed
+   to pre-membership entries was never $6,683 of removable profit.
+2. **The tuner takes a different path.** The walk-forward chose different parameters in 12 of 13
+   folds under `include` and 13 of 13 under `exclude`. These are not perturbations of one run; they
+   are three separate searches that happen to land in the same place. Per-fold out-of-sample profit
+   factors differ wildly (2013: 0.94 / 1.45 / 3.81), and only the 13-fold aggregate is stable.
+3. **The aggregate was always the least informative view.** The per-index table above already showed
+   no effect on the S&P 500, the one index with complete join dates. A re-simulation that finds no
+   aggregate effect is consistent with that and inconsistent with the headline arithmetic.
+
+What this does **not** establish is that there is no look-ahead. The coverage caveat governs this
+result exactly as it governed the attribution: under `exclude` the correction throws away 349
+symbols entirely for want of a stated join date, and under `include` it back-dates them to the
+beginning of the data. The truth is bracketed by two runs that disagree with each other by 0.005 of
+profit factor, which is a much narrower bracket than anyone should read as precision — both
+readings are wrong in known directions, and the correction is still weakest on the S&P 600, where
+58% join-date coverage means it is half-guessing. **Real bias versus coverage artefact remains
+unresolved.** The honest change is narrower than it looks: the *attribution* over-read the effect,
+the *re-simulation* finds none at this sample size, and neither is strong enough to move §8.
 
 #### What every report now carries
 
@@ -818,7 +877,17 @@ The knobs default to today's behaviour, and that was verified rather than assert
   walk-forward — the affected universe, 1,505 symbols, thirteen folds — was then run before and
   after the change and produced the same two files byte for byte, the same `data_hash`, and the same
   out-of-sample profit factor of 1.0663 over 685 trades.
-- **`latest.json` was not touched.** Every run above carried the `ablate` label prefix.
+- **Adding the `eligible=` argument was verified the same way**, because "provably inert" is a claim
+  that has to be re-proved by whoever cashes it. The ETF walk-forward was run immediately before and
+  immediately after the seam landed, same config, same cache: `trades.csv` and `equity.csv` are
+  byte-identical (`cmp`, not a metric comparison) and `summary.json` differs only in the run label.
+  Omitting the argument is not a fast path that reproduces the old answer — it is the old
+  expression, unmodified, which is why it cannot drift. Three unit tests pin it: the engine's
+  `eligible=None`, an explicit all-True mask and no argument at all produce identical frames; a
+  cache shared across a gated and an ungated run returns each its own answer; and the AC9
+  byte-identical rerun test still passes.
+- **`latest.json` was not touched.** Every run above carried the `ablate` label prefix, and the file
+  was hashed before and after the whole exercise to confirm it.
 
 ---
 
@@ -1066,16 +1135,19 @@ Collected in one place, ordered by how much they should worry a reader.
 
 1. **Survivorship bias in the stock universe (§7).** The largest and least fixable error. Priced by
    convention in §8; not removed.
-2. **Index-inclusion look-ahead is measured but not removed (§7.1).** Bias B is correlated with the
-   strategy's own signal, which makes it worse than a generic return bias. In aggregate it accounts
-   for more than the entire reported profit — the 201 out-of-sample trades entered before their
-   company joined an index earned a profit factor of 1.40 against 0.913 for the other 484 — but the
-   whole of that effect sits in the mid- and small-cap names, where join-date coverage is 76% and
-   58%; on the S&P 500, where coverage is complete, there is no effect to find. Whether that
-   concentration is the bias or the data cannot be settled by attribution. Point-in-time membership
-   data *is* on disk (unlike the delisted prices Bias A would need) and
-   `[backtest] membership = "point_in_time"` is defined and validated, but the run refuses, because
-   the simulator takes no per-symbol eligibility argument.
+2. **Index-inclusion look-ahead is correctable but still unresolved (§7.1).** Bias B is correlated
+   with the strategy's own signal, which makes it worse than a generic return bias. Attributed
+   trade by trade it accounts for more than the entire reported profit — the 201 out-of-sample
+   trades entered before their company joined an index earned a profit factor of 1.40 against 0.913
+   for the other 484 — but that whole effect sits in the mid- and small-cap names, where join-date
+   coverage is 76% and 58%; on the S&P 500, where coverage is complete, there is no effect to find.
+   `[backtest] membership = "point_in_time"` now **runs** rather than refusing, and the
+   re-simulation removes every pre-membership entry and moves the out-of-sample profit factor by
+   0.005 in either direction depending on the unknown-date policy — well inside noise. Read that as
+   the attribution having over-read the effect, not as proof there is none: under `exclude` the
+   correction discards 349 symbols for want of a stated join date and under `include` it back-dates
+   them, so it is still weakest exactly where the bias would be strongest. The default remains
+   `off`.
 3. **Every effect used is long-published** (§8, McLean & Pontiff 2016). Post-publication decay is
    acknowledged and not priced.
 4. **Small trade counts** (§5). Confidence intervals on every reported metric are wide; ablation

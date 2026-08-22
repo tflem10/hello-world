@@ -84,6 +84,8 @@ from swing.backtest.engine import EngineResult, SignalCache, empty_equity, empty
 from swing.backtest.metrics import compute_metrics
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+
     from swing.config import Config
 
 __all__ = [
@@ -417,6 +419,7 @@ def run_walkforward(
     grid: dict[str, tuple[Any, ...]] | None = None,
     progress: Callable[[str], None] | None = None,
     on_is_evaluation: Callable[[Window, dict[str, Any], EngineResult], None] | None = None,
+    eligible: dict[str, np.ndarray] | None = None,
 ) -> WalkForwardResult:
     """Run the full walk-forward procedure and return the stitched OOS record.
 
@@ -438,6 +441,12 @@ def run_walkforward(
         on_is_evaluation: optional hook fired for every **in-sample**
             evaluation, with the window, the parameters and the raw result.
             Used by the test suite to prove no OOS bar ever reaches the tuner.
+        eligible: per-symbol entry gate, forwarded verbatim to every
+            :func:`~swing.backtest.engine.run_engine` call — both the in-sample
+            tuning runs and the out-of-sample run. The same mask on both sides
+            on purpose: tuning against a universe the OOS stretch will not be
+            allowed to trade would pick parameters for a different experiment.
+            ``None`` (the default) leaves the engine's behaviour untouched.
 
     Returns:
         A :class:`WalkForwardResult`. With no complete fold the result is empty
@@ -495,6 +504,7 @@ def run_walkforward(
                 start=window.is_start,
                 end=window.is_end,
                 cache=cache,
+                eligible=eligible,
             )
             if on_is_evaluation is not None:
                 on_is_evaluation(window, params, result)
@@ -524,6 +534,7 @@ def run_walkforward(
             start=window.oos_start,
             end=window.oos_end,
             cache=cache,
+            eligible=eligible,
         )
         folds.append(
             FoldResult(
@@ -601,6 +612,7 @@ def sensitivity_table(
     params: Sequence[str] = SENSITIVITY_PARAMS,
     step: float = SENSITIVITY_STEP,
     progress: Callable[[str], None] | None = None,
+    eligible: dict[str, np.ndarray] | None = None,
 ) -> list[dict[str, Any]]:
     """Move each parameter +/-25% on its own and report what happens.
 
@@ -608,6 +620,10 @@ def sensitivity_table(
     "is the result balanced on a knife edge?", and a parameter whose 25% nudge
     halves the profit factor is a red flag no matter what the other parameters
     do. A robust configuration sits on a plateau, not a peak.
+
+    ``eligible`` is the per-symbol entry gate, forwarded to every run in the
+    table. It has to be, or the baseline row would describe a different universe
+    from the run the table sits beside. ``None`` leaves the engine untouched.
 
     Returns:
         One row per (parameter, direction) plus a ``baseline`` row, each with
@@ -626,6 +642,7 @@ def sensitivity_table(
             start=start,
             end=end,
             cache=cache,
+            eligible=eligible,
         )
         metrics = compute_metrics(
             result.trades, result.equity, initial_equity=result.initial_equity

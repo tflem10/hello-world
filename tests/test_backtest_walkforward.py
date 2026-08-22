@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -617,6 +618,109 @@ def test_sensitivity_rows_carry_the_metrics_the_report_prints(tmp_path):
             "trades",
         ):
             assert key in row
+
+
+# ---------------------------------------------------------------------------
+# `eligible=` reaches all three run_engine call sites
+#
+# The walk-forward layer owns three of them — the in-sample tuning runs, the
+# out-of-sample run, and every row of the sensitivity table. A mask that
+# reached only some of them would tune on one universe and report another,
+# which is a subtler lie than not applying it at all.
+# ---------------------------------------------------------------------------
+
+
+def blocked_everywhere(bars: dict[str, pd.DataFrame]) -> dict[str, np.ndarray]:
+    return {symbol: np.zeros(len(frame), dtype=bool) for symbol, frame in bars.items()}
+
+
+def blocked_for(bars: dict[str, pd.DataFrame], symbols: set[str]) -> dict[str, np.ndarray]:
+    """Everything allowed except the named symbols, which are allowed nothing."""
+    return {
+        symbol: np.full(len(frame), symbol not in symbols, dtype=bool)
+        for symbol, frame in bars.items()
+    }
+
+
+WF_SPAN = {"start": date(2021, 6, 1), "end": date(2025, 5, 31)}
+
+
+def test_walkforward_without_eligible_is_unchanged(tmp_path):
+    """Inertness at this layer too: the argument must not perturb the folds."""
+    cfg = wf_cfg(tmp_path)
+    bars = wf_universe()
+    spy = ramp_bars(n=1500)
+
+    without = run_walkforward(bars, spy, cfg, grid=SMALL_GRID, **WF_SPAN)
+    with_none = run_walkforward(bars, spy, cfg, grid=SMALL_GRID, eligible=None, **WF_SPAN)
+
+    assert not without.trades.empty
+    assert [f.params for f in without.folds] == [f.params for f in with_none.folds]
+    pd.testing.assert_frame_equal(without.trades, with_none.trades)
+    pd.testing.assert_frame_equal(without.equity, with_none.equity)
+
+
+def test_walkforward_forwards_eligible_to_the_out_of_sample_run(tmp_path):
+    """A universe that is never eligible produces folds with no OOS trades at all."""
+    cfg = wf_cfg(tmp_path)
+    bars = wf_universe()
+    result = run_walkforward(
+        bars,
+        ramp_bars(n=1500),
+        cfg,
+        grid=SMALL_GRID,
+        eligible=blocked_everywhere(bars),
+        **WF_SPAN,
+    )
+    assert result.folds, "the span still yields folds; they are simply empty"
+    assert result.trades.empty
+
+
+def test_walkforward_forwards_eligible_to_the_in_sample_tuning_runs(tmp_path):
+    """The tuner must search the same universe the OOS run will be allowed to trade.
+
+    Hooked directly: every in-sample evaluation is inspected, and no trade in
+    any of them may name a blocked symbol. Tuning on a universe the OOS
+    stretch cannot trade would choose parameters for a different experiment.
+    """
+    cfg = wf_cfg(tmp_path)
+    bars = wf_universe()
+    seen: list[set[str]] = []
+
+    run_walkforward(
+        bars,
+        ramp_bars(n=1500),
+        cfg,
+        grid=SMALL_GRID,
+        eligible=blocked_for(bars, {"AAA", "BBB"}),
+        on_is_evaluation=lambda _w, _p, result: seen.append(set(result.trades["symbol"])),
+        **WF_SPAN,
+    )
+
+    assert seen, "no in-sample evaluation happened, so this proves nothing"
+    traded = set().union(*seen)
+    assert traded == {"CCC"}, traded
+
+
+def test_sensitivity_forwards_eligible_to_every_row(tmp_path):
+    """Including the baseline row — it has to describe the run it sits beside."""
+    cfg = wf_cfg(tmp_path)
+    bars = wf_universe(n=500)
+    span = {"start": date(2021, 6, 1), "end": date(2021, 12, 31)}
+
+    open_rows = sensitivity_table(bars, ramp_bars(n=500), cfg, params=("atr_stop_mult",), **span)
+    gated_rows = sensitivity_table(
+        bars,
+        ramp_bars(n=500),
+        cfg,
+        params=("atr_stop_mult",),
+        eligible=blocked_everywhere(bars),
+        **span,
+    )
+
+    assert any(row["trades"] > 0 for row in open_rows)
+    assert [row["trades"] for row in gated_rows] == [0] * len(gated_rows)
+    assert len(gated_rows) == len(open_rows)
 
 
 # ---------------------------------------------------------------------------

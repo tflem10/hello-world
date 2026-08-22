@@ -67,6 +67,15 @@ Every run therefore publishes a ``membership`` block in ``summary.json`` saying
 which universe it used and how large the untraded-but-claimed exposure is —
 ``member_years`` against ``member_years_point_in_time``. The default mode is
 ``off``, which is the behaviour every existing report was written under.
+
+Setting the mode to ``point_in_time`` turns the measurement into a correction.
+:func:`_eligibility_masks` turns each symbol's membership windows into a
+per-bar boolean mask and hands the lot to every ``run_engine`` call as
+``eligible=``; the engine ANDs it into the entry gate. It gates **entries
+only** — a position already open when its company leaves an index is managed
+out by the normal exit ladder, never force-closed — and both ends of a window
+are inclusive. With the mode ``off`` the masks are not built and ``None`` is
+passed, so the engine's entry gate is the expression it always was.
 """
 
 from __future__ import annotations
@@ -82,6 +91,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
 from swing.backtest.engine import run_engine
@@ -484,35 +494,95 @@ def membership_block(
     }
 
 
-def _refuse_point_in_time(cfg: Config) -> None:
-    """Refuse a point-in-time run the simulator cannot yet honour.
+def _window_mask(windows: tuple[Window, ...], index: pd.DatetimeIndex) -> np.ndarray:
+    """Turn one symbol's eligible windows into a per-bar boolean mask.
 
-    Membership has to gate **entries per symbol per day**, and the only place
-    that decision exists is ``engine._build_plan``, where ``signal = trend &
-    entry & liquid & ~blackout``. The engine takes no eligibility argument, so
-    from here there is no way to hand it one — and every alternative reachable
-    from the runner corrupts something else:
+    Both ends of a window are inclusive, and ``None`` means "open" at that end.
+    ``()`` — no window at all — yields all-False, which is the whole point of
+    the conservative unknown-date policy: a symbol no source can date is not
+    quietly back-dated to the dawn of time.
 
-    * trimming a symbol's bars to its membership window restarts every
-      indicator's warm-up at the join date, so the symbol stays untradable for
-      a further year and rolling windows silently span the hole;
-    * encoding the excluded days as synthetic earnings dates bleeds
-      ``earnings_blackout_days`` past both boundaries and falsifies
-      ``earnings_blackout_simulated``.
+    The index is made tz-naive before the comparison for the same reason
+    :func:`swing.strategy.rules.earnings_blackout` does it (audit BUG-045):
+    comparing a tz-aware index against a naive ``Timestamp`` raises, and a
+    membership date is a calendar day, not an instant.
+    """
+    days = index.tz_localize(None) if index.tz is not None else index
+    days = days.normalize()
+    mask = np.zeros(len(index), dtype=bool)
+    for window_start, window_end in windows:
+        inside = np.ones(len(index), dtype=bool)
+        if window_start is not None:
+            inside &= days >= pd.Timestamp(window_start)
+        if window_end is not None:
+            inside &= days <= pd.Timestamp(window_end)
+        mask |= inside
+    return mask
 
-    Refusing is the only honest option left: a report labelled point-in-time
-    that quietly traded the full universe would be worse than no report.
+
+def _eligible_windows(
+    cfg: Config, instruments: Sequence[Instrument]
+) -> dict[str, tuple[Window, ...]] | None:
+    """Read the eligible windows an enforced run needs, or ``None`` when off.
+
+    Called **before** the bars are loaded, deliberately. Unlike
+    :func:`membership_block`, an unreadable membership file does stop an
+    enforced run — there the block is provenance and degrading to an ``error``
+    key is the kind thing to do, but here the file *is* simulation input, and a
+    run labelled point-in-time that silently fell back to trading the full
+    universe would be worse than no run at all. So the ``UniverseError``
+    propagates — and it should cost a sentence rather than the forty minutes it
+    would if this waited until after the data load.
     """
     if cfg.backtest.membership != MEMBERSHIP_POINT_IN_TIME:
-        return
-    raise ValueError(
-        f"backtest.membership is set to {MEMBERSHIP_POINT_IN_TIME!r}, but the simulator cannot "
-        f"run that way yet: swing.backtest.engine.run_engine takes no per-symbol eligibility "
-        f"argument, so there is no way to tell it a symbol was not in the index on a given day. "
-        f"Set backtest.membership = {MEMBERSHIP_OFF!r} to run the documented universe (every "
-        f"report so far used it), and see docs/backtest-methodology.md section 7.1 for the size "
-        f"of the bias that leaves in place and the engine seam that would close it."
+        return None
+
+    from swing import universe as universe_module
+
+    return universe_module.membership_windows(
+        cfg, instruments=instruments, unknown=cfg.backtest.membership_unknown
     )
+
+
+def _eligibility_masks(
+    cfg: Config,
+    windows: dict[str, tuple[Window, ...]] | None,
+    bars: dict[str, pd.DataFrame],
+) -> dict[str, np.ndarray] | None:
+    """The per-symbol entry gate ``run_engine`` needs, or ``None`` when off.
+
+    ``None`` for every mode but ``point_in_time`` — not an all-True dict. The
+    engine's default path has to stay literally the expression it always was,
+    and handing it a dict of all-True masks would be a different code path
+    reaching the same answer, which is a weaker guarantee than not taking the
+    path at all.
+    """
+    if windows is None:
+        return None
+    # Explicit rather than `windows.get(symbol, ())`: a symbol with no entry is
+    # a mismatched instrument list, and the ()-shaped fallback would delete it
+    # from the run without saying so — the one failure mode this whole feature
+    # exists to prevent.
+    missing = sorted(set(bars) - set(windows))
+    if missing:
+        raise ValueError(
+            f"Point-in-time membership was asked for, but {len(missing)} symbol(s) with bars "
+            f"have no membership windows because they are absent from the instrument list "
+            f"({', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}). Refusing rather "
+            f"than treating them as never-eligible, which would silently shrink the universe."
+        )
+    masks = {symbol: _window_mask(windows[symbol], frame.index) for symbol, frame in bars.items()}
+    eligible_symbols = sum(1 for mask in masks.values() if bool(mask.any()))
+    log.info(
+        "Point-in-time membership is ON (unknown-date policy %r): %d of %d symbols have at "
+        "least one eligible bar, and entries are blocked on every other bar. Positions already "
+        "open when a symbol leaves an index are NOT force-closed; the normal exit ladder still "
+        "manages them.",
+        cfg.backtest.membership_unknown,
+        eligible_symbols,
+        len(masks),
+    )
+    return masks
 
 
 def _validate_label(label: str) -> str:
@@ -631,9 +701,6 @@ def run_backtest(
     # given" — an empty string is a mistake, and gets said so.
     default_label = f"backtest-{datetime.now():%Y%m%d-%H%M%S}"
     run_label = _validate_label(default_label if label is None else label)
-    # Same reasoning as the label: a mode the engine cannot honour should cost
-    # a sentence, not forty minutes and a mislabelled report.
-    _refuse_point_in_time(cfg)
 
     instruments = _select_universe(cfg, universe)
     symbols = sorted({instrument.symbol for instrument in instruments})
@@ -643,6 +710,13 @@ def run_backtest(
             f"[universe] section of your config.toml."
         )
     is_etf = {instrument.symbol: instrument.kind == "etf" for instrument in instruments}
+
+    # Same reasoning as the label above: an enforced run whose membership files
+    # cannot be read must cost a sentence, not forty minutes of fetching
+    # followed by a refusal. Reading them needs the instrument list and nothing
+    # else, so it happens here; the masks themselves need the bar indexes and
+    # are built further down.
+    windows = _eligible_windows(cfg, instruments)
 
     run_start = start or cfg.backtest.start
     run_end = end or cfg.backtest.end or date.today()
@@ -682,6 +756,14 @@ def run_backtest(
     # has to be visible next to the number it bought.
     tuning_grid = resolve_grid(cfg.backtest.tuning_grid)
 
+    # The symbols this run actually simulates, as Instruments — the same slice
+    # `membership_block` reports on, so the block below and the gate applied to
+    # the engine can never describe different universes.
+    traded = [instrument for instrument in instruments if instrument.symbol in bars]
+    # None unless `[backtest] membership = "point_in_time"`, in which case every
+    # run_engine call below is handed a per-symbol, per-bar entry gate.
+    eligible = _eligibility_masks(cfg, windows, bars)
+
     summary: dict[str, Any] = {
         "label": run_label,
         "universe": universe,
@@ -698,12 +780,7 @@ def run_backtest(
         # actually had bars, not the ones the config asked for, so
         # ``symbols_gated + symbols_ungated == n_symbols`` and the member-year
         # figures describe what was simulated rather than what was requested.
-        "membership": membership_block(
-            cfg,
-            [instrument for instrument in instruments if instrument.symbol in bars],
-            run_start,
-            effective_end,
-        ),
+        "membership": membership_block(cfg, traded, run_start, effective_end),
         "config_hash": config_hash(cfg),
         "code_ref": code_ref(),
         "data_hash": data_hash(bars),
@@ -729,6 +806,7 @@ def run_backtest(
         is_etf=is_etf,
         start=run_start,
         end=effective_end,
+        eligible=eligible,
     )
     full_metrics = compute_metrics(full.trades, full.equity, initial_equity=full.initial_equity)
     summary["full_period"] = full_metrics
@@ -749,6 +827,7 @@ def run_backtest(
             end=effective_end,
             grid=tuning_grid,
             progress=emit,
+            eligible=eligible,
         )
         summary["oos"] = wf.metrics
         summary["windows"] = [fold.as_dict() for fold in wf.folds]
@@ -781,6 +860,7 @@ def run_backtest(
         is_etf=is_etf,
         start=run_start,
         end=effective_end,
+        eligible=eligible,
     )
 
     directory = Path(cfg.paths.reports_dir) / "backtest" / run_label

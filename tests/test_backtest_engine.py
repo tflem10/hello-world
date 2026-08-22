@@ -700,6 +700,240 @@ def test_regime_disabled_with_no_spy_data_still_trades(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# `eligible=` — the per-symbol entry gate point-in-time membership rides on
+#
+# Two properties are load-bearing and are asserted separately here, because
+# they fail in opposite directions. Omitting the argument must change nothing
+# at all (the default path is every report in the repo); supplying it must
+# gate ENTRIES and only entries (a mask that closed positions would invent an
+# exit the live system does not have).
+# ---------------------------------------------------------------------------
+
+
+def all_eligible(bars: dict[str, pd.DataFrame]) -> dict[str, np.ndarray]:
+    """An explicit "everything is allowed" mask per symbol."""
+    return {symbol: np.ones(len(frame), dtype=bool) for symbol, frame in bars.items()}
+
+
+def eligible_until(frame: pd.DataFrame, last_bar: int) -> np.ndarray:
+    """Eligible up to and including ``last_bar``, then never again."""
+    mask = np.zeros(len(frame), dtype=bool)
+    mask[: last_bar + 1] = True
+    return mask
+
+
+def eligible_from(frame: pd.DataFrame, first_bar: int) -> np.ndarray:
+    """Ineligible until ``first_bar``, then eligible for the rest of the frame."""
+    mask = np.zeros(len(frame), dtype=bool)
+    mask[first_bar:] = True
+    return mask
+
+
+def test_omitting_eligible_changes_nothing(tmp_path):
+    """The inertness guarantee, in memory. The report-level half is AC9.
+
+    Every existing report in this repo was produced by the call on the left. If
+    adding the argument moved a single number, every one of them would have to
+    be re-run and re-read.
+    """
+    cfg = engine_cfg(tmp_path, account={"equity": 200_000.0, "max_position_pct": 20.0})
+    bars = contested_universe()
+    kwargs = {
+        "start": bars["AAA"].index[WARMUP_BAR].date(),
+        "end": bars["AAA"].index[330].date(),
+    }
+    without = run_engine(bars, ramp_bars(), cfg, **kwargs)
+    explicit_none = run_engine(bars, ramp_bars(), cfg, eligible=None, **kwargs)
+    all_true = run_engine(bars, ramp_bars(), cfg, eligible=all_eligible(bars), **kwargs)
+
+    assert not without.trades.empty  # the comparison would be vacuous otherwise
+    for other in (explicit_none, all_true):
+        pd.testing.assert_frame_equal(without.trades, other.trades)
+        pd.testing.assert_frame_equal(without.equity, other.equity)
+
+
+def test_an_ineligible_signal_bar_produces_no_entry(tmp_path):
+    """The gate is read on the SIGNAL bar, which is where every other gate is read."""
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(ramp_bars(), SIGNAL_BAR)
+    kwargs = {"start": bars.index[WARMUP_BAR].date(), "end": bars.index[330].date()}
+
+    allowed = run_engine({"AAA": bars}, ramp_bars(), cfg, **kwargs)
+    assert len(allowed.trades) == 1
+
+    # Ineligible on the signal bar only; every other bar is untouched.
+    mask = np.ones(len(bars), dtype=bool)
+    mask[SIGNAL_BAR] = False
+    blocked = run_engine({"AAA": bars}, ramp_bars(), cfg, eligible={"AAA": mask}, **kwargs)
+    assert blocked.trades.empty
+    assert blocked.positions == []
+
+
+def test_eligibility_gates_entries_only_never_exits(tmp_path):
+    """A symbol that becomes ineligible mid-position is NOT force-closed.
+
+    Exactly the regime filter's semantics. Being dropped from an index is not a
+    sell order, and manufacturing one would invent an exit the live system does
+    not have — so the position runs on to whatever the normal ladder decides,
+    at the price and on the date it would have anyway.
+    """
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(ramp_bars(), SIGNAL_BAR)
+    kwargs = {"start": bars.index[WARMUP_BAR].date(), "end": bars.index[330].date()}
+
+    unrestricted = run_engine({"AAA": bars}, ramp_bars(), cfg, **kwargs)
+    assert len(unrestricted.trades) == 1
+
+    # Eligible through the signal bar, ineligible from the fill bar onward —
+    # so the position is opened and then spends its whole life ineligible.
+    leaves = run_engine(
+        {"AAA": bars},
+        ramp_bars(),
+        cfg,
+        eligible={"AAA": eligible_until(bars, SIGNAL_BAR)},
+        **kwargs,
+    )
+    pd.testing.assert_frame_equal(unrestricted.trades, leaves.trades)
+    pd.testing.assert_frame_equal(unrestricted.equity, leaves.equity)
+    assert [p.symbol for p in leaves.positions] == [p.symbol for p in unrestricted.positions]
+
+
+def test_eligibility_starting_late_allows_only_the_later_signals(tmp_path):
+    """A join date mid-run deletes the entries before it and keeps the ones after."""
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(spike_volume(ramp_bars(), SIGNAL_BAR), 350)
+    kwargs = {"start": bars.index[WARMUP_BAR].date(), "end": bars.index[399].date()}
+
+    both = run_engine({"AAA": bars}, ramp_bars(), cfg, **kwargs)
+    assert len(both.trades) == 2
+
+    late = run_engine(
+        {"AAA": bars},
+        ramp_bars(),
+        cfg,
+        eligible={"AAA": eligible_from(bars, 340)},
+        **kwargs,
+    )
+    assert len(late.trades) == 1
+    # The surviving trade is the second one: same signal bar, same fill bar.
+    assert late.trades["entry_date"].iloc[0] == both.trades["entry_date"].iloc[1]
+    assert bars.index[SIGNAL_BAR + 1] not in set(late.trades["entry_date"])
+    # Its SIZE is allowed to differ, and here it does (126 shares against 124):
+    # deleting the earlier trade changes the cash the later one is sized
+    # against. That is the whole reason a point-in-time run has to be
+    # re-simulated rather than attributed after the fact.
+    assert int(late.trades["shares"].iloc[0]) != int(both.trades["shares"].iloc[1])
+
+
+def test_a_mask_that_excludes_everything_yields_no_trades_not_an_exception(tmp_path):
+    """The `exclude` policy really can empty a universe; that is a result, not a crash."""
+    cfg = engine_cfg(tmp_path, account={"equity": 200_000.0, "max_position_pct": 20.0})
+    bars = contested_universe()
+    nothing = {symbol: np.zeros(len(frame), dtype=bool) for symbol, frame in bars.items()}
+    result = run_engine(
+        bars,
+        ramp_bars(),
+        cfg,
+        eligible=nothing,
+        start=bars["AAA"].index[WARMUP_BAR].date(),
+        end=bars["AAA"].index[330].date(),
+    )
+    assert result.trades.empty
+    assert result.positions == []
+    # Still a well-formed run: the equity curve is there, flat at the start cash.
+    assert list(result.trades.columns) == list(TRADE_COLUMNS)
+    assert not result.equity.empty
+    assert float(result.equity["equity"].iloc[-1]) == pytest.approx(cfg.account.equity)
+
+
+def test_a_symbol_missing_from_the_eligible_dict_is_unrestricted(tmp_path):
+    """Same convention as ``earnings`` and ``is_etf``: no key means no restriction."""
+    cfg = engine_cfg(tmp_path, account={"equity": 200_000.0, "max_position_pct": 20.0})
+    bars = contested_universe()
+    kwargs = {
+        "start": bars["AAA"].index[WARMUP_BAR].date(),
+        "end": bars["AAA"].index[330].date(),
+    }
+    baseline = run_engine(bars, ramp_bars(), cfg, **kwargs)
+    # Mention only AAA, and allow it everything. The other four are absent.
+    sparse = run_engine(
+        bars,
+        ramp_bars(),
+        cfg,
+        eligible={"AAA": np.ones(len(bars["AAA"]), dtype=bool)},
+        **kwargs,
+    )
+    pd.testing.assert_frame_equal(baseline.trades, sparse.trades)
+
+
+def test_a_shared_cache_cannot_leak_eligibility_between_runs(tmp_path):
+    """The invariant that makes this seam safe: ``signal`` is never cached.
+
+    If the composed signal were memoised, the run with a mask and the run
+    without would collide on one cache key and one of them would silently
+    return the other's answer. Sharing a cache across all three orderings and
+    getting the unrestricted answer back both times is the proof it is not.
+    """
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(ramp_bars(), SIGNAL_BAR)
+    kwargs = {"start": bars.index[WARMUP_BAR].date(), "end": bars.index[330].date()}
+    cache = SignalCache()
+
+    first_open = run_engine({"AAA": bars}, ramp_bars(), cfg, cache=cache, **kwargs)
+    gated = run_engine(
+        {"AAA": bars},
+        ramp_bars(),
+        cfg,
+        cache=cache,
+        eligible={"AAA": np.zeros(len(bars), dtype=bool)},
+        **kwargs,
+    )
+    second_open = run_engine({"AAA": bars}, ramp_bars(), cfg, cache=cache, **kwargs)
+
+    assert len(first_open.trades) == 1
+    assert gated.trades.empty
+    pd.testing.assert_frame_equal(first_open.trades, second_open.trades)
+    assert cache.hits > 0  # the cache really was in use throughout
+
+
+def test_a_mask_of_the_wrong_length_is_refused_in_plain_english(tmp_path):
+    """Silently broadcasting a mismatched mask would produce a plausible lie."""
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(ramp_bars(), SIGNAL_BAR)
+    with pytest.raises(ValueError) as excinfo:
+        run_engine(
+            {"AAA": bars},
+            ramp_bars(),
+            cfg,
+            eligible={"AAA": np.ones(len(bars) - 1, dtype=bool)},
+            start=bars.index[WARMUP_BAR].date(),
+            end=bars.index[330].date(),
+        )
+    message = str(excinfo.value)
+    assert "AAA" in message
+    assert str(len(bars)) in message
+
+
+def test_a_non_boolean_mask_is_refused_rather_than_read_as_row_numbers(tmp_path):
+    """``signal`` is consumed as ``day_of_row[signal]``.
+
+    An integer array there is fancy indexing, not filtering: the run would
+    finish, produce trades, and be wrong. So the dtype is checked.
+    """
+    cfg = engine_cfg(tmp_path)
+    bars = spike_volume(ramp_bars(), SIGNAL_BAR)
+    with pytest.raises(ValueError, match="boolean"):
+        run_engine(
+            {"AAA": bars},
+            ramp_bars(),
+            cfg,
+            eligible={"AAA": np.ones(len(bars), dtype="int64")},
+            start=bars.index[WARMUP_BAR].date(),
+            end=bars.index[330].date(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # BUG-005 — a bar with non-finite OHLC is not a bar
 #
 # All four scenarios are the ones the audit reproduced. Each of them used to

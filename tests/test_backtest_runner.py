@@ -12,8 +12,10 @@ bytes, which is only possible because nothing in ``summary.json``,
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -590,10 +592,7 @@ def test_the_policy_sensitive_count_is_the_symbols_the_two_readings_disagree_abo
 
 
 def test_with_the_mode_on_the_block_reports_the_restricted_universe(tmp_path):
-    """The block the engine seam would let a real run write, built directly.
-
-    ``run_backtest`` refuses this mode today, so this exercises what the block
-    says once it does not: the exclusions become real and ``member_years`` drops
+    """With the mode on, the exclusions become real and ``member_years`` drops
     to the exposure a membership file can actually vouch for.
     """
     from swing import universe as universe_module
@@ -642,37 +641,390 @@ def test_an_unreadable_membership_file_does_not_stop_the_run(tmp_path, wired, mo
     assert "member_years" not in block
 
 
-def test_a_point_in_time_run_is_refused_in_plain_english(tmp_path, wired):
-    """The mode the engine cannot honour must stop, not approximate.
-
-    A report labelled point-in-time that had quietly traded the full universe
-    would be worse than no report at all, so the run refuses and says exactly
-    what is missing.
-    """
-    cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
-    with pytest.raises(ValueError) as excinfo:
-        go(cfg, label="membership-pit")
-    message = str(excinfo.value)
-    assert "point_in_time" in message
-    assert "run_engine" in message
-    assert "eligibility" in message
-    assert "backtest-methodology.md" in message
-
-
-def test_the_point_in_time_refusal_costs_a_sentence_not_a_simulation(tmp_path, wired):
-    """Refused before the universe is loaded or a single bar is fetched."""
-    cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
-    with pytest.raises(ValueError, match="point_in_time"):
-        go(cfg, label="membership-early")
-    assert wired.requested == []
-    assert not (cfg.paths.reports_dir / "backtest" / "membership-early").exists()
-
-
 def test_a_bad_label_is_still_refused_before_the_membership_mode(tmp_path, wired):
     """Ordering: the cheapest check first, so the message names the real mistake."""
     cfg = runner_cfg(tmp_path, backtest={"membership": "point_in_time"})
     with pytest.raises(ValueError, match="not usable as a directory name"):
         go(cfg, label="../escape")
+
+
+# ---------------------------------------------------------------------------
+# point-in-time membership, enforced
+#
+# The runner's job is the translation: membership windows -> a per-bar boolean
+# mask per symbol -> ``run_engine(eligible=...)``. Everything below is built on
+# synthetic membership files so the boundaries can be asserted to the day, and
+# on one fixture whose trade timeline is fixed and known:
+#
+#   spike on bar 300 (2021-02-25) -> enter 2021-02-26, time-stop out 2021-04-26
+#   spike on bar 360 (2021-05-20) -> enter 2021-05-21, out at the end of data
+#
+# so a membership date placed between them decides exactly which of the two
+# trades may happen.
+# ---------------------------------------------------------------------------
+
+EARLY_ENTRY = pd.Timestamp("2021-02-26")
+EARLY_EXIT = pd.Timestamp("2021-04-26")
+LATE_ENTRY = pd.Timestamp("2021-05-21")
+
+#: One stint per case that matters. Dates are chosen against the timeline above:
+#: 2021-03-15 falls *inside* the first trade, and 2021-04-01 falls between the
+#: two.
+MEMBERSHIP_FILES = {
+    "sp500-membership": (
+        "symbol,name,added,removed\n"
+        "ALWAYS,Always In,1990-01-02,\n"
+        "JOINER,Joined Midway,2021-04-01,\n"
+        "LEAVER,Left Midway,1990-01-02,2021-03-15\n"
+    ),
+    "sp400-membership": (
+        "symbol,name,added,removed\n"
+        "MOVER,Promoted From 600,2021-03-16,\n"
+        "NEWCOMER,Brand New,2021-03-16,\n"
+    ),
+    "sp600-membership": (
+        "symbol,name,added,removed\n"
+        "MOVER,Promoted From 600,2010-01-01,2021-03-15\n"
+        "NODATE,No Join Date,,\n"
+    ),
+}
+
+
+def membership_bars(symbols) -> dict[str, pd.DataFrame]:
+    """One identical two-signal ramp per symbol, plus SPY.
+
+    Identical on purpose: any difference between two symbols' trades in these
+    tests is then attributable to membership and to nothing else.
+    """
+    bars = {symbol: spike_volume(spike_volume(ramp_bars(), 300), 360) for symbol in symbols}
+    bars["SPY"] = ramp_bars()
+    return bars
+
+
+@pytest.fixture
+def membership_wired(tmp_path, monkeypatch):
+    """Serve :data:`MEMBERSHIP_FILES` in place of the committed membership CSVs.
+
+    Returns a callable taking ``{symbol: source}``; it wires up the matching
+    instruments, bars and provider and hands back the provider. The parse cache
+    is cleared on the way in and on the way out, so no synthetic stint can leak
+    into a test that reads the real files.
+    """
+    from swing import universe as universe_module
+
+    real = universe_module._snapshot_path
+    served: dict[str, Path] = {}
+    assets = tmp_path / "membership"
+    assets.mkdir(exist_ok=True)
+
+    @contextlib.contextmanager
+    def fake(stem: str):
+        if stem in served:
+            yield served[stem]
+            return
+        with real(stem) as path:
+            yield path
+
+    monkeypatch.setattr(universe_module, "_snapshot_path", fake)
+
+    def install(symbols: dict[str, str], files: dict[str, str] = MEMBERSHIP_FILES):
+        for stem, text in files.items():
+            path = assets / f"{stem}.csv"
+            path.write_text(text, encoding="utf-8")
+            served[stem] = path
+        universe_module._read_membership.cache_clear()
+        instruments = [
+            Instrument(symbol=symbol, name=symbol.title(), kind="stock", source=source)
+            for symbol, source in symbols.items()
+        ]
+        provider = FakeProvider(membership_bars(symbols))
+        monkeypatch.setattr("swing.universe.load", lambda cfg: list(instruments))
+        monkeypatch.setattr("swing.data.get_provider", lambda cfg, **kw: provider)
+        return provider
+
+    universe_module._read_membership.cache_clear()
+    yield install
+    universe_module._read_membership.cache_clear()
+
+
+def pit_cfg(tmp_path, policy: str = "exclude", **overrides):
+    """A runner config with point-in-time membership switched on."""
+    backtest = {"membership": "point_in_time", "membership_unknown": policy}
+    backtest.update(overrides.pop("backtest", {}))
+    return runner_cfg(tmp_path, backtest=backtest, **overrides)
+
+
+def traded(directory) -> pd.DataFrame:
+    """The trades a run wrote, with real timestamps."""
+    frame = pd.read_csv(directory / "trades.csv", parse_dates=["entry_date", "exit_date"])
+    return frame.sort_values(["symbol", "entry_date"]).reset_index(drop=True)
+
+
+def entries(directory, symbol: str) -> list[pd.Timestamp]:
+    frame = traded(directory)
+    return list(frame.loc[frame["symbol"] == symbol, "entry_date"])
+
+
+def test_window_ends_are_inclusive_on_both_sides(tmp_path):
+    """The boundary rule, asserted on the mask itself rather than inferred.
+
+    A symbol is a member ON its join date and ON its removal date. Signals are
+    decided at a close and filled at the next open, so the removal date's own
+    signal still fills the following morning — the same one-bar lag every other
+    gate carries.
+    """
+    index = pd.bdate_range("2021-01-04", periods=10)  # Mon 4th .. Fri 15th
+    mask = runner._window_mask(((date(2021, 1, 6), date(2021, 1, 8)),), index)
+    assert list(index[mask]) == [
+        pd.Timestamp("2021-01-06"),
+        pd.Timestamp("2021-01-07"),
+        pd.Timestamp("2021-01-08"),
+    ]
+
+    # An open end at either side, and "no window at all" meaning nothing.
+    assert runner._window_mask(((None, None),), index).all()
+    assert not runner._window_mask((), index).any()
+    assert runner._window_mask(((None, date(2021, 1, 5)),), index).sum() == 2
+    assert runner._window_mask(((date(2021, 1, 14), None),), index).sum() == 2
+
+    # Two disjoint stints union rather than overwrite one another.
+    two = runner._window_mask(
+        ((date(2021, 1, 4), date(2021, 1, 5)), (date(2021, 1, 14), date(2021, 1, 15))), index
+    )
+    assert two.sum() == 4
+
+
+def test_a_tz_aware_bar_index_does_not_raise(tmp_path):
+    """BUG-045 was exactly this: a tz-aware index minus a naive Timestamp raises.
+
+    There it surfaced as "no blackout", permitting an entry inside one. Here it
+    would surface as a crashed run, but the fix is the same and it is cheaper to
+    pin than to rediscover.
+    """
+    naive = pd.bdate_range("2021-01-04", periods=10)
+    aware = naive.tz_localize("America/New_York")
+    window = ((date(2021, 1, 6), date(2021, 1, 8)),)
+    assert list(runner._window_mask(window, aware)) == list(runner._window_mask(window, naive))
+
+
+def test_point_in_time_now_runs_and_the_summary_says_it_was_applied(tmp_path, membership_wired):
+    """The mode used to refuse. It runs, and the block records that it bit."""
+    membership_wired({"ALWAYS": "sp500"})
+    directory = go(pit_cfg(tmp_path), label="pit-runs")
+
+    summary = json.loads((directory / "summary.json").read_text())
+    assert summary["membership"]["mode"] == "point_in_time"
+    assert summary["membership"]["applied"] is True
+    assert not traded(directory).empty
+
+
+def test_the_unrestricted_control_symbol_trades_the_same_either_way(tmp_path, membership_wired):
+    """A symbol that was a member throughout must be untouched by the correction.
+
+    Without this the tests below would prove only that something changed, not
+    that the *right* thing changed.
+    """
+    membership_wired({"ALWAYS": "sp500"})
+    off = go(runner_cfg(tmp_path), label="always-off")
+    on = go(pit_cfg(tmp_path), label="always-on")
+    pd.testing.assert_frame_equal(traded(off), traded(on))
+    assert entries(on, "ALWAYS") == [EARLY_ENTRY, LATE_ENTRY]
+
+
+def test_a_symbol_cannot_be_entered_before_its_join_date(tmp_path, membership_wired):
+    """JOINER joined on 2021-04-01, between its two signals.
+
+    The signal before that date may not become a trade; the one after it must.
+    """
+    membership_wired({"JOINER": "sp500"})
+
+    off = go(runner_cfg(tmp_path), label="joiner-off")
+    assert entries(off, "JOINER") == [EARLY_ENTRY, LATE_ENTRY]
+
+    on = go(pit_cfg(tmp_path), label="joiner-on")
+    assert entries(on, "JOINER") == [LATE_ENTRY]
+
+
+def test_a_symbol_cannot_be_entered_after_it_leaves_but_its_position_is_managed_out(
+    tmp_path, membership_wired
+):
+    """LEAVER was removed on 2021-03-15, inside its first trade.
+
+    Two claims in one fixture, because they are the two halves of "gates
+    entries only":
+
+    * the signal after the removal date may not become a trade;
+    * the position that was already open ON that date is **not** force-closed.
+      It exits on 2021-04-26 by the time stop, exactly as it would have with no
+      correction at all — being dropped from an index is not a sell order.
+    """
+    membership_wired({"LEAVER": "sp500"})
+
+    off = traded(go(runner_cfg(tmp_path), label="leaver-off"))
+    assert list(off["entry_date"]) == [EARLY_ENTRY, LATE_ENTRY]
+
+    directory = go(pit_cfg(tmp_path), label="leaver-on")
+    on = traded(directory)
+    assert list(on["entry_date"]) == [EARLY_ENTRY]
+
+    # The surviving trade is the uncorrected one, price for price and reason
+    # for reason — the exit ladder never learned about membership.
+    first = off.iloc[0]
+    assert on["exit_date"].iloc[0] == EARLY_EXIT
+    assert on["exit_date"].iloc[0] > pd.Timestamp("2021-03-15")
+    for column in ("entry_price", "exit_price", "shares", "exit_reason", "pnl"):
+        assert on[column].iloc[0] == first[column], column
+
+
+def test_a_move_between_indices_is_continuous_membership_not_an_arrival(tmp_path, membership_wired):
+    """MOVER and NEWCOMER are both S&P 400 members as of 2021-03-16.
+
+    Only one of them *arrived* then. MOVER was in the S&P 600 until the day
+    before, so the union of its stints spans the whole period and its earlier
+    signal is a legitimate trade. Reading only the index a symbol sits in today
+    would delete it — that is the survivorship error this rule exists to avoid.
+    """
+    membership_wired({"MOVER": "sp400", "NEWCOMER": "sp400"})
+    directory = go(pit_cfg(tmp_path), label="mover-on")
+
+    assert entries(directory, "MOVER") == [EARLY_ENTRY, LATE_ENTRY]
+    assert entries(directory, "NEWCOMER") == [LATE_ENTRY]
+
+
+def test_the_unknown_policy_decides_whether_an_undated_symbol_trades_at_all(
+    tmp_path, membership_wired
+):
+    """NODATE has a row but no stated join date, and the policy is the whole story.
+
+    ``exclude`` drops it entirely — the conservative over-correction. ``include``
+    back-dates it to the beginning of the data, which reinstates every trade.
+    Both directions are asserted, because a policy that only ever moved one way
+    would be indistinguishable from a bug.
+    """
+    membership_wired({"NODATE": "sp600"})
+
+    strict = go(pit_cfg(tmp_path, policy="exclude"), label="nodate-exclude")
+    assert traded(strict).empty
+
+    loose = go(pit_cfg(tmp_path, policy="include"), label="nodate-include")
+    assert entries(loose, "NODATE") == [EARLY_ENTRY, LATE_ENTRY]
+
+    # `include` is not merely "more trades": it reproduces the uncorrected run.
+    off = go(runner_cfg(tmp_path), label="nodate-off")
+    pd.testing.assert_frame_equal(traded(off), traded(loose))
+
+
+def test_a_universe_with_no_eligible_day_writes_an_empty_report_not_an_exception(
+    tmp_path, membership_wired
+):
+    """`exclude` really can empty a whole universe. That is a result, not a crash."""
+    membership_wired({"NODATE": "sp600"})
+    directory = go(pit_cfg(tmp_path), label="empty-universe")
+
+    assert traded(directory).empty
+    for name in REPORT_FILES:
+        assert (directory / name).is_file(), name
+    summary = json.loads((directory / "summary.json").read_text())
+    assert summary["membership"]["applied"] is True
+    assert summary["membership"]["symbols_excluded"] == 1
+    assert summary["oos"]["trades"] == 0
+
+
+def test_turning_the_mode_on_moves_the_config_hash(tmp_path, membership_wired):
+    """A different universe is a different experiment, so it must not share a hash."""
+    off = config_hash(runner_cfg(tmp_path))
+    strict = config_hash(pit_cfg(tmp_path, policy="exclude"))
+    loose = config_hash(pit_cfg(tmp_path, policy="include"))
+    assert len({off, strict, loose}) == 3
+
+
+def test_a_symbol_with_bars_but_no_membership_window_is_refused(
+    tmp_path, membership_wired, monkeypatch
+):
+    """The one failure mode worth crashing over: a silently shrunken universe.
+
+    A symbol whose bars are simulated but whose eligibility nobody computed
+    would be masked to all-False and vanish from the run without a word. The
+    runner refuses instead.
+    """
+    membership_wired({"ALWAYS": "sp500"})
+    monkeypatch.setattr("swing.universe.membership_windows", lambda *a, **k: {"OTHER": ()})
+    with pytest.raises(ValueError, match="no membership windows"):
+        go(pit_cfg(tmp_path), label="pit-mismatch")
+
+
+def test_an_unreadable_membership_file_stops_an_enforced_run(
+    tmp_path, membership_wired, monkeypatch
+):
+    """The opposite of the rule for the summary block, and deliberately so.
+
+    There the block is provenance and degrading to an ``error`` key is right.
+    Here the file IS simulation input: a run labelled point-in-time that quietly
+    fell back to the full universe would be the exact lie this feature exists to
+    prevent, so the error propagates.
+    """
+    from swing.universe import UniverseError
+
+    membership_wired({"ALWAYS": "sp500"})
+
+    def broken(*args, **kwargs):
+        raise UniverseError("sp500-membership.csv is missing")
+
+    monkeypatch.setattr("swing.universe.membership_windows", broken)
+    with pytest.raises(UniverseError, match="sp500-membership.csv is missing"):
+        go(pit_cfg(tmp_path), label="pit-broken")
+
+
+def test_an_unreadable_membership_file_costs_a_sentence_not_a_data_load(
+    tmp_path, membership_wired, monkeypatch
+):
+    """The membership files are read BEFORE a single bar is fetched.
+
+    A real stocks run spends minutes loading 1,500 symbols. Discovering only
+    after that that the correction cannot be applied would be a bad trade, and
+    it is the reason the window read is hoisted above ``_load_bars`` rather
+    than left where the masks are built. The provider is the witness: it must
+    never be asked for anything.
+    """
+    from swing.universe import UniverseError
+
+    provider = membership_wired({"ALWAYS": "sp500"})
+
+    def broken(*args, **kwargs):
+        raise UniverseError("sp600-membership.csv is missing")
+
+    monkeypatch.setattr("swing.universe.membership_windows", broken)
+    with pytest.raises(UniverseError, match="sp600-membership.csv is missing"):
+        go(pit_cfg(tmp_path), label="pit-broken-early")
+
+    assert provider.requested == [], "bars were fetched before the refusal"
+    assert not (tmp_path / "reports" / "backtest" / "pit-broken-early").exists()
+
+
+def test_the_default_mode_never_reads_a_membership_file_for_the_simulation(
+    tmp_path, membership_wired, monkeypatch
+):
+    """With the mode off, nothing on the simulation path touches the files.
+
+    The ``membership`` summary block still reads them — it is written for every
+    run — but it catches its own errors. A file that cannot be read must not be
+    able to stop a default run, which is the behaviour every report in the repo
+    was produced under.
+    """
+    from swing.universe import UniverseError
+
+    membership_wired({"ALWAYS": "sp500"})
+
+    def broken(*args, **kwargs):
+        raise UniverseError("every membership file is missing")
+
+    monkeypatch.setattr("swing.universe.membership_windows", broken)
+    monkeypatch.setattr("swing.universe.membership_coverage", broken)
+
+    directory = go(runner_cfg(tmp_path), label="off-with-broken-files")
+    summary = json.loads((directory / "summary.json").read_text())
+    assert summary["membership"]["error"] == "every membership file is missing"
+    assert not traded(directory).empty
 
 
 # ---------------------------------------------------------------------------
