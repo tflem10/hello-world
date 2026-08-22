@@ -35,6 +35,25 @@ sp600 = true
 etfs = true             # ~40 liquid index/sector/industry/commodity ETFs
 extra_symbols = []      # e.g. ["BRK-B", "GLD"] — Yahoo style, dashes not dots
 
+# How to read a membership date that a source states only as an upper bound.
+# The sp*-membership.csv files record, beside every date, whether it is
+# "exact" (a source names the day) or "no_later_than" (the symbol had joined,
+# or left, by that day and nobody records when — the date comes from diffing
+# consecutive quarterly SEC holdings snapshots, so the truth can be a quarter
+# earlier).
+#
+#   "unknown"  a bound is treated as a date no source states, so the
+#              [backtest] membership_unknown policy decides what happens to it
+#   "exact"    a bound is read as the day itself — what every run made before
+#              these columns existed did
+#
+# Not a rounding detail: 893 of the 1,799 S&P 600 stints carry a bounded join
+# date. Read as exact, those joins land systematically too late, so days the
+# symbol really was a member are scored as days it was not — which is exactly
+# the artefact a before-versus-after study would otherwise report as a finding.
+# Inert unless something asks for point-in-time membership.
+membership_bounded = "unknown"
+
 
 [data]
 # Where price history comes from. yfinance is the default so nothing waits on
@@ -151,14 +170,11 @@ initial_equity = 10000.0        # must be at least 100
 #                   section 7.1).
 #   "point_in_time" a symbol is tradable only between its stated join and
 #                   removal dates, read from
-#                   src/swing/assets/universe/sp*-membership.csv.
-#
-# NOTE: "point_in_time" is currently REFUSED with a plain-English error. The
-# membership data and the eligibility windows are here, but the simulator takes
-# no per-symbol eligibility argument, so a run cannot be told a symbol was not
-# in the index that day. A report labelled point-in-time that quietly traded
-# the full universe would be worse than no report, so the run stops instead.
-# See docs/backtest-methodology.md section 7.1.
+#                   src/swing/assets/universe/sp*-membership.csv. How much of
+#                   that history is actually stated — and how much is an upper
+#                   bound — is what [universe] membership_bounded and
+#                   membership_unknown below decide; every run reports the
+#                   composition it used.
 membership = "off"
 
 # What point-in-time membership does about a symbol whose join date no source
@@ -171,6 +187,12 @@ membership = "off"
 # the 400 and 58% of the 600, so "include" silently reinstates the whole bias
 # for 42% of the S&P 600. Every run reports how many symbols the policy
 # affects, in summary.json under `membership.symbols_policy_sensitive`.
+#
+# This also decides the fate of dates stated only as an upper bound, because
+# [universe] membership_bounded routes them here by default. With both
+# defaults, a symbol whose join date is known only as "no later than" is left
+# out on the days nothing can vouch for it: 350 of 1,506 gated symbols rather
+# than 96, which is the size of the approximation being declined.
 membership_unknown = "exclude"
 
 # The candidate values each walk-forward fold may choose between, one list per

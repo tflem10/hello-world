@@ -17,8 +17,15 @@ from pathlib import Path
 import pytest
 
 from swing import universe as universe_mod
-from swing.config import Config, UniverseCfg
+from swing.config import Config, ConfigError, UniverseCfg, load_config
 from swing.universe import (
+    BOUNDED_AS_EXACT,
+    BOUNDED_AS_UNKNOWN,
+    BOUNDED_POLICIES,
+    DATE_BOUNDED,
+    DATE_EXACT,
+    DATE_OPEN,
+    DATE_UNSTATED,
     INDEX_SOURCES,
     MEMBERSHIP_SOURCES,
     UNKNOWN_EXCLUDE,
@@ -34,11 +41,13 @@ from swing.universe import (
     membership,
     membership_coverage,
     membership_windows,
+    stint_counts,
     symbols,
     to_schwab_symbol,
     to_yahoo_symbol,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,9}$")
 
 #: Guard rails for the ETF snapshot, which is curated and has already grown
@@ -421,6 +430,49 @@ def test_the_sp500_join_dates_are_complete_and_the_smaller_indices_are_not_asser
         assert 0 < stated <= members
 
 
+def test_the_committed_files_carry_provenance_and_it_is_actually_read() -> None:
+    """The defect BOUNDS-1 fixed: the bound columns were parsed by nobody.
+
+    Structural rather than pinned, like its neighbours — the data is being
+    improved and better provenance must not fail a test. What is asserted is
+    that the three states are all real: every row is classified, the S&P 600 is
+    substantially bounded (its join dates come from diffing quarterly SEC
+    snapshots), and no file is silently all-exact, which is what reading the
+    dates without their provenance amounted to.
+    """
+    total_bounded = 0
+    for source in MEMBERSHIP_SOURCES:
+        counts = stint_counts(source)
+        assert counts.stints == len(membership(source))
+        assert counts.stints == counts.exact + counts.bounded + counts.undated
+        assert counts.exact > 0 and counts.undated > 0, source
+        total_bounded += counts.bounded
+    assert stint_counts("sp600").bounded > 500, "the small-cap file is mostly upper bounds"
+    assert total_bounded > 1000
+
+    coverage = membership_coverage(Config())
+    assert coverage.stints == sum(stint_counts(s).stints for s in MEMBERSHIP_SOURCES)
+    assert 30.0 < coverage.approximate_pct < 90.0
+
+
+def test_the_bounded_reading_costs_real_symbols_on_the_real_files() -> None:
+    """The size of the correction, measured rather than asserted from a doc.
+
+    Reading a bound as a fact hands hundreds of symbols a join date no source
+    states. Under the default reading they are declined instead, and the gap
+    between the two is what a report has to publish.
+    """
+    cfg = Config()
+    strict = membership_coverage(cfg)
+    as_exact = membership_coverage(cfg, bounded=BOUNDED_AS_EXACT)
+    assert strict.bounded_join == as_exact.bounded_join > 100
+    assert strict.unknown_join == as_exact.unknown_join + strict.bounded_join
+    assert strict.stated_join == as_exact.stated_join - strict.bounded_join
+    assert strict.excluded > as_exact.excluded
+    # The files are the same files whichever way they are read.
+    assert strict.stints_bounded == as_exact.stints_bounded
+
+
 def test_point_in_time_membership_really_does_shrink_the_early_universe() -> None:
     """The whole point, on the real files: 2010 was not 2026.
 
@@ -445,29 +497,53 @@ def test_point_in_time_membership_really_does_shrink_the_early_universe() -> Non
 #: A tiny universe with one of every case that matters, served in place of the
 #: committed CSVs. ``GONE`` is in the membership file but not in the snapshot —
 #: a company that left and is therefore not tradable at all today.
+#:
+#: Every date carries its provenance, as the committed files do. Four symbols
+#: exist for the bound vocabulary alone: ``BOUNDED`` joined no later than a
+#: stated day, ``BOUNDEND`` left no later than one, ``ODDBOUND`` carries a
+#: token nobody recognises, and ``LEGACY`` (installed separately) comes from a
+#: file written before the columns existed.
+_HEADER = "symbol,name,added,removed,added_bound,removed_bound\n"
 FAKE_SNAPSHOTS = {
     "sp500": "symbol,name\nALWAYS,Always In\nJOIN,Joined Midway\n",
-    "sp400": "symbol,name\nMOVER,Moved Up\nTWICE,Two Stints\n",
-    "sp600": "symbol,name\nNODATE,No Join Date\nODD,Odd Dates\n",
+    "sp400": "symbol,name\nMOVER,Moved Up\nTWICE,Two Stints\nBOUNDEND,Bounded Exit\n",
+    "sp600": (
+        "symbol,name\nNODATE,No Join Date\nODD,Odd Dates\n"
+        "BOUNDED,Bounded Join\nODDBOUND,Odd Bound Token\n"
+    ),
     "etfs": "symbol,name\nFAKEETF,A Fake ETF\n",
     "sp500-membership": (
-        "symbol,name,added,removed\n"
-        "ALWAYS,Always In,1990-01-02,\n"
-        "JOIN,Joined Midway,2015-06-01,\n"
-        "GONE,Departed Inc,2001-01-01,2016-11-01\n"
+        _HEADER + "ALWAYS,Always In,1990-01-02,,exact,\n"
+        "JOIN,Joined Midway,2015-06-01,,exact,\n"
+        "GONE,Departed Inc,2001-01-01,2016-11-01,exact,exact\n"
     ),
     "sp400-membership": (
-        "symbol,name,added,removed\nMOVER,Moved Up,2018-02-01,\nTWICE,Two Stints,2013-01-01,\n"
+        _HEADER + "MOVER,Moved Up,2018-02-01,,exact,\n"
+        "TWICE,Two Stints,2013-01-01,,exact,\n"
+        "BOUNDEND,Bounded Exit,2010-01-01,2018-06-30,exact,no_later_than\n"
     ),
     "sp600-membership": (
-        "symbol,name,added,removed\n"
-        "MOVER,Moved Up,2005-03-04,2012-07-08\n"
-        "TWICE,Two Stints,2010-01-01,2014-12-31\n"
-        "NODATE,No Join Date,,\n"
-        "ODD,Odd Dates,unknown,unknown\n"
-        "BADDATE,Bad Dates,not-a-date,2020-13-45\n"
+        _HEADER + "MOVER,Moved Up,2005-03-04,2012-07-08,exact,exact\n"
+        "TWICE,Two Stints,2010-01-01,2014-12-31,exact,exact\n"
+        "NODATE,No Join Date,,,,\n"
+        "ODD,Odd Dates,unknown,unknown,,\n"
+        "BADDATE,Bad Dates,not-a-date,2020-13-45,,\n"
+        "BOUNDED,Bounded Join,2015-06-30,,no_later_than,\n"
+        "ODDBOUND,Odd Bound Token,2012-05-05,,circa,\n"
     ),
 }
+
+#: The same S&P 600 file as it looked before the provenance columns existed.
+LEGACY_MEMBERSHIP = (
+    "symbol,name,added,removed\n"
+    "MOVER,Moved Up,2005-03-04,2012-07-08\n"
+    "TWICE,Two Stints,2010-01-01,2014-12-31\n"
+    "NODATE,No Join Date,,\n"
+    "ODD,Odd Dates,unknown,unknown\n"
+    "BADDATE,Bad Dates,not-a-date,2020-13-45\n"
+    "BOUNDED,Bounded Join,2015-06-30,\n"
+    "ODDBOUND,Odd Bound Token,2012-05-05,\n"
+)
 
 
 @pytest.fixture
@@ -596,10 +672,27 @@ def test_the_include_policy_backdates_an_unknown_join_to_the_dawn_of_time(
 def test_the_two_policies_disagree_only_about_symbols_with_unstated_dates(
     fake_snapshots,
 ) -> None:
+    """With bounds read as the dates they are not, only the truly undated differ."""
+    cfg = fake_snapshots()
+    strict = membership_windows(cfg, unknown=UNKNOWN_EXCLUDE, bounded=BOUNDED_AS_EXACT)
+    loose = membership_windows(cfg, unknown=UNKNOWN_INCLUDE, bounded=BOUNDED_AS_EXACT)
+    assert {s for s in strict if strict[s] != loose[s]} == {"NODATE", "ODD"}
+
+
+def test_treating_bounds_as_unstated_widens_the_disagreement_to_the_bounded_ones(
+    fake_snapshots,
+) -> None:
+    """The default reading: a bound is not a date, so the policies decide it too."""
     cfg = fake_snapshots()
     strict = membership_windows(cfg, unknown=UNKNOWN_EXCLUDE)
     loose = membership_windows(cfg, unknown=UNKNOWN_INCLUDE)
-    assert {s for s in strict if strict[s] != loose[s]} == {"NODATE", "ODD"}
+    assert {s for s in strict if strict[s] != loose[s]} == {
+        "NODATE",
+        "ODD",
+        "BOUNDED",
+        "ODDBOUND",
+        "BOUNDEND",
+    }
 
 
 def test_etfs_and_extra_symbols_are_never_gated_by_membership(fake_snapshots) -> None:
@@ -648,16 +741,73 @@ def test_members_asof_is_a_subset_of_load_in_the_same_order(fake_snapshots) -> N
 def test_coverage_counts_add_up_and_name_the_excluded(fake_snapshots) -> None:
     cfg = fake_snapshots()
     coverage = membership_coverage(cfg)
-    assert coverage.instruments == 7  # 2 + 2 + 2 stocks + 1 ETF
-    assert coverage.gated == 6
+    assert coverage.instruments == 10  # 2 + 3 + 4 stocks + 1 ETF
+    assert coverage.gated == 9
     assert coverage.ungated == 1
     assert coverage.gated == (
         coverage.stated_join + coverage.unknown_join + coverage.no_membership_row
     )
-    assert coverage.unknown_join == 2  # NODATE, ODD
+    # NODATE and ODD state nothing; BOUNDED and ODDBOUND state only a bound,
+    # which under the default policy is not a stated join date either.
+    assert coverage.unknown_join == 4
+    assert coverage.bounded_join == 2
     assert coverage.no_membership_row == 0
-    assert coverage.excluded == 2
-    assert coverage.coverage_pct == pytest.approx(100 * 4 / 6)
+    # Those four plus BOUNDEND, whose join is exact but whose *exit* is a bound:
+    # nothing can vouch for where its window ends, so it has no window.
+    assert coverage.excluded == 5
+    assert coverage.coverage_pct == pytest.approx(100 * 5 / 9)
+
+
+def test_reading_bounds_as_exact_puts_the_bounded_symbols_back(fake_snapshots) -> None:
+    """The size of the choice, in the counts a run publishes."""
+    cfg = fake_snapshots()
+    strict = membership_coverage(cfg)
+    as_exact = membership_coverage(cfg, bounded=BOUNDED_AS_EXACT)
+    assert (as_exact.stated_join, as_exact.unknown_join, as_exact.excluded) == (7, 2, 2)
+    assert (strict.stated_join, strict.unknown_join, strict.excluded) == (5, 4, 5)
+    # The symbols moved between the buckets; the file did not change under us.
+    assert as_exact.bounded_join == strict.bounded_join == 2
+    assert as_exact.stints_bounded == strict.stints_bounded
+    assert (strict.bounded_policy, as_exact.bounded_policy) == ("unknown", "exact")
+
+
+def test_the_stint_composition_says_how_much_of_the_file_is_approximate(
+    fake_snapshots,
+) -> None:
+    """Requirement of every run: exact, bounded and undated, counted per index."""
+    cfg = fake_snapshots()
+    coverage = membership_coverage(cfg)
+    composition = {
+        c.source: (c.stints, c.exact, c.bounded, c.undated) for c in coverage.by_source_stints
+    }
+    assert composition == {
+        "sp500": (3, 3, 0, 0),  # ALWAYS, JOIN, GONE — all exact
+        "sp400": (3, 2, 1, 0),  # BOUNDEND's exit is a bound
+        "sp600": (7, 2, 2, 3),  # BOUNDED + ODDBOUND bounded; NODATE/ODD/BADDATE undated
+    }
+    for counts in coverage.by_source_stints:
+        assert counts.stints == counts.exact + counts.bounded + counts.undated
+    assert (coverage.stints, coverage.stints_exact) == (13, 7)
+    assert (coverage.stints_bounded, coverage.stints_undated) == (3, 3)
+    assert coverage.approximate_pct == pytest.approx(100 * 6 / 13)
+
+
+def test_the_composition_describes_the_files_not_the_slice_being_reported_on(
+    fake_snapshots,
+) -> None:
+    """It is the evidence behind the gate, so it does not shrink with the question."""
+    cfg = fake_snapshots()
+    etfs_only = [i for i in load(cfg) if i.kind == "etf"]
+    coverage = membership_coverage(cfg, instruments=etfs_only)
+    assert (coverage.gated, coverage.stints) == (0, 13)
+    assert membership_coverage(cfg, instruments=[]).stints == 13
+
+
+def test_a_disabled_index_drops_out_of_the_composition(fake_snapshots) -> None:
+    fake_snapshots()
+    cfg = Config(universe=UniverseCfg(sp600=False))
+    sources = [c.source for c in membership_coverage(cfg).by_source_stints]
+    assert sources == ["sp500", "sp400"]
 
 
 def test_the_include_policy_excludes_nobody(fake_snapshots) -> None:
@@ -695,6 +845,229 @@ def test_an_unknown_date_policy_that_is_not_one_of_the_two_is_refused(policy) ->
 
 def test_the_two_policies_are_the_only_two() -> None:
     assert UNKNOWN_POLICIES == (UNKNOWN_EXCLUDE, UNKNOWN_INCLUDE) == ("exclude", "include")
+
+
+# ---------------------------------------------------------------------------
+# date provenance: exact, bounded, unstated
+# ---------------------------------------------------------------------------
+
+
+def test_a_bounded_date_is_a_date_the_file_does_not_certify(fake_snapshots) -> None:
+    """The third state, at the parse level: a date is there, a fact is not."""
+    fake_snapshots()
+    stints = {s.symbol: s for s in membership("sp600")}
+    bounded, exact, undated = stints["BOUNDED"], stints["MOVER"], stints["NODATE"]
+
+    assert bounded.added == date(2015, 6, 30), "the bound is still the best date there is"
+    assert bounded.added_quality == DATE_BOUNDED
+    assert bounded.added_stated, "a bound is stated — just not as a fact"
+    assert bounded.dates_bounded and bounded.quality == DATE_BOUNDED
+
+    assert exact.added_quality == exact.removed_quality == DATE_EXACT
+    assert not exact.dates_bounded and exact.quality == DATE_EXACT
+    assert undated.added_quality == DATE_UNSTATED and undated.quality == DATE_UNSTATED
+
+
+def test_an_open_removal_is_a_stated_fact_not_a_gap(fake_snapshots) -> None:
+    """A blank `removed` says "still a member", so it cannot weaken a stint."""
+    fake_snapshots()
+    always = next(s for s in membership("sp500") if s.symbol == "ALWAYS")
+    assert always.removed_quality == DATE_OPEN
+    assert always.still_open and always.removed_stated
+    assert always.quality == DATE_EXACT
+
+
+def test_a_bounded_join_leaves_the_days_before_it_ungated_under_the_permissive_reading(
+    fake_snapshots,
+) -> None:
+    """The crux of BOUNDS-1.
+
+    "Joined no later than 2015-06-30" does not say the symbol was absent in
+    2014 — it says nobody knows. The permissive reading therefore must not
+    treat the bound as a wall, and the strict one must not treat it as a fact.
+    """
+    cfg = fake_snapshots()
+    before = date(2014, 1, 2)
+
+    loose = membership_windows(cfg, unknown=UNKNOWN_INCLUDE)
+    assert loose["BOUNDED"] == ((None, None),)
+    assert "BOUNDED" in {i.symbol for i in members_asof(before, cfg, unknown=UNKNOWN_INCLUDE)}
+
+    strict = membership_windows(cfg, unknown=UNKNOWN_EXCLUDE)
+    assert strict["BOUNDED"] == ()
+    assert "BOUNDED" not in {i.symbol for i in members_asof(before, cfg)}
+
+
+def test_reading_the_bound_as_exact_reproduces_the_old_wall(fake_snapshots) -> None:
+    """The previous behaviour, still available and now something you have to ask for."""
+    cfg = fake_snapshots()
+    windows = membership_windows(cfg, bounded=BOUNDED_AS_EXACT)
+    assert windows["BOUNDED"] == ((date(2015, 6, 30), None),)
+    members = {i.symbol for i in members_asof(date(2015, 6, 29), cfg, bounded=BOUNDED_AS_EXACT)}
+    assert "BOUNDED" not in members
+    assert "BOUNDED" in {
+        i.symbol for i in members_asof(date(2015, 6, 30), cfg, bounded=BOUNDED_AS_EXACT)
+    }
+
+
+def test_a_bounded_removal_ends_a_stint_only_when_bounds_are_read_as_facts(
+    fake_snapshots,
+) -> None:
+    """The other end, where the same vocabulary biases the other way.
+
+    "Left no later than 2018-06-30" read as the exit date keeps the symbol a
+    member through days it may already have gone.
+    """
+    cfg = fake_snapshots()
+    assert membership_windows(cfg, bounded=BOUNDED_AS_EXACT)["BOUNDEND"] == (
+        (date(2010, 1, 1), date(2018, 6, 30)),
+    )
+    assert membership_windows(cfg)["BOUNDEND"] == ()
+    # Permissively, the stated join still stands and only the bounded exit
+    # opens out: an unstated end means "ever after", not "always".
+    assert membership_windows(cfg, unknown=UNKNOWN_INCLUDE)["BOUNDEND"] == (
+        (date(2010, 1, 1), None),
+    )
+
+
+def test_a_bound_token_nobody_recognises_takes_the_safe_path(fake_snapshots) -> None:
+    """`circa` is not `exact`, and a date nothing certifies must not become one."""
+    cfg = fake_snapshots()
+    odd = next(s for s in membership("sp600") if s.symbol == "ODDBOUND")
+    assert odd.added == date(2012, 5, 5) and odd.added_quality == DATE_BOUNDED
+    assert membership_windows(cfg)["ODDBOUND"] == ()
+    assert membership_windows(cfg, bounded=BOUNDED_AS_EXACT)["ODDBOUND"] == (
+        (date(2012, 5, 5), None),
+    )
+
+
+def test_an_unrecognised_bound_token_is_reported_rather_than_absorbed(
+    fake_snapshots, caplog
+) -> None:
+    fake_snapshots()
+    with caplog.at_level("WARNING", logger="swing.universe"):
+        membership("sp600")
+    assert "neither 'exact' nor 'no_later_than'" in caplog.text
+
+
+def test_a_file_written_before_the_bound_columns_reads_as_it_always_did(
+    fake_snapshots,
+) -> None:
+    """An older file must load, and must mean what it meant when it was written.
+
+    A missing column is not a downgraded file: ``build_membership.py`` refuses
+    to write one that drops provenance, so the only files without the columns
+    are the pre-EDGAR ones, whose dates were announced days. Re-reading those
+    as approximations would change the answer an archived run gave and empty
+    the universe under the default policy — inventing uncertainty is as wrong
+    as inventing certainty. What must never happen is silence, so the read
+    warns; the per-cell rule inside a file that *does* carry the columns is the
+    strict one.
+    """
+    cfg = fake_snapshots({**FAKE_SNAPSHOTS, "sp600-membership": LEGACY_MEMBERSHIP})
+    stints = {s.symbol: s for s in membership("sp600")}
+    assert len(stints) == 7
+    assert stints["MOVER"].added == date(2005, 3, 4)
+    assert stints["MOVER"].added_quality == DATE_EXACT
+    assert stints["NODATE"].added_quality == DATE_UNSTATED, "a blank cell is still a blank cell"
+    assert stints["MOVER"].still_open is False
+    assert membership_windows(cfg)["ODDBOUND"] == ((date(2012, 5, 5), None),)
+
+    composition = {c.source: c for c in membership_coverage(cfg).by_source_stints}["sp600"]
+    assert (composition.stints, composition.exact, composition.bounded, composition.undated) == (
+        7,
+        4,
+        0,
+        3,
+    )
+
+
+def test_a_file_without_bound_columns_says_so_out_loud(fake_snapshots, caplog) -> None:
+    """Read as exact, but never quietly: the warning is the whole permission slip."""
+    fake_snapshots({**FAKE_SNAPSHOTS, "sp600-membership": LEGACY_MEMBERSHIP})
+    with caplog.at_level("WARNING", logger="swing.universe"):
+        membership("sp600")
+    assert "has no added_bound or removed_bound column" in caplog.text
+    assert "unverified" in caplog.text
+
+
+def test_a_blank_bound_cell_in_a_file_that_has_the_column_is_not_a_certification(
+    fake_snapshots,
+) -> None:
+    """The strict half of the rule: a file that can say 'exact' and does not, has not."""
+    fake_snapshots(
+        {
+            **FAKE_SNAPSHOTS,
+            "sp600-membership": (
+                _HEADER + "BOUNDED,Bounded Join,2015-06-30,,,\nODDBOUND,Odd,2012-05-05,,,\n"
+            ),
+        }
+    )
+    stints = {s.symbol: s for s in membership("sp600")}
+    assert stints["BOUNDED"].added_quality == DATE_BOUNDED
+    assert stints["ODDBOUND"].added_quality == DATE_BOUNDED
+
+
+@pytest.mark.parametrize("policy", ["", "no_later_than", "EXACT", "bounded"])
+def test_a_bounded_date_policy_that_is_not_one_of_the_two_is_refused(policy) -> None:
+    with pytest.raises(ValueError, match="bounded-date policy must be one of"):
+        membership_windows(Config(), bounded=policy)
+
+
+def test_no_bounded_policy_at_all_means_the_configured_one_rather_than_a_refusal() -> None:
+    """``None`` is the one non-policy value: "whatever the config says"."""
+    assert membership_windows(Config(), bounded=None) == membership_windows(Config())
+
+
+def test_the_two_bounded_policies_are_the_only_two() -> None:
+    assert BOUNDED_POLICIES == (BOUNDED_AS_EXACT, BOUNDED_AS_UNKNOWN) == ("exact", "unknown")
+
+
+def test_a_bound_is_treated_as_unstated_unless_the_config_says_otherwise(
+    fake_snapshots,
+) -> None:
+    """The default is the safe reading, and the config — not a hard-coded
+    argument — is what a caller that says nothing gets."""
+    fake_snapshots()
+    assert UniverseCfg().membership_bounded == BOUNDED_AS_UNKNOWN
+    assert membership_windows(Config())["BOUNDED"] == ()
+
+    as_exact = Config(universe=UniverseCfg(membership_bounded=BOUNDED_AS_EXACT))
+    assert membership_windows(as_exact)["BOUNDED"] == ((date(2015, 6, 30), None),)
+    assert members_asof(date(2015, 7, 1), as_exact)[0].symbol in {"ALWAYS", "JOIN"}
+    # An explicit argument still wins over the config, both ways round.
+    assert membership_windows(as_exact, bounded=BOUNDED_AS_UNKNOWN)["BOUNDED"] == ()
+
+
+@pytest.mark.parametrize("value", ["", "no_later_than", "EXACT", "yes"])
+def test_a_bad_membership_bounded_setting_is_refused_in_plain_english(value: str) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        UniverseCfg(membership_bounded=value)
+    message = str(excinfo.value)
+    assert "universe.membership_bounded must be one of exact, unknown" in message
+    assert "no later than" in message, "the error has to say what a bound is"
+
+
+def test_the_shipping_config_hash_is_untouched_by_the_bounded_knob(tmp_path: Path) -> None:
+    """A knob that cannot have changed a past run must not change its hash.
+
+    Every report in this repo was written with ``[backtest] membership = off``,
+    where no membership date is read at all — so however this package reads
+    bounds, those runs describe the same experiment and must keep the same
+    hash. Pinned to the literal for the same reason the runner's own test pins
+    it: a hash that drifts silently is worse than no hash.
+    """
+    from swing.backtest.runner import config_hash
+    from swing.config import MEMBERSHIP_OFF
+
+    shipping = "c6782f8db70ba7e61d4715dcf5f32f7c0c269a66ea8d0d02362ef38c0cf46f48"
+    assert Config().backtest.membership == MEMBERSHIP_OFF
+    assert config_hash(Config()) == shipping
+    assert config_hash(load_config(REPO_ROOT / "config.example.toml")) == shipping
+    # With the mode off no membership date is read at all, so a run that sets
+    # the bounded policy either way is still the same experiment.
+    as_exact = Config(universe=UniverseCfg(membership_bounded=BOUNDED_AS_EXACT))
+    assert config_hash(as_exact) == shipping
 
 
 def test_a_membership_file_is_parsed_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:

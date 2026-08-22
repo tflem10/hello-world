@@ -34,7 +34,13 @@ from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
-from swing.universe import UNKNOWN_EXCLUDE, UNKNOWN_POLICIES
+from swing.universe import (
+    BOUNDED_AS_EXACT,
+    BOUNDED_AS_UNKNOWN,
+    BOUNDED_POLICIES,
+    UNKNOWN_EXCLUDE,
+    UNKNOWN_POLICIES,
+)
 
 __all__ = [
     "MAX_LOOKBACK_BARS",
@@ -364,13 +370,26 @@ class AccountCfg:
 
 @dataclass(frozen=True)
 class UniverseCfg:
-    """Which lists of tradable symbols to scan."""
+    """Which lists of tradable symbols to scan, and how to read their history."""
 
     sp500: bool = True
     sp400: bool = True
     sp600: bool = True
     etfs: bool = True
     extra_symbols: tuple[str, ...] = ()
+    #: How to read a membership date a source states only as an upper bound
+    #: ("this symbol had joined by 2015-06-30, and nobody records when").
+    #: ``"unknown"`` — the default — treats it as a date no source states, so
+    #: ``[backtest] membership_unknown`` decides what happens to it; ``"exact"``
+    #: reads it as the day itself, which is what every run made before these
+    #: columns existed did. A third of all stints and half the S&P 600 rest on
+    #: a bound, so this is not a rounding detail: read as exact, a bounded join
+    #: lands systematically too late and days the symbol really was a member
+    #: are scored as days it was not. It lives here rather than under
+    #: ``[backtest]`` because it governs how the membership files are read for
+    #: any caller, a scan as much as a backtest, and it is inert unless
+    #: something asks for point-in-time membership.
+    membership_bounded: str = BOUNDED_AS_UNKNOWN
 
     def __post_init__(self) -> None:
         _coerce(self)
@@ -380,6 +399,17 @@ class UniverseCfg:
             "given, so there would be nothing to scan.",
             "universe",
             "sp500",
+        )
+        _require(
+            self.membership_bounded in BOUNDED_POLICIES,
+            f"universe.membership_bounded must be one of {', '.join(BOUNDED_POLICIES)}, but it "
+            f"is {self.membership_bounded!r}. '{BOUNDED_AS_UNKNOWN}' treats a date a source "
+            f"states only as an upper bound ('joined no later than 2015-06-30') as a date no "
+            f"source states, so backtest.membership_unknown decides what happens to it; "
+            f"'{BOUNDED_AS_EXACT}' reads the bound as the day itself, which states as a fact "
+            f"something no source states.",
+            "universe",
+            "membership_bounded",
         )
         for sym in self.extra_symbols:
             _require(
@@ -664,6 +694,12 @@ class BacktestCfg:
     #: of the data). Not a detail: 42% of current S&P 600 members have no
     #: stated join date, so ``"include"`` quietly reinstates the bias for them.
     #: Inert while ``membership`` is ``off``.
+    #:
+    #: This decides the fate of dates stated only as an upper bound too,
+    #: because ``[universe] membership_bounded`` defaults to routing them here
+    #: rather than letting an approximation pass as a measurement. The two
+    #: knobs are one policy read in two steps: *which dates count as stated*,
+    #: then *what happens to the rest*.
     membership_unknown: str = UNKNOWN_EXCLUDE
     #: Candidate values the walk-forward may choose between, one list per
     #: parameter, written as a ``[backtest.tuning_grid]`` table. ``None`` — the
