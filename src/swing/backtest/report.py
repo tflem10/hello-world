@@ -14,6 +14,30 @@ Three audiences, three renderings of the same ``summary.json``:
 byte-identical reruns of ``summary.json``, ``trades.csv`` and ``equity.csv``,
 and a timestamp in any of them would break that for no benefit.
 
+COVERAGE IS A DEGREE, SO IT IS RENDERED AS ONE (audit REPORT-1)
+----------------------------------------------------------------
+Every surface here used to turn ``earnings_blackout_simulated`` into an
+all-or-nothing banner, which meant a run whose blackout reached 40% of the
+universe rendered *identically* to one that reached 99.7%. That is the same
+defect the boolean itself had, moved one file downstream: ``summary.json``
+learnt to say how much of the blackout ran, and the artefact a human actually
+opens still could not repeat it.
+
+So the three renderers share :func:`report_notes` — a list of :class:`Note`,
+each one line, each with exactly **two** volumes. A note is emphasised when the
+mechanism did not do what the rest of the report implies (see
+:data:`EARNINGS_COVERAGE_FLOOR` for the threshold and its arithmetic), and
+otherwise it is a quiet line of provenance. Two volumes rather than a palette
+of severities, because a scale invented here would carry no information that
+the numbers on the line do not already carry.
+
+Everything about these notes is best-effort. A summary predating the coverage
+block renders byte-for-byte as it always did (the constants below are frozen
+copies of that rendering, and there are thirty-six such reports on disk); a
+half-written or hand-edited block prints what it can and stays silent about the
+rest. A report that fails to render is worse than a report with a gap in it, so
+nothing in here is allowed to raise.
+
 WHICH PERIOD THE HEADLINE NAMES (audit BUG-043)
 -------------------------------------------------
 A walk-forward run loads years of warm-up data and often stops measuring months
@@ -46,7 +70,11 @@ report are two artefacts of one system and should look like it.
 from __future__ import annotations
 
 import base64
+import html
 import io
+import textwrap
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -59,13 +87,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "CHART_COLORS",
+    "EARNINGS_COVERAGE_FLOOR",
     "METRIC_LABELS",
     "STYLESHEET",
+    "Note",
+    "earnings_note",
     "format_metric",
+    "legacy_blackout_banner",
     "measured_period",
+    "membership_note",
     "print_latest",
     "render_html",
     "render_markdown",
+    "report_notes",
 ]
 
 #: The colours baked into the matplotlib PNGs.
@@ -127,6 +161,448 @@ def format_metric(key: str, value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# dependency coverage notes
+# ---------------------------------------------------------------------------
+
+#: ``earnings.source`` values, mirrored from :mod:`swing.backtest.runner`.
+#:
+#: Copied rather than imported because the runner imports *this* module to
+#: write its reports, so the arrow only points one way. ``tests/
+#: test_backtest_report.py::test_the_earnings_source_names_match_the_runners``
+#: fails the moment a spelling drifts, which is the same bargain the contrast
+#: suite strikes with the stylesheet: never restate a fact without a test that
+#: re-reads the original.
+EARNINGS_FROM_HISTORY = "history"
+EARNINGS_FROM_UPCOMING = "upcoming_only"
+EARNINGS_UNAVAILABLE = "unavailable"
+
+#: Below this percentage of *announcing* symbols, the earnings note is loud.
+#:
+#: The number has to sit inside a window fixed at both ends, and the window is
+#: narrow enough that the choice is nearly made for you:
+#:
+#: * **It must not fire on a healthy stocks run.** Five S&P names (``CWEN-A``,
+#:   ``MCRI``, ``MFP``, ``PAYX``, ``SEI``) have no free announcement history and
+#:   are unlikely ever to get one, so the practical ceiling on this universe is
+#:   99.67%, not 100%. A threshold above that warns on every stocks run forever,
+#:   and a banner that is always on is one nobody reads.
+#: * **It must fire on the states this note exists to separate.** The repo's own
+#:   cache went 8% -> 99.7% populated in an afternoon, and both states recorded
+#:   the identical boolean. 8% and 40% have to look different from 99.7%.
+#:
+#: That brackets it to (40, 99.67). Within the bracket, pick by the size of the
+#: distortion. ``strategy.earnings_blackout_days = 10`` blocks entries from ten
+#: calendar days before an announcement through the day itself — about eight
+#: trading days — and a US company reports four times a year, so the blackout
+#: removes on the order of 32 of ~252 trading days: roughly **13% of an
+#: announcing symbol's entry opportunities**. An uncovered symbol runs an entry
+#: gate that differs from production on those bars, so the run-wide share of
+#: mis-gated entry opportunities is about ``(100 - coverage) x 0.13``:
+#:
+#: ===========  ===============================
+#: coverage     entry opportunities mis-gated
+#: ===========  ===============================
+#: 99.7%        0.04%
+#: 95%          0.6%
+#: 90%          1.3%
+#: 40%          7.6%
+#: 8%           11.7%
+#: ===========  ===============================
+#:
+#: 95% is the round number that keeps the mis-gated share under 1% while
+#: leaving about fifteen times the irreducible gap (5 names in 1,506) as slack,
+#: so ordinary cache churn cannot trip it and a genuinely thin cache cannot
+#: hide behind it.
+EARNINGS_COVERAGE_FLOOR = 95.0
+
+#: The pre-coverage earnings banner, frozen per surface.
+#:
+#: These are the exact bytes every report written before the coverage block
+#: carries, and there are thirty-six of them on disk. They are reproduced
+#: verbatim — line breaks included — so re-rendering an old ``summary.json``
+#: yields the file its reader already knows, and so the two spellings (Markdown
+#: sentence case, HTML shouting) survive unchanged.
+_LEGACY_MD_BANNER: tuple[str, ...] = (
+    "> **Earnings blackout not simulated.** No historical announcement dates were",
+    "> available, so the backtest took entries the live scanner would have blocked.",
+    "> Results are slightly optimistic against the strategy as it is actually run.",
+    "",
+)
+_LEGACY_HTML_BANNER = (
+    '<div class="banner warn">Earnings blackout NOT simulated: no historical '
+    "announcement dates were available, so this run took entries the live scanner "
+    "would have blocked.</div>"
+)
+_LEGACY_TERM_BANNER = (
+    "  note       earnings blackout NOT simulated — results are slightly optimistic"
+)
+
+#: The same headline, for a run that *does* carry a coverage block, in each
+#: surface's own voice. The note's predicate continues the sentence, so the
+#: numbers arrive attached to the warning rather than in a second banner beside
+#: it saying the same thing in fewer words.
+_ABSENT_MD_LEAD = "**Earnings blackout not simulated.**"
+_ABSENT_HTML_LEAD = "<strong>Earnings blackout NOT simulated.</strong>"
+_ABSENT_TERM_LEAD = "NOT simulated —"
+
+
+@dataclass(frozen=True)
+class Note:
+    """One line about a dependency the simulation leaned on.
+
+    Split into ``subject`` and ``text`` because the three surfaces need the same
+    fact assembled three ways: Markdown wants it as a header bullet next to
+    **Data hash**, HTML wants a sentence, and the terminal has already printed
+    the subject as a label column and would otherwise say it twice.
+    ``text`` is therefore a lowercase predicate with no trailing stop, and every
+    surface adds its own.
+
+    ``emphasise`` is the point of the type. The renderers used to have one
+    volume and a boolean to trigger it, so 40% coverage and 99.7% coverage
+    produced the same page. A note carries the degree in ``text`` and gets
+    exactly two volumes: loud when the mechanism did not do what the rest of the
+    report implies, quiet otherwise. There is deliberately no third level —
+    a severity scale invented in a renderer would encode nothing the numbers on
+    the line do not already say.
+    """
+
+    #: Which dependency this is about, as a terminal label column. It lives on
+    #: the note rather than being inferred from position: a list that drops its
+    #: earnings note must not relabel the membership one.
+    label: str
+    #: The same thing, spelled for prose — ``"Earnings blackout"``.
+    subject: str
+    #: The predicate: lowercase, no trailing full stop.
+    text: str
+    emphasise: bool = False
+    #: The pre-coverage headline still applies: the blackout did not operate at
+    #: all. Each surface spells it in its own established voice, because that
+    #: wording predates the coverage block and both readers and tests know it.
+    blackout_absent: bool = False
+
+    def sentence(self) -> str:
+        """The whole note as one plain sentence — ``"Subject: predicate."``"""
+        return f"{self.subject}: {self.text}."
+
+
+def _number(value: Any) -> float | None:
+    """A finite number out of a JSON value, or ``None`` if it does not hold one.
+
+    Tolerant on purpose: a diagnostic block is the last thing that should be
+    allowed to raise, and a summary that has been hand-edited, half-written or
+    round-tripped through a tool that stringifies numbers is still worth
+    reading. ``bool`` is refused rather than silently read as 0/1, because a
+    boolean in a count field means the record is wrong, not that the count is 1.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if number != number or number in (float("inf"), float("-inf")):  # NaN / +-inf
+        return None
+    return number
+
+
+def _count(value: Any) -> int | None:
+    """:func:`_number`, restricted to a non-negative whole count."""
+    number = _number(value)
+    if number is None or number < 0:
+        return None
+    return int(number)
+
+
+def _pct(value: float) -> str:
+    """A percentage to one decimal, without ever rounding a gap away.
+
+    ``f"{99.96:.1f}%"`` is ``"100.0%"``, which would report a universe with
+    uncovered symbols in it as fully covered — the precise class of lie this
+    whole note exists to stop. Same at the bottom: 0.04% is not "none".
+    """
+    if 0.0 < value < 0.05:
+        return "under 0.1%"
+    if 99.95 <= value < 100.0:
+        return "just under 100%"
+    return f"{value:.1f}%"
+
+
+def _sentence(text: str) -> str:
+    """Capitalise the first character and leave every other one alone."""
+    return text[:1].upper() + text[1:] if text else text
+
+
+def _text(value: Any) -> str | None:
+    """A non-empty string out of a JSON value, or ``None``."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+@dataclass(frozen=True)
+class _Earnings:
+    """The coverage block, read as tolerantly as it can be read."""
+
+    source: str | None
+    applicable: int | None
+    covered: int | None
+    uncovered: int | None
+    coverage_pct: float | None
+    announcements: int | None
+
+
+def _earnings_facts(block: Mapping[str, Any]) -> _Earnings:
+    """Derive what the block does not state from what it does.
+
+    Any two of applicable/covered/uncovered give the third, and either the
+    counts or ``coverage_pct`` give the percentage, so a block missing one key
+    is still worth a full line.
+    """
+    applicable = _count(block.get("symbols_applicable"))
+    covered = _count(block.get("symbols_with_dates"))
+    uncovered = _count(block.get("symbols_without_dates"))
+    if applicable is None and covered is not None and uncovered is not None:
+        applicable = covered + uncovered
+    if uncovered is None and applicable is not None and covered is not None:
+        uncovered = max(applicable - covered, 0)
+    if covered is None and applicable is not None and uncovered is not None:
+        covered = max(applicable - uncovered, 0)
+
+    coverage_pct = _number(block.get("coverage_pct"))
+    if coverage_pct is None and applicable and covered is not None:
+        coverage_pct = 100.0 * covered / applicable
+    if coverage_pct is not None:
+        coverage_pct = min(max(coverage_pct, 0.0), 100.0)
+
+    return _Earnings(
+        source=_text(block.get("source")),
+        applicable=applicable,
+        covered=covered,
+        uncovered=uncovered,
+        coverage_pct=coverage_pct,
+        announcements=_count(block.get("announcements")),
+    )
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """``"1 announcement date"`` / ``"115,045 announcement dates"``."""
+    return f"{count:,} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _announcing(applicable: int | None) -> str:
+    """``"the 1,506 announcing symbols"``, degrading when the count is absent."""
+    if applicable is None:
+        return "the symbols that announce"
+    return f"the {_plural(applicable, 'announcing symbol')}"
+
+
+def earnings_note(summary: Mapping[str, Any]) -> Note | None:
+    """How much of the entry gate's earnings blackout this run actually had.
+
+    Returns ``None`` when the summary carries no usable ``earnings`` block —
+    every report written before the block existed, and any report whose block
+    has been replaced by something that is not a mapping. The surfaces fall
+    back to the frozen banner those reports have always rendered, so nothing on
+    disk changes appearance.
+
+    Otherwise returns one line covering every state the block can be in:
+
+    * nothing in the universe announces (an ETF-only run) — quiet, and
+      explicitly "not applicable" rather than 0% coverage, because the block
+      reports ``coverage_pct: 0.0`` for an empty denominator and a red banner on
+      the one run free of these biases would be its own lie (methodology 7.4);
+    * ``source: unavailable`` or ``upcoming_only`` — loud. Neither can block a
+      single historical bar, and ``upcoming_only`` in particular scores full
+      coverage while simulating no blackout at all (amendment A12);
+    * ``source: history`` with no dates back — loud, and the reason
+      ``earnings_blackout_simulated`` was tightened;
+    * ``history`` below :data:`EARNINGS_COVERAGE_FLOOR` — loud, with the count
+      that went through the gate unblacked-out;
+    * ``history`` at or above it — quiet, with the counts and the announcement
+      total, because "1,501 of 1,506 over 115,045 dates" and "one date each"
+      both read as "covered" and are not the same run;
+    * a partial or malformed block — quiet, and honest that the figure is
+      missing rather than inventing one.
+    """
+    absent = bool(
+        "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]
+    )
+    block = summary.get("earnings")
+    if not isinstance(block, Mapping):
+        return None
+
+    facts = _earnings_facts(block)
+
+    # An unrecognised source is quoted rather than guessed at, so a reader can
+    # see that this renderer did not understand the record it was handed.
+    unknown_source = (
+        f' (recorded source: "{facts.source}")'
+        if facts.source
+        and facts.source
+        not in {EARNINGS_FROM_HISTORY, EARNINGS_FROM_UPCOMING, EARNINGS_UNAVAILABLE}
+        else ""
+    )
+
+    def note(text: str, *, emphasise: bool) -> Note:
+        return Note(
+            "earnings",
+            "Earnings blackout",
+            f"{text}{unknown_source}",
+            emphasise=emphasise or absent,
+            blackout_absent=absent,
+        )
+
+    if facts.applicable == 0:
+        return note(
+            "not applicable — no symbol in this universe announces earnings, so there was "
+            "nothing for it to block",
+            emphasise=False,
+        )
+
+    if facts.source == EARNINGS_UNAVAILABLE:
+        why = "the earnings lookup failed and returned nothing"
+    elif facts.source == EARNINGS_FROM_UPCOMING:
+        why = (
+            "the provider knew only each symbol's next announcement date, which cannot "
+            "block a historical bar"
+        )
+    elif facts.covered == 0:
+        why = f"no announcement dates came back for any of {_announcing(facts.applicable)}"
+    else:
+        why = ""
+
+    if why:
+        tail = (
+            "every entry went through the gate unblacked-out"
+            if facts.covered == 0 and facts.source == EARNINGS_FROM_HISTORY
+            else f"none of {_announcing(facts.applicable)} was blacked out"
+        )
+        # "did not run" is the surfaces' own lead when `absent`, so saying it
+        # here too would print it twice in the one sentence.
+        opener = "" if absent else "did not run — "
+        return note(f"{opener}{why}, so {tail}", emphasise=True)
+
+    if facts.coverage_pct is None or facts.applicable is None or facts.covered is None:
+        return note(
+            "this report does not record how much of the universe the announcement dates covered",
+            emphasise=False,
+        )
+
+    if facts.coverage_pct < EARNINGS_COVERAGE_FLOOR:
+        missed = facts.uncovered if facts.uncovered is not None else 0
+        return note(
+            f"reached only {facts.covered:,} of {_announcing(facts.applicable)} "
+            f"({_pct(facts.coverage_pct)}) — the other {missed:,} went through the entry gate "
+            f"with no blackout in it, so this run took entries the live scanner would have "
+            f"blocked",
+            emphasise=True,
+        )
+
+    dates = (
+        f", from {_plural(facts.announcements, 'announcement date')}"
+        if facts.announcements is not None
+        else ""
+    )
+    return note(
+        f"covered {facts.covered:,} of {_announcing(facts.applicable)} "
+        f"({_pct(facts.coverage_pct)}){dates}",
+        emphasise=False,
+    )
+
+
+def membership_note(summary: Mapping[str, Any]) -> Note | None:
+    """Which universe the run traded, and how much of that rests on a guess.
+
+    Returns ``None`` when there is no usable ``membership`` block, which is
+    every report written before one was published.
+
+    The mode itself is *not* emphasised, even though ``off`` is the whole
+    look-ahead: it is the documented default, the figures on the same line
+    quantify it, and a note that fires on every run is a note nobody reads. The
+    one loud case is a block carrying ``error`` — the membership files could not
+    be read, so the bias is not merely present but unmeasured, and the zeros
+    beside it must not be mistaken for a measurement of no bias.
+
+    ``stint_date_quality.approximate_pct`` is the number worth the space. It
+    counts rows of the membership files rather than this run's symbols, so it
+    does not move when a policy does, and on the shipping files most stints
+    rest on an approximation — which a reader should learn from the report
+    rather than from a log line.
+    """
+    block = summary.get("membership")
+    if not isinstance(block, Mapping):
+        return None
+
+    subject = "Index membership"
+    problem = _text(block.get("error"))
+    if problem:
+        return Note(
+            "membership",
+            subject,
+            f"the membership files could not be read ({problem}), so this report cannot say "
+            f"how much of its universe was actually in an index",
+            emphasise=True,
+        )
+
+    mode = _text(block.get("mode"))
+    if mode == "off":
+        clauses = ["not applied — today's index members are traded through all of history"]
+    elif mode == "point_in_time":
+        excluded = _count(block.get("symbols_excluded"))
+        dropped = f", {_plural(excluded, 'symbol')} excluded" if excluded else ""
+        clauses = [f"point-in-time{dropped}"]
+    elif mode:
+        clauses = [f'mode "{mode}"']
+    else:
+        clauses = []
+
+    quality = block.get("stint_date_quality")
+    if isinstance(quality, Mapping):
+        approximate = _number(quality.get("approximate_pct"))
+        stints = _count(quality.get("stints"))
+        if approximate is not None and stints:
+            clauses.append(
+                f"{_pct(approximate)} of {_plural(stints, 'membership stint')} rest on an "
+                f"approximate join date"
+            )
+        elif approximate is not None:
+            clauses.append(f"{_pct(approximate)} of membership stints rest on an approximate date")
+
+    # A zero here is not a finding — it means the policy decided nothing — so it
+    # is left out rather than printed as `0 symbols have a bounded join date`.
+    bounded = _count(block.get("symbols_bounded_join"))
+    policy = _text(block.get("bounded_policy"))
+    if bounded:
+        read_as = f', read as "{policy}"' if policy else ""
+        clauses.append(f"{_plural(bounded, 'symbol')} joined on a bounded date{read_as}")
+
+    if not clauses:
+        return None
+    return Note("membership", subject, "; ".join(clauses))
+
+
+def report_notes(summary: Mapping[str, Any]) -> list[Note]:
+    """Every dependency note this summary supports, in reading order."""
+    return [note for note in (earnings_note(summary), membership_note(summary)) if note is not None]
+
+
+def legacy_blackout_banner(summary: Mapping[str, Any]) -> bool:
+    """True when the frozen pre-coverage banner is still the whole earnings story.
+
+    Exactly the old condition, and only on the old shape: a summary with no
+    coverage block whose ``earnings_blackout_simulated`` is false. Anything
+    carrying a block gets the headline folded into :func:`earnings_note`
+    instead, so the two never render one above the other saying the same thing.
+    """
+    return not isinstance(summary.get("earnings"), Mapping) and bool(
+        "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # markdown
 # ---------------------------------------------------------------------------
 
@@ -152,9 +628,26 @@ def measured_period(summary: dict[str, Any]) -> str:
     return f"{summary.get('start', '?')} to {summary.get('end', '?')}"
 
 
+def _md_quote(note: Note) -> list[str]:
+    """One emphasised note as a wrapped Markdown blockquote."""
+    text = (
+        f"{_ABSENT_MD_LEAD} {_sentence(note.text)}."
+        if note.blackout_absent
+        else f"**{note.subject}:** {note.text}."
+    )
+    return [f"> {line}" for line in textwrap.wrap(text, width=88)] + [""]
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
-    """Render ``summary.json`` as a Markdown report."""
+    """Render ``summary.json`` as a Markdown report.
+
+    Quiet notes join the header bullets, loud ones become blockquotes below it,
+    both starting with the same words so one ``grep`` finds either — which is
+    the difference a reader is meant to notice at a glance and a diff of two
+    runs is meant to show as a moved line.
+    """
     walkforward = bool(summary.get("walkforward"))
+    notes = report_notes(summary)
     out: list[str] = [
         f"# Backtest — {summary.get('label', 'unlabelled')}",
         "",
@@ -166,15 +659,19 @@ def render_markdown(summary: dict[str, Any]) -> str:
         f"- **Config hash**: `{summary.get('config_hash', '')[:16]}`",
         f"- **Code ref**: `{summary.get('code_ref', 'unknown')}`",
         f"- **Data hash**: `{summary.get('data_hash', '')[:16]}`",
-        "",
     ]
-    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
-        out += [
-            "> **Earnings blackout not simulated.** No historical announcement dates were",
-            "> available, so the backtest took entries the live scanner would have blocked.",
-            "> Results are slightly optimistic against the strategy as it is actually run.",
-            "",
-        ]
+    earnings_hash = _text(summary.get("earnings_hash"))
+    if earnings_hash:
+        out.append(f"- **Earnings hash**: `{earnings_hash[:16]}`")
+    out += [f"- **{note.subject}**: {note.text}" for note in notes if not note.emphasise]
+    out.append("")
+
+    if legacy_blackout_banner(summary):
+        # Pre-coverage-block report: the banner it has always carried, verbatim.
+        out += list(_LEGACY_MD_BANNER)
+    for note in notes:
+        if note.emphasise:
+            out += _md_quote(note)
 
     if walkforward:
         out += [
@@ -474,7 +971,7 @@ _HTML_TEMPLATE = """<!doctype html>
 <h1>Backtest — {label}</h1>
 <p class="sub">{universe} universe ({n_symbols} symbols) &middot; {measured_period}</p>
 <div class="banner {banner_class}">{banner}</div>
-{earnings_note}
+{notes}
 <h2>{headline_title}</h2>
 {headline_table}
 
@@ -496,7 +993,7 @@ _HTML_TEMPLATE = """<!doctype html>
 <tr><td>Config hash</td><td><code>{config_hash}</code></td></tr>
 <tr><td>Code ref</td><td><code>{code_ref}</code></td></tr>
 <tr><td>Data hash</td><td><code>{data_hash}</code></td></tr>
-</table>
+{earnings_hash_row}</table>
 
 <footer>Generated at {generated_at}. Costs charged per side:
 {slippage_bps} bps slippage plus {spread_atr_frac} x ATR spread.</footer>
@@ -517,6 +1014,37 @@ def _html_metric_table(metrics: dict[str, Any]) -> str:
 
 def _html_section(title: str, body: str) -> str:
     return f"<h2>{title}</h2>\n{body}" if body else ""
+
+
+def _html_notes(summary: Mapping[str, Any]) -> str:
+    """The dependency notes, in the two costumes the stylesheet already owns.
+
+    A loud note reuses ``.banner.warn`` — the same red the report already puts
+    on a non-walk-forward run — and a quiet one is a ``.sub`` line, the muted
+    13px the subtitle uses. No new selector and no new colour: the palette went
+    through a WCAG AA pass with an automated guard
+    (``tests/test_html_contrast.py``), and a diagnostic is not worth reopening
+    it. The gradient between "obvious" and "unremarkable" is carried by two
+    existing styles rather than by a scale invented here.
+    """
+    out: list[str] = []
+    if legacy_blackout_banner(summary):
+        out.append(_LEGACY_HTML_BANNER)
+    for note in report_notes(summary):
+        # Escaped because a summary is a file on disk that anything may have
+        # written, and `source`, `bounded_policy` and `error` are free text.
+        if note.blackout_absent:
+            body = f"{_ABSENT_HTML_LEAD} {html.escape(_sentence(note.text), quote=False)}."
+        else:
+            body = (
+                f"<strong>{html.escape(note.subject, quote=False)}:</strong> "
+                f"{html.escape(note.text, quote=False)}."
+            )
+        if note.emphasise:
+            out.append(f'<div class="banner warn">{body}</div>')
+        else:
+            out.append(f'<p class="sub">{body}</p>')
+    return "\n".join(out)
 
 
 def render_html(
@@ -560,14 +1088,6 @@ def render_html(
         headline_title = "Full period (in-sample)"
         chart_title = "Full-period equity (in-sample)"
         equity_alt = "Full-period in-sample equity curve"
-
-    earnings_note = ""
-    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
-        earnings_note = (
-            '<div class="banner warn">Earnings blackout NOT simulated: no historical '
-            "announcement dates were available, so this run took entries the live scanner "
-            "would have blocked.</div>"
-        )
 
     full_period_section = ""
     if walkforward and summary.get("full_period"):
@@ -653,6 +1173,16 @@ def render_html(
 
     stamp = generated_at or datetime.now()
     costs = summary.get("costs") or {}
+    earnings_hash = _text(summary.get("earnings_hash"))
+    # Absent on every report written before the hash existed, and left absent
+    # rather than rendered blank so those files still produce the exact table
+    # their reader knows.
+    earnings_hash_row = (
+        f"<tr><td>Earnings hash</td><td><code>{html.escape(earnings_hash, quote=False)}"
+        "</code></td></tr>\n"
+        if earnings_hash
+        else ""
+    )
     return _HTML_TEMPLATE.format(
         style=STYLESHEET,
         label=summary.get("label", "unlabelled"),
@@ -663,7 +1193,7 @@ def render_html(
         measured_period=period,
         banner=banner,
         banner_class=banner_class,
-        earnings_note=earnings_note,
+        notes=_html_notes(summary),
         headline_title=headline_title,
         headline_table=_html_metric_table(headline),
         full_period_section=full_period_section,
@@ -675,6 +1205,7 @@ def render_html(
         config_hash=summary.get("config_hash", ""),
         code_ref=summary.get("code_ref", "unknown"),
         data_hash=summary.get("data_hash", ""),
+        earnings_hash_row=earnings_hash_row,
         generated_at=stamp.isoformat(timespec="seconds"),
         slippage_bps=costs.get("slippage_bps", "?"),
         spread_atr_frac=costs.get("spread_atr_frac", "?"),
@@ -684,6 +1215,31 @@ def render_html(
 # ---------------------------------------------------------------------------
 # terminal
 # ---------------------------------------------------------------------------
+
+#: Width of ``print_latest``'s label column, counting the two-space indent.
+#: Set by the rows already there — ``universe``, ``measured``, ``data span``.
+_TERM_LABEL = 13
+#: Where a wrapped line resumes, and the width it wraps to.
+_TERM_WIDTH = 96
+
+
+def _print_note(note: Note) -> None:
+    """One note as a labelled, wrapped terminal row.
+
+    The subject is dropped: the label column already says ``earnings``, and
+    printing "Earnings blackout" after it says the same word twice. A terminal
+    has no red either, so emphasis is carried by the words — the loud texts all
+    lead with what did not happen. What the terminal *can* get wrong is
+    legibility: an unwrapped 200-character sentence reflows into the margin and
+    stops being read at all, which for a diagnostic is the same as not printing
+    it.
+    """
+    text = f"{_ABSENT_TERM_LEAD} {note.text}." if note.blackout_absent else f"{note.text}."
+    label = f"  {note.label:<{_TERM_LABEL - 2}}"
+    lines = textwrap.wrap(text, width=_TERM_WIDTH - _TERM_LABEL) or [""]
+    print(f"{label}{lines[0]}")
+    for line in lines[1:]:
+        print(f"{' ' * _TERM_LABEL}{line}")
 
 
 def print_latest(cfg: Config) -> None:
@@ -717,8 +1273,16 @@ def print_latest(cfg: Config) -> None:
     print(f"  data span  {summary.get('start', '?')} to {summary.get('end', '?')}")
     print(f"  method     {'walk-forward' if walkforward else 'full period (in-sample only)'}")
     print(f"  code_ref   {summary.get('code_ref', 'unknown')}")
-    if "earnings_blackout_simulated" in summary and not summary["earnings_blackout_simulated"]:
-        print("  note       earnings blackout NOT simulated — results are slightly optimistic")
+    # `earnings_hash` is deliberately not printed here. The other two digests
+    # are not either, this header is six lines a human scans rather than a
+    # provenance section, and `swing report` shows one run — you cannot compare
+    # two hashes on a surface that only ever displays one. It is in `report.md`
+    # and `report.html` beside `config_hash` and `data_hash`, where comparing
+    # them is the thing you are actually doing.
+    if legacy_blackout_banner(summary):
+        print(_LEGACY_TERM_BANNER)
+    for note in report_notes(summary):
+        _print_note(note)
     print()
 
     headline = (summary.get("oos") if walkforward else summary.get("full_period")) or {}
