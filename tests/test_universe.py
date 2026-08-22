@@ -31,6 +31,20 @@ from swing.universe import (
 
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,9}$")
 
+#: Guard rails for the ETF snapshot, which is curated and has already grown
+#: once (40 -> 137, for deeper inception history and broader exposure). These
+#: two numbers are the only hard counts in this module: everything else derives
+#: from :func:`etf_count`, so a future curation change updates one place. They
+#: are wide enough not to churn, and tight enough that an emptied or truncated
+#: file still fails loudly instead of quietly shrinking the universe.
+MIN_ETFS = 100
+MAX_ETFS = 500
+
+
+def etf_count() -> int:
+    """How many ETFs the committed snapshot actually holds, read from the file."""
+    return len(load_csv("etfs"))
+
 
 def _cfg(**universe_kwargs) -> Config:
     return Config(universe=UniverseCfg(**universe_kwargs))
@@ -74,7 +88,25 @@ def test_index_snapshots_are_the_expected_size() -> None:
     assert len(load_csv("sp500")) > 480
     assert len(load_csv("sp400")) > 380
     assert len(load_csv("sp600")) > 570
-    assert len(load_csv("etfs")) == 40
+    assert MIN_ETFS <= etf_count() <= MAX_ETFS
+
+
+def test_the_etf_snapshot_is_neither_empty_nor_truncated() -> None:
+    """Every data row in the file becomes an instrument, and there are plenty of them.
+
+    The count is deliberately not pinned to a literal — the list is curated and
+    will grow again — but silently losing it must not be a quiet event. Two
+    independent things are checked: the parsed count against the file's own row
+    count (so a parser that drops rows is caught), and the floor (so an emptied
+    or half-written file is caught).
+    """
+    path = asset_dir() / "etfs.csv"
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        rows_in_file = [row for row in csv.reader(fh) if row and any(cell.strip() for cell in row)]
+    data_rows = len(rows_in_file) - 1  # minus the header
+
+    assert etf_count() == data_rows, "load_csv silently dropped rows from etfs.csv"
+    assert data_rows >= MIN_ETFS, f"etfs.csv holds only {data_rows} rows — truncated or emptied?"
 
 
 def test_share_classes_use_dashes() -> None:
@@ -107,7 +139,7 @@ def test_load_returns_the_whole_universe_by_default() -> None:
     assert len({i.symbol for i in instruments}) == len(instruments)  # de-duped
     assert {i.kind for i in instruments} == {"stock", "etf"}
     assert {i.source for i in instruments} == {"sp500", "sp400", "sp600", "etf"}
-    assert sum(1 for i in instruments if i.kind == "etf") == 40
+    assert sum(1 for i in instruments if i.kind == "etf") == etf_count()
 
 
 def test_instruments_are_frozen_value_objects() -> None:
@@ -118,7 +150,7 @@ def test_instruments_are_frozen_value_objects() -> None:
 
 def test_toggles_select_only_the_requested_lists() -> None:
     etf_only = load(_cfg(sp500=False, sp400=False, sp600=False, etfs=True))
-    assert len(etf_only) == 40
+    assert len(etf_only) == etf_count()
     assert {i.source for i in etf_only} == {"etf"}
     assert {i.kind for i in etf_only} == {"etf"}
 
@@ -147,8 +179,9 @@ def test_extra_symbols_are_appended_normalised_and_deduped() -> None:
     )
     by_symbol = {i.symbol: i for i in instruments}
 
-    # SPY and GLD are already ETFs, so they are not added twice
-    assert len(instruments) == 41
+    # SPY and GLD are already ETFs, so they are not added twice: the whole ETF
+    # list plus BRK-B, and nothing else.
+    assert len(instruments) == etf_count() + 1
     assert by_symbol["SPY"].source == "etf"
     assert by_symbol["GLD"].source == "etf"
 

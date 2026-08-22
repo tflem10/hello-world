@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 from importlib import resources
-from importlib.abc import Traversable
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import TYPE_CHECKING
 

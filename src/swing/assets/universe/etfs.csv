@@ -1,41 +1,138 @@
 symbol,name
+AGG,iShares Core U.S. Aggregate Bond ETF
 ARKK,ARK Innovation ETF
-DIA,SPDR Dow Jones Industrial Average ETF Trust
+BIL,State Street SPDR Bloomberg 1-3 Month T-Bill ETF
+BND,Vanguard Total Bond Market Index Fund
+DBA,Invesco DB Agriculture Fund
+DBC,Invesco DB Commodity Index Tracking Fund
+DIA,State Street SPDR Dow Jones Industrial Average ETF Trust
+DVY,iShares Select Dividend ETF
 EEM,iShares MSCI Emerging Markets ETF
 EFA,iShares MSCI EAFE ETF
+EMB,iShares J.P. Morgan USD Emerging Markets Bond ETF
+EWA,iShares MSCI Australia ETF
+EWC,iShares MSCI Canada ETF
+EWG,iShares MSCI Germany ETF
+EWH,iShares MSCI Hong Kong ETF
+EWJ,iShares MSCI Japan ETF
+EWL,iShares MSCI Switzerland ETF
+EWQ,iShares MSCI France ETF
+EWT,iShares MSCI Taiwan ETF
+EWU,iShares MSCI United Kingdom ETF
+EWW,iShares MSCI Mexico ETF
+EWY,iShares MSCI South Korea ETF
 EWZ,iShares MSCI Brazil ETF
+FDN,First Trust Dow Jones Internet Index Fund
 FXI,iShares China Large-Cap ETF
+GDX,VanEck Gold Miners ETF
+GDXJ,VanEck Junior Gold Miners ETF
 GLD,SPDR Gold Shares
-HYG,iShares iBoxx High Yield Corporate Bond ETF
+GOVT,iShares U.S. Treasury Bond ETF
+GSG,iShares S&P GSCI Commodity-Indexed Trust
+HYG,iShares iBoxx $ High Yield Corporate Bond ETF
+IAU,iShares Gold Trust
 IBB,iShares Biotechnology ETF
+ICLN,iShares Global Clean Energy ETF
+IDU,iShares U.S. Utilities ETF
 IEF,iShares 7-10 Year Treasury Bond ETF
+IEFA,iShares Core MSCI EAFE ETF
+IEI,iShares 3-7 Year Treasury Bond ETF
+IEMG,iShares Core MSCI Emerging Markets ETF
+IGV,iShares Expanded Tech-Software Sector ETF
+IHF,iShares U.S. Healthcare Providers ETF
+IHI,iShares U.S. Medical Devices ETF
+IJH,iShares Core S&P Mid-Cap ETF
 IJR,iShares Core S&P Small-Cap ETF
+ILF,iShares Latin America 40 ETF
+INDA,iShares MSCI India ETF
+ITA,iShares U.S. Aerospace & Defense ETF
 ITB,iShares U.S. Home Construction ETF
+ITOT,iShares Core S&P Total U.S. Stock Market ETF
+IVV,iShares Core S&P 500 ETF
+IWB,iShares Russell 1000 ETF
+IWC,iShares Micro-Cap ETF
+IWD,iShares Russell 1000 Value ETF
+IWF,iShares Russell 1000 Growth ETF
 IWM,iShares Russell 2000 ETF
-KRE,SPDR S&P Regional Banking ETF
-LQD,iShares iBoxx Investment Grade Corporate Bond ETF
-MDY,SPDR S&P MidCap 400 ETF Trust
+IWN,iShares Russell 2000 Value ETF
+IWO,iShares Russell 2000 Growth ETF
+IWV,iShares Russell 3000 ETF
+IYC,iShares US Consumer Discretionary ETF
+IYE,iShares U.S. Energy ETF
+IYF,iShares U.S. Financials ETF
+IYH,iShares U.S. Healthcare ETF
+IYJ,iShares U.S. Industrials ETF
+IYK,iShares US Consumer Staples ETF
+IYM,iShares U.S. Basic Materials ETF
+IYR,iShares U.S. Real Estate ETF
+IYT,iShares Transportation Average ETF
+IYW,iShares U.S. Technology ETF
+IYZ,iShares U.S. Telecommunications ETF
+JETS,U.S. Global Jets ETF
+JNK,State Street SPDR Bloomberg High Yield Bond ETF
+KBE,State Street SPDR S&P Bank ETF
+KIE,State Street SPDR S&P Insurance ETF
+KRE,State Street SPDR S&P Regional Banking ETF
+LQD,iShares iBoxx $ Investment Grade Corporate Bond ETF
+MBB,iShares MBS ETF
+MCHI,iShares MSCI China ETF
+MDY,State Street SPDR S&P MIDCAP 400 ETF Trust
+MOO,VanEck Agribusiness ETF
+MTUM,iShares MSCI USA Momentum Factor ETF
+MUB,iShares National Muni Bond ETF
+OIH,VanEck Oil Services ETF
+PALL,abrdn Physical Palladium Shares ETF
+PFF,iShares U.S. Preferred Stock ETF
+PPA,Invesco Aerospace & Defense ETF
+PPLT,abrdn Physical Platinum Shares ETF
 QQQ,Invesco QQQ Trust
+QUAL,iShares MSCI USA Quality Factor ETF
 RSP,Invesco S&P 500 Equal Weight ETF
+SHV,iShares Short Treasury Bond ETF
+SHY,iShares 1-3 Year Treasury Bond ETF
 SLV,iShares Silver Trust
 SMH,VanEck Semiconductor ETF
-SPY,SPDR S&P 500 ETF Trust
+SOXX,iShares Semiconductor ETF
+SPHB,Invesco S&P 500 High Beta ETF
+SPLV,Invesco S&P 500 Low Volatility ETF
+SPY,State Street SPDR S&P 500 ETF Trust
+TAN,Invesco Solar ETF
+TIP,iShares TIPS Bond ETF
+TLH,iShares 10-20 Year Treasury Bond ETF
 TLT,iShares 20+ Year Treasury Bond ETF
-UNG,United States Natural Gas Fund
-USO,United States Oil Fund
-VNQ,Vanguard Real Estate ETF
-XBI,SPDR S&P Biotech ETF
-XHB,SPDR S&P Homebuilders ETF
-XLB,Materials Select Sector SPDR Fund
-XLC,Communication Services Select Sector SPDR Fund
-XLE,Energy Select Sector SPDR Fund
-XLF,Financial Select Sector SPDR Fund
-XLI,Industrial Select Sector SPDR Fund
-XLK,Technology Select Sector SPDR Fund
-XLP,Consumer Staples Select Sector SPDR Fund
-XLRE,Real Estate Select Sector SPDR Fund
-XLU,Utilities Select Sector SPDR Fund
-XLV,Health Care Select Sector SPDR Fund
-XLY,Consumer Discretionary Select Sector SPDR Fund
-XME,SPDR S&P Metals & Mining ETF
-XRT,SPDR S&P Retail ETF
+UNG,"United States Natural Gas Fund, LP"
+USMV,iShares MSCI USA Min Vol Factor ETF
+USO,"United States Oil Fund, LP"
+VB,Vanguard Morningstar Small-Cap ETF
+VEA,Vanguard FTSE Developed Markets Index Fund ETF Shares
+VGK,Vanguard FTSE Europe ETF
+VIG,Vanguard Dividend Appreciation Index Fund ETF Shares
+VLUE,iShares MSCI USA Value Factor ETF
+VNQ,Vanguard Real Estate Index Fund ETF Shares
+VNQI,Vanguard Global ex-U.S. Real Estate Index Fund ETF Shares
+VO,Vanguard Morningstar Mid-Cap ETF
+VOO,Vanguard S&P 500 ETF
+VPL,Vanguard FTSE Pacific Index Fund ETF Shares
+VTI,Vanguard Morningstar Total Stock Market ETF
+VTV,Vanguard Morningstar Value ETF
+VUG,Vanguard Morningstar Growth ETF
+VWO,Vanguard Emerging Markets Stock Index Fund
+VYM,Vanguard High Dividend Yield Index Fund ETF Shares
+XAR,State Street SPDR S&P Aerospace & Defense ETF
+XBI,State Street SPDR S&P Biotech ETF
+XES,State Street SPDR S&P Oil & Gas Equipment & Services ETF
+XHB,State Street SPDR S&P Homebuilders ETF
+XLB,State Street Materials Select Sector SPDR ETF
+XLC,State Street Communication Services Select Sector SPDR ETF
+XLE,State Street Energy Select Sector SPDR ETF
+XLF,State Street Financial Select Sector SPDR ETF
+XLI,State Street Industrial Select Sector SPDR ETF
+XLK,State Street Technology Select Sector SPDR ETF
+XLP,State Street Consumer Staples Select Sector SPDR ETF
+XLRE,State Street Real Estate Select Sector SPDR ETF
+XLU,State Street Utilities Select Sector SPDR ETF
+XLV,State Street Health Care Select Sector SPDR ETF
+XLY,State Street Consumer Discretionary Select Sector SPDR ETF
+XME,State Street SPDR S&P Metals & Mining ETF
+XOP,State Street SPDR S&P Oil & Gas Exploration & Production ETF
+XRT,State Street SPDR S&P Retail ETF
