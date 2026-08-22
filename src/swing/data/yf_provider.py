@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable, Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -50,9 +52,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from swing.config import Config
 
 __all__ = [
+    "EARNINGS_CHUNK_PAUSE",
+    "EARNINGS_EMPTY_LIMIT",
     "EARNINGS_HISTORY_TTL",
     "EARNINGS_MISS_TTL",
     "EARNINGS_SETTLE_LAG",
+    "EARNINGS_THROTTLE_COOLDOWN",
+    "EARNINGS_THROTTLE_RETRIES",
     "EARNINGS_TTL",
     "FUNDAMENTALS_TTL",
     "YFinanceProvider",
@@ -105,6 +111,26 @@ FUNDAMENTALS_TTL = timedelta(days=7)
 FETCH_CHUNK = 50
 #: Past *and* future announcements, enough for a decade of backtests.
 EARNINGS_HISTORY_LIMIT = 60
+#: Seconds to wait between chunks of a cold earnings-history walk.
+#:
+#: A cold walk is ~1,500 requests. Sent as fast as the thread pool can make
+#: them, the endpoint answers a few hundred and then stops — which is how the
+#: cache came to hold 1,507 nulls (audit COVER-1). Thirty seconds spread over a
+#: sweep that takes minutes is a trade worth making every time.
+EARNINGS_CHUNK_PAUSE = 2.0
+#: Seconds to wait after a chunk that looked rate-limited; doubles per retry.
+EARNINGS_THROTTLE_COOLDOWN = 15.0
+#: Extra attempts for a chunk that looked rate-limited, after the first.
+EARNINGS_THROTTLE_RETRIES = 2
+#: Fraction of a chunk that may come back empty before we stop believing it.
+#:
+#: Measured, not guessed: a healthy burst of 30 symbols answered 28 (7% empty),
+#: and the universe is roughly 8% ETFs, which genuinely have no earnings. A
+#: throttled batch is empty at or near 100%. Anywhere between the two is safe,
+#: and erring high only costs a re-ask.
+EARNINGS_EMPTY_LIMIT = 0.6
+#: Batches smaller than this say nothing about rate limiting either way.
+EARNINGS_MIN_BATCH = 8
 
 _EPS_INFO_KEYS = ("earningsQuarterlyGrowth", "earningsGrowth")
 _REVENUE_INFO_KEYS = ("revenueGrowth", "revenueQuarterlyGrowth")
@@ -120,6 +146,44 @@ _PRICE_ATTRS = (
 )
 #: ``info``'s growth figures are quarter-over-quarter year-on-year.
 _INFO_BASIS = "quarterly"
+
+
+@dataclass
+class _Sweep:
+    """Running state for one walk over the earnings-history endpoint."""
+
+    #: Chunks sent so far, so the first one need not wait.
+    chunks: int = 0
+    #: Symbols the vendor actually answered for.
+    asked: int = 0
+    #: ...of which came back with at least one date.
+    dated: int = 0
+    #: Symbols in batches that looked rate-limited, so nothing was cached.
+    unanswered: int = 0
+
+
+def _looks_throttled(keys: Sequence[str], answered: Mapping[str, Sequence[date]]) -> bool:
+    """Is this batch's silence the vendor's answer, or the vendor refusing?
+
+    One empty reply is ordinary: an ETF has no earnings, and a handful of real
+    equities have no rows on any given day. A batch that is *almost entirely*
+    empty is not fifty companies that never reported — it is one rate limiter,
+    and believing it is what wrote Microsoft down as having no earnings history
+    (audit COVER-1).
+
+    Hard failures and empty answers are counted together on purpose. A
+    throttled reply can arrive either way — as a raised ``YFRateLimitError`` or
+    as an empty frame — and which one you get is not something a caller can
+    depend on. Counting both means the guard does not have to know.
+
+    Erring towards "throttled" is the safe direction: the cost of a false
+    positive is asking again next run, and the cost of a false negative is a
+    wrong fact cached against every backtest that reads it.
+    """
+    if len(keys) < EARNINGS_MIN_BATCH:
+        return False  # too small to infer a rate limit from
+    silent = len(keys) - sum(1 for days in answered.values() if days)
+    return silent / len(keys) > EARNINGS_EMPTY_LIMIT
 
 
 def settled_history_ttl(
@@ -202,6 +266,12 @@ class YFinanceProvider:
             stays fresh. See :func:`settled_history_ttl`.
         earnings_settle_lag: how far behind its fetch a date must be before it
             counts as settled history rather than a live estimate.
+        history_pause: seconds between chunks of a cold earnings-history walk.
+        history_cooldown: seconds to wait after a chunk that looked rate
+            limited, doubling on each further attempt.
+        history_retries: extra attempts for such a chunk, after the first.
+        sleep: injected replacement for :func:`time.sleep`, so tests can watch
+            the pacing without waiting for it.
         fundamentals_ttl: how long the fundamentals cache stays fresh.
     """
 
@@ -220,6 +290,10 @@ class YFinanceProvider:
         earnings_ttl: timedelta = EARNINGS_TTL,
         earnings_history_ttl: timedelta = EARNINGS_HISTORY_TTL,
         earnings_settle_lag: timedelta = EARNINGS_SETTLE_LAG,
+        history_pause: float = EARNINGS_CHUNK_PAUSE,
+        history_cooldown: float = EARNINGS_THROTTLE_COOLDOWN,
+        history_retries: int = EARNINGS_THROTTLE_RETRIES,
+        sleep: Callable[[float], None] | None = None,
         fundamentals_ttl: timedelta = FUNDAMENTALS_TTL,
     ) -> None:
         if earnings_history_ttl < earnings_ttl:
@@ -245,6 +319,10 @@ class YFinanceProvider:
         self._earnings_ttl = earnings_ttl
         self._earnings_history_ttl = earnings_history_ttl
         self._earnings_settle_lag = earnings_settle_lag
+        self._history_pause = max(0.0, history_pause)
+        self._history_cooldown = max(0.0, history_cooldown)
+        self._history_retries = max(0, history_retries)
+        self._sleep = sleep if sleep is not None else time.sleep
         cache_dir = self._cache.root.parent
         self._earnings_cache = TtlJsonCache(
             cache_dir / "earnings.json", earnings_ttl, miss_ttl=EARNINGS_MISS_TTL
@@ -412,55 +490,53 @@ class YFinanceProvider:
             floor=self._earnings_ttl,
             ceiling=self._earnings_history_ttl,
         )
-        refetched: list[str] = []
-
-        def fetch(keys: list[str]) -> dict[str, Any]:
-            refetched.extend(keys)
-            return self._map(keys, self._earnings_history)
-
+        sweep = _Sweep()
         known = self._earnings_history_cache.get_or_fetch(
             wanted,
-            fetch,
+            lambda keys: self._fetch_history_chunk(keys, sweep),
             now=stamp,
             ttl=ttl,
             chunk_size=self._chunk_size,
             encode=_encode_days,
             decode=_decode_days,
         )
-        if refetched:
-            self._log_history_refetch(len(refetched), len(wanted), last, ttl)
+        if sweep.chunks:
+            self._log_history_refetch(sweep, len(wanted), last, ttl)
         return {
             symbol: tuple(day for day in (known.get(symbol) or ()) if first <= day <= last)
             for symbol in wanted
         }
 
-    def _log_history_refetch(self, fetched: int, wanted: int, end: date, ttl: timedelta) -> None:
+    def _log_history_refetch(self, sweep: _Sweep, wanted: int, end: date, ttl: timedelta) -> None:
         """Say how much history came off the wire, and — when it matters — why.
 
-        This is the only warning anyone gets that a run's earnings inputs may
-        differ from the last one's. A window ending inside the settling period
-        is the case that bit: the record's tail really can still move, so it
-        expires as fast as a live quote does, and *the whole record* comes back
-        down with it. Nothing in the run's identity triple records that, so the
-        line names the remedy — an earlier, fixed end date — rather than
-        leaving the reader to infer it.
+        Three things a reader needs and used to have no way to learn: how much
+        was downloaded, how much of it actually carried dates, and whether the
+        vendor stopped answering partway through.
         """
-        if ttl > self._earnings_ttl:
-            log.info(
-                "Downloaded earnings history for %d of %d symbols; the rest was already cached.",
-                fetched,
-                wanted,
+        if sweep.unanswered:
+            log.warning(
+                "Yahoo stopped answering during this earnings-history download: %d symbols went "
+                "unanswered and were deliberately not cached, so they will be asked again rather "
+                "than treated as companies with no earnings. Re-run to fill them in; the earnings "
+                "blackout is weaker than usual until you do.",
+                sweep.unanswered,
             )
+        log.info(
+            "Downloaded earnings history for %d of %d symbols; %d had dates.",
+            sweep.asked,
+            wanted,
+            sweep.dated,
+        )
+        if ttl > self._earnings_ttl:
             return
         log.info(
-            "Downloaded earnings history for %d of %d symbols. The requested window ends on %s, "
-            "which is inside the %d-day period where an announcement date can still move, so the "
-            "whole record expires on the same short schedule as a live date and comes back down "
-            "with it. Two runs either side of that can read different earnings and so produce "
-            "different trades, with nothing in the run's config, data or code hash to show it. "
-            "Ending the window on an earlier, fixed day keeps repeated runs comparable.",
-            fetched,
-            wanted,
+            "The requested window ends on %s, which is inside the %d-day period where an "
+            "announcement date can still move, so the whole record expires on the same short "
+            "schedule as a live date and comes back down with it. Two runs either side of that "
+            "can read different earnings and so produce different trades, with nothing in the "
+            "run's config, data or code hash to show it. Ending the window on an earlier, fixed "
+            "day keeps repeated runs comparable.",
             end,
             self._earnings_settle_lag.days,
         )
@@ -601,19 +677,73 @@ class YFinanceProvider:
             calendar = getattr(ticker, "calendar", None)
         return _dates_from_calendar(calendar)
 
-    def _earnings_history(self, symbol: str) -> tuple[date, ...] | None:
-        """Every announcement date Yahoo remembers, or ``None`` when unknown."""
+    def _earnings_history(self, symbol: str) -> list[date] | None:
+        """Every announcement date Yahoo remembers for one symbol.
+
+        Returns:
+            The dates; an **empty list** when the vendor answered and had none;
+            or ``None`` when the vendor could not be asked at all. Those last
+            two used to be the same value, which is how 1,369 S&P constituents
+            — Microsoft, JPMorgan and Exxon among them — came to be recorded as
+            companies that have never reported earnings (audit COVER-1).
+        """
 
         def call() -> list[date]:
+            # Deliberately *not* through ``_safe_call``. That helper turns
+            # every exception into ``None``, so a rate-limit reply never
+            # reached the retry policy above it and arrived here looking
+            # exactly like "this company has no earnings".
             ticker = self._ticker(symbol)
-            return _dates_from_frame(
-                _safe_call(ticker, "get_earnings_dates", limit=EARNINGS_HISTORY_LIMIT)
-            )
+            method = getattr(ticker, "get_earnings_dates", None)
+            if not callable(method):
+                raise AttributeError(f"{symbol} has no get_earnings_dates() to ask.")
+            return _dates_from_frame(method(limit=EARNINGS_HISTORY_LIMIT))
 
-        days = self._with_retry(f"the earnings history for {symbol}", call)
-        if not days:
-            return None
-        return tuple(sorted(set(days)))
+        return self._with_retry(f"the earnings history for {symbol}", call)
+
+    def _fetch_history_chunk(self, keys: list[str], sweep: _Sweep) -> dict[str, Any]:
+        """Ask about one chunk of symbols, keeping only answers we can trust.
+
+        Keys missing from the returned dict are **not written to the cache** —
+        :meth:`TtlJsonCache.get_or_fetch` stores only what it is handed — so a
+        symbol we could not ask about stays stale and is asked again next run,
+        instead of being written down as a fact about the company.
+        """
+        for attempt in range(1 + self._history_retries):
+            self._pace(sweep, attempt)
+            answers = self._map(keys, self._earnings_history)
+            answered = {key: days for key, days in answers.items() if days is not None}
+            if not _looks_throttled(keys, answered):
+                sweep.asked += len(answered)
+                sweep.dated += sum(1 for days in answered.values() if days)
+                return {
+                    key: (tuple(sorted(set(days))) if days else None)
+                    for key, days in answered.items()
+                }
+            log.warning(
+                "Yahoo answered %d of %d earnings-history requests in this batch, which looks "
+                "like rate limiting rather than %d companies that never reported. Nothing from "
+                "this batch will be cached%s.",
+                sum(1 for days in answered.values() if days),
+                len(keys),
+                len(keys),
+                "; waiting and trying again" if attempt < self._history_retries else "",
+            )
+        sweep.unanswered += len(keys)
+        return {}
+
+    def _pace(self, sweep: _Sweep, attempt: int) -> None:
+        """Wait before a chunk — briefly between them, at length after a refusal.
+
+        Resilience beats speed here. A cold walk over 1,500 symbols is a few
+        thousand requests, and the endpoint stops answering partway through if
+        they arrive as fast as the thread pool can make them.
+        """
+        if attempt:
+            self._sleep(self._history_cooldown * (2 ** (attempt - 1)))
+        elif sweep.chunks:
+            self._sleep(self._history_pause)
+        sweep.chunks += 1
 
     # -- fundamentals -----------------------------------------------------
 

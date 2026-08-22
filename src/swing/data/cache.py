@@ -43,7 +43,10 @@ which is how historical earnings stopped churning under a live TTL (REPRO-1).
 
 :func:`earnings_fingerprint` is the other half of that story: a digest of the
 announcement dates a run actually consumed, so two runs claiming to be the same
-experiment can be checked rather than trusted.
+experiment can be checked rather than trusted. :func:`earnings_coverage`
+answers the question underneath it — how much earnings data there was to
+consume at all, which is the ceiling on how much the earnings blackout can
+possibly have done.
 """
 
 from __future__ import annotations
@@ -80,8 +83,10 @@ __all__ = [
     "TMP_SWEEP_AFTER",
     "BarCache",
     "CacheMeta",
+    "EarningsCoverage",
     "FetchBars",
     "TtlJsonCache",
+    "earnings_coverage",
     "earnings_fingerprint",
     "utcnow",
 ]
@@ -914,8 +919,87 @@ class TtlJsonCache:
 
 
 # ---------------------------------------------------------------------------
-# fingerprinting what a run read out of the earnings caches
+# what a run read out of the earnings caches: how much, and exactly which
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EarningsCoverage:
+    """How many of a run's symbols actually had earnings dates behind them.
+
+    :func:`swing.strategy.rules.earnings_blackout` can only block what it has
+    dates for, so a run's earnings blackout is only as real as this number. A
+    backtest that reports ``earnings_blackout_simulated: true`` on 8% coverage
+    is telling the truth and misleading the reader at the same time: the flag
+    says the *mechanism* ran, this says how much of the universe it could touch.
+    """
+
+    #: Symbols the run asked about.
+    requested: int
+    #: Symbols that came back with at least one announcement date.
+    with_dates: int
+    #: Total announcement dates across all of them — a rough measure of how
+    #: many blackout windows the simulation could actually impose.
+    announcements: int
+
+    @property
+    def without_dates(self) -> int:
+        """Symbols the run has no earnings information for."""
+        return self.requested - self.with_dates
+
+    @property
+    def fraction(self) -> float:
+        """``with_dates / requested``, or ``0.0`` when nothing was requested."""
+        return self.with_dates / self.requested if self.requested else 0.0
+
+    def as_json(self) -> dict[str, Any]:
+        """A JSON-safe record for a run summary."""
+        return {
+            "requested": self.requested,
+            "with_dates": self.with_dates,
+            "without_dates": self.without_dates,
+            "announcements": self.announcements,
+            "fraction": round(self.fraction, 4),
+        }
+
+    def describe(self) -> str:
+        """One sentence a reader cannot misread."""
+        if not self.requested:
+            return "No symbols were checked for earnings dates."
+        return (
+            f"Earnings dates were available for {self.with_dates} of {self.requested} symbols "
+            f"({self.fraction:.0%}), covering {self.announcements} announcements. The earnings "
+            f"blackout could not apply to the remaining {self.without_dates}."
+        )
+
+
+def earnings_coverage(symbols: Sequence[str], earnings: Mapping[str, Any]) -> EarningsCoverage:
+    """How much of ``symbols`` the earnings data actually covers.
+
+    The companion to :func:`earnings_fingerprint`: that one answers "were these
+    two runs fed the same earnings?", this one answers "was there enough
+    earnings data for the blackout to mean anything?". Both read the mapping a
+    provider returned, and both count a symbol the same way the simulation
+    does — ``None``, ``()`` and "absent from the mapping" are all *no dates*,
+    because :func:`~swing.strategy.rules.earnings_blackout` blocks nothing for
+    all three.
+
+    Args:
+        symbols: the symbols the run was over, in any case or order.
+        earnings: what the provider returned for them, in either provider
+            shape. See :func:`earnings_fingerprint`.
+
+    Returns:
+        An :class:`EarningsCoverage`.
+    """
+    lookup = {str(key).strip().upper(): value for key, value in earnings.items()}
+    wanted = clean_symbols(symbols)
+    per_symbol = [_announcement_days(lookup.get(symbol)) for symbol in wanted]
+    return EarningsCoverage(
+        requested=len(wanted),
+        with_dates=sum(1 for days in per_symbol if days),
+        announcements=sum(len(days) for days in per_symbol),
+    )
 
 
 def earnings_fingerprint(symbols: Sequence[str], earnings: Mapping[str, Any]) -> str:

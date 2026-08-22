@@ -20,7 +20,13 @@ import pandas as pd
 import pytest
 
 from conftest import make_bars
-from swing.data.cache import BarCache, CacheMeta, TtlJsonCache, earnings_fingerprint
+from swing.data.cache import (
+    BarCache,
+    CacheMeta,
+    TtlJsonCache,
+    earnings_coverage,
+    earnings_fingerprint,
+)
 from swing.state import file_lock
 
 NOW = datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
@@ -1078,3 +1084,70 @@ def test_earnings_fingerprint_refuses_a_value_it_cannot_read() -> None:
     """A digest is a claim about what was consumed; guessing would be worse."""
     with pytest.raises(TypeError, match="Expected a date"):
         earnings_fingerprint(["AAPL"], {"AAPL": 42})
+
+
+# ---------------------------------------------------------------------------
+# earnings_coverage (audit COVER-1)
+# ---------------------------------------------------------------------------
+
+
+def test_earnings_coverage_counts_symbols_and_announcements() -> None:
+    out = earnings_coverage(
+        ["AAPL", "MSFT", "SPY"], {"AAPL": AAPL_DAYS, "MSFT": MSFT_DAYS, "SPY": ()}
+    )
+
+    assert (out.requested, out.with_dates, out.without_dates) == (3, 2, 1)
+    assert out.announcements == len(AAPL_DAYS) + len(MSFT_DAYS)
+    assert out.fraction == pytest.approx(2 / 3)
+
+
+def test_earnings_coverage_counts_the_three_spellings_of_unknown_as_uncovered() -> None:
+    """The blackout blocks nothing for all three, so all three are uncovered."""
+    out = earnings_coverage(["A", "B", "C", "D"], {"A": AAPL_DAYS, "B": None, "C": ()})
+
+    assert out.with_dates == 1
+    assert out.without_dates == 3, "None, empty and absent all count the same"
+
+
+def test_earnings_coverage_describes_the_real_cache_honestly() -> None:
+    """The sentence that stops ``earnings_blackout_simulated: true`` misleading.
+
+    Audit COVER-1: the flag says the mechanism ran. On the cache as it actually
+    stood, the mechanism could reach 8% of the universe, and nothing in the
+    report said so.
+    """
+    universe = [f"S{i}" for i in range(1642)]
+    poisoned = {f"S{i}": AAPL_DAYS for i in range(135)}
+
+    out = earnings_coverage(universe, poisoned)
+
+    assert out.fraction == pytest.approx(135 / 1642, abs=1e-4)
+    assert "135 of 1642 symbols (8%)" in out.describe()
+    assert "could not apply to the remaining 1507" in out.describe()
+
+
+def test_earnings_coverage_is_order_independent_and_case_insensitive() -> None:
+    first = earnings_coverage(["AAPL", "msft"], {"aapl": AAPL_DAYS, "MSFT": MSFT_DAYS})
+    second = earnings_coverage(["MSFT", "aapl"], {"AAPL": AAPL_DAYS, "msft": MSFT_DAYS})
+
+    assert first == second
+
+
+def test_earnings_coverage_of_nothing_is_zero_not_a_crash() -> None:
+    out = earnings_coverage([], {})
+
+    assert (out.requested, out.with_dates, out.fraction) == (0, 0, 0.0)
+    assert "No symbols" in out.describe()
+
+
+def test_earnings_coverage_serialises_for_a_run_summary() -> None:
+    out = earnings_coverage(["AAPL", "SPY"], {"AAPL": AAPL_DAYS})
+
+    assert out.as_json() == {
+        "requested": 2,
+        "with_dates": 1,
+        "without_dates": 1,
+        "announcements": 3,
+        "fraction": 0.5,
+    }
+    assert json.dumps(out.as_json()), "must survive a trip through summary.json"

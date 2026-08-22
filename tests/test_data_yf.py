@@ -24,7 +24,7 @@ import pytest
 
 from conftest import build_config, make_bars
 from swing.config import Config
-from swing.data.cache import earnings_fingerprint
+from swing.data.cache import TtlJsonCache, earnings_coverage, earnings_fingerprint
 from swing.data.provider import Fundamentals
 from swing.data.yf_provider import (
     EARNINGS_HISTORY_TTL,
@@ -173,6 +173,16 @@ class TickerFactory:
         return len(self.calls)
 
 
+class RecordingSleep:
+    """Stands in for ``time.sleep``: records the waits, performs none of them."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
 def build_provider(cfg: Config, **kwargs: Any) -> YFinanceProvider:
     """A provider that never waits between retries and never dials out.
 
@@ -180,8 +190,13 @@ def build_provider(cfg: Config, **kwargs: Any) -> YFinanceProvider:
     back to a bulk download for anything ``fast_info`` could not price, and a
     test that forgets to say what Yahoo should answer must fail rather than
     quietly reach the real endpoint.
+
+    ``sleep`` defaults to a recorder for the same reason ``retry_backoff``
+    defaults to zero: the earnings sweep paces itself between chunks, and a
+    suite that actually waited would take minutes.
     """
     kwargs.setdefault("retry_backoff", 0.0)
+    kwargs.setdefault("sleep", RecordingSleep())
     kwargs.setdefault("download", RecordingDownload(error=AssertionError("no download injected")))
     return YFinanceProvider(cfg, **kwargs)
 
@@ -890,8 +905,8 @@ def test_a_window_ending_today_says_why_it_re_downloaded_history(
     the tail of the record genuinely can still move. Nothing in the run's
     identity triple records that, so the log line has to.
     """
-    factory = TickerFactory({"AAPL": FakeTicker(earnings=earnings_frame(["2019-02-01"]))})
-    provider = build_provider(test_cfg, ticker_factory=factory)
+    tickers = {s: FakeTicker(earnings=earnings_frame(["2019-02-01"])) for s in ("AAPL", "MSFT")}
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory(tickers))
 
     with caplog.at_level("INFO", logger="swing.data.yf_provider"):
         provider.earnings_history(["AAPL"], date(2010, 1, 1), NOW.date(), now=NOW)
@@ -901,8 +916,8 @@ def test_a_window_ending_today_says_why_it_re_downloaded_history(
     caplog.clear()
     with caplog.at_level("INFO", logger="swing.data.yf_provider"):
         provider.earnings_history(["MSFT"], date(2010, 1, 1), date(2020, 12, 31), now=NOW)
-    assert "already cached" in caplog.text, "a settled window has nothing to warn about"
-    assert "fixed day" not in caplog.text
+    assert "1 of 1 symbols; 1 had dates" in caplog.text
+    assert "fixed day" not in caplog.text, "a settled window has nothing to warn about"
 
 
 def test_a_warm_settled_window_logs_nothing_at_all(
@@ -943,6 +958,216 @@ def test_two_caches_filled_at_different_times_fingerprint_the_same(tmp_path: Pat
 
     assert early == late
     assert earnings_fingerprint(symbols, early) == earnings_fingerprint(symbols, late)
+
+
+# ---------------------------------------------------------------------------
+# a throttled sweep must not be cached as fact (audit COVER-1)
+# ---------------------------------------------------------------------------
+
+
+def history_batch(n: int, *, dated: int, prefix: str = "S") -> dict[str, FakeTicker]:
+    """``n`` tickers of which the first ``dated`` have earnings, the rest none."""
+    return {
+        f"{prefix}{i}": FakeTicker(earnings=earnings_frame(["2019-02-01"]) if i < dated else None)
+        for i in range(n)
+    }
+
+
+def history_entries(cfg: Config) -> dict[str, Any]:
+    """What actually reached the earnings-history file, if anything did.
+
+    Read through the cache's own reader rather than ``read_text``: a sweep that
+    trusted none of its answers writes no file at all, which is the point.
+    """
+    return TtlJsonCache(cfg.data.cache_dir / "earnings-history.json", timedelta(days=1)).read_all()
+
+
+def test_a_batch_that_comes_back_almost_all_empty_is_not_cached(test_cfg: Config) -> None:
+    """Audit COVER-1, the heart of it.
+
+    The real cache held 1,507 nulls, among them Microsoft, JPMorgan and Exxon.
+    They were not companies without earnings; they were a rate limiter, written
+    down as fact. A batch this empty is not evidence of absence, so nothing
+    from it may be stored — the symbols must stay stale and be asked again.
+    """
+    tickers = history_batch(20, dated=2)  # 90% empty: far past the limit
+    factory = TickerFactory(tickers)
+    provider = build_provider(test_cfg, ticker_factory=factory, history_retries=0)
+
+    out = provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert out == dict.fromkeys(tickers, ()), "unknown, as it should be"
+    stored = history_entries(test_cfg)
+    assert stored == {}, "a refusal is not an answer, so nothing is written down"
+
+
+def test_a_healthy_batch_with_a_few_empties_is_cached_normally(test_cfg: Config) -> None:
+    """ETFs really do have no earnings, and that answer is worth keeping.
+
+    A measured healthy batch answers ~93% of the time; the universe is ~8%
+    ETFs. The guard has to let that through or it would never cache anything.
+    """
+    tickers = history_batch(20, dated=18)  # 10% empty, like the real thing
+    factory = TickerFactory(tickers)
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    provider.earnings_history(list(tickers), *window, now=NOW)
+    stored = history_entries(test_cfg)
+
+    assert len(stored) == 20
+    assert sum(1 for e in stored.values() if e["value"] is None) == 2
+
+    # And the two kinds of answer keep their own lifetimes. The eighteen with
+    # dates are settled history and are never asked about again; the two the
+    # vendor had nothing for keep the short miss TTL, because "nothing today"
+    # is the one answer that can turn into a real one (audit BUG-051).
+    before = factory.count
+    provider.earnings_history(list(tickers), *window, now=NOW + timedelta(days=200))
+
+    assert factory.count == before + 2, "only the empties are re-asked"
+    assert sorted(factory.calls[before:]) == ["S18", "S19"]
+
+
+def test_a_symbol_the_vendor_refused_is_never_written_down_as_having_no_earnings(
+    test_cfg: Config,
+) -> None:
+    """ "We could not ask" and "there is nothing" are different facts.
+
+    ``_safe_call`` used to flatten every exception into an empty answer, so a
+    rate-limit reply never even reached the retry policy and was stored as a
+    statement about the company.
+    """
+    tickers = history_batch(19, dated=19)
+    tickers["BROKEN"] = FakeTicker(explode=True)
+    factory = TickerFactory(tickers)
+    provider = build_provider(test_cfg, ticker_factory=factory, retries=1)
+
+    provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+    stored = history_entries(test_cfg)
+
+    assert "BROKEN" not in stored, "a failed ask must leave no trace"
+    assert len(stored) == 19, "its nineteen healthy neighbours are still cached"
+
+
+def test_a_throttled_batch_is_retried_after_a_cooldown(test_cfg: Config) -> None:
+    """Retry-on-empty with backoff: the sweep waits, then asks again."""
+    calls = {"n": 0}
+    good = earnings_frame(["2019-02-01"])
+
+    class Flaky(FakeTicker):
+        def get_earnings_dates(self, limit: int = 12) -> pd.DataFrame | None:
+            calls["n"] += 1
+            # The first pass over the batch is starved; the second is served.
+            return None if calls["n"] <= 20 else good
+
+    tickers = {f"S{i}": Flaky() for i in range(20)}
+    sleep = RecordingSleep()
+    provider = build_provider(
+        test_cfg,
+        ticker_factory=TickerFactory(tickers),
+        sleep=sleep,
+        history_cooldown=15.0,
+        history_retries=2,
+    )
+
+    out = provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert out == dict.fromkeys(tickers, (date(2019, 2, 1),)), "the retry got the real answer"
+    assert sleep.waits == [15.0], "one cooldown, before the second attempt"
+
+
+def test_the_cooldown_doubles_and_then_the_batch_is_abandoned(test_cfg: Config) -> None:
+    tickers = history_batch(20, dated=0)
+    sleep = RecordingSleep()
+    provider = build_provider(
+        test_cfg,
+        ticker_factory=TickerFactory(tickers),
+        sleep=sleep,
+        history_cooldown=15.0,
+        history_retries=2,
+    )
+
+    provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert sleep.waits == [15.0, 30.0], "backoff doubles, then we stop asking"
+    stored = history_entries(test_cfg)
+    assert stored == {}
+
+
+def test_the_sweep_pauses_between_chunks_but_not_before_the_first(test_cfg: Config) -> None:
+    """A cold walk is thousands of requests; pace beats speed (audit COVER-1)."""
+    tickers = history_batch(12, dated=12)
+    sleep = RecordingSleep()
+    provider = build_provider(
+        test_cfg,
+        ticker_factory=TickerFactory(tickers),
+        sleep=sleep,
+        chunk_size=5,
+        history_pause=2.0,
+    )
+
+    provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert sleep.waits == [2.0, 2.0], "three chunks, two gaps"
+
+
+def test_an_abandoned_batch_says_so_loudly(
+    test_cfg: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    tickers = history_batch(20, dated=0)
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory(tickers), history_retries=0)
+
+    with caplog.at_level("WARNING", logger="swing.data.yf_provider"):
+        provider.earnings_history(list(tickers), date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert "looks like rate limiting" in caplog.text
+    assert "20 symbols went unanswered" in caplog.text
+    assert "blackout is weaker than usual" in caplog.text
+
+
+def test_coverage_tells_the_truth_about_a_throttled_sweep(test_cfg: Config) -> None:
+    """The two halves of COVER-1 meeting: the sweep refuses to lie, and the
+    coverage number refuses to let the reader assume.
+
+    Before, this run would have cached 18 symbols as "no earnings" and the
+    summary would have said the blackout was simulated. Now the sweep declines
+    to write them down, and coverage says plainly that the blackout could reach
+    two of twenty names.
+    """
+    tickers = history_batch(20, dated=2)
+    provider = build_provider(test_cfg, ticker_factory=TickerFactory(tickers), history_retries=0)
+    symbols = list(tickers)
+
+    out = provider.earnings_history(symbols, date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+    coverage = earnings_coverage(symbols, out)
+
+    assert coverage.with_dates == 0, "nothing from a refused batch is trusted"
+    assert "0 of 20 symbols (0%)" in coverage.describe()
+
+    # ...and once Yahoo answers, the same call reports real coverage.
+    healthy = build_provider(test_cfg, ticker_factory=TickerFactory(history_batch(20, dated=18)))
+    later = healthy.earnings_history(symbols, date(2018, 1, 1), date(2020, 12, 31), now=NOW)
+
+    assert earnings_coverage(symbols, later).with_dates == 18
+
+
+def test_a_small_batch_is_never_read_as_rate_limiting(test_cfg: Config) -> None:
+    """Below the minimum batch there is nothing to infer, so ETFs still cache.
+
+    A confirm run asking about three held positions, all of them funds, must
+    not have its answers thrown away as a suspected rate limit.
+    """
+    tickers = history_batch(3, dated=0)
+    factory = TickerFactory(tickers)
+    provider = build_provider(test_cfg, ticker_factory=factory)
+    window = (date(2018, 1, 1), date(2020, 12, 31))
+
+    provider.earnings_history(list(tickers), *window, now=NOW)
+    stored = history_entries(test_cfg)
+
+    assert len(stored) == 3
+    assert all(entry["value"] is None for entry in stored.values())
 
 
 # ---------------------------------------------------------------------------
