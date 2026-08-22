@@ -42,18 +42,46 @@ side**, and the difference matters, so both halves are quantified here.
 
 ## 1. What was reconstructed
 
-Three new files sit next to the existing universe snapshots. They are **not read by any code**;
-nothing in `src/swing/` knows they exist. They are research output.
+Three new files sit next to the existing universe snapshots.
 
 ```
-src/swing/assets/universe/sp500-membership.csv    903 rows,   874 distinct symbols
-src/swing/assets/universe/sp400-membership.csv  1,043 rows,   996 distinct symbols
-src/swing/assets/universe/sp600-membership.csv  1,107 rows, 1,092 distinct symbols
+                                                as first built     today
+src/swing/assets/universe/sp500-membership.csv    903 rows       1,004 rows,   955 distinct symbols
+src/swing/assets/universe/sp400-membership.csv  1,043 rows       1,303 rows, 1,199 distinct symbols
+src/swing/assets/universe/sp600-membership.csv  1,107 rows       1,799 rows, 1,686 distinct symbols
 ```
 
-Schema is `symbol,name,added,removed`, one row per membership *interval*, so a company that left
-and rejoined has two rows. Symbols are Yahoo-style (`BRK-B`), matching
-`swing.universe.to_yahoo_symbol`.
+> **Two things about these files have changed since this section was written; the findings below
+> have not.**
+>
+> **They are read by code now.** When this was written nothing in `src/swing/` knew they existed and
+> they were research output. They are now a **simulation input**: `swing.universe` loads them
+> (`membership()`, `members_asof()`, `membership_windows()`), and with
+> `[backtest] membership = "point_in_time"` the backtest engine enforces eligibility from them, so
+> a wrong date in these files is a wrong trade rather than a wrong paragraph. Treat them
+> accordingly. The default mode still measures rather than enforces.
+>
+> **The schema has four more columns.** [§11](#11-sec-edgar-fund-filings-as-a-membership-source)
+> added SEC EDGAR dates alongside the Wikipedia ones, and they are labelled rather than blended
+> (see the provenance table below). The extra rows in the table above are EDGAR memberships
+> Wikipedia never recorded.
+
+Schema is `symbol,name,added,removed,added_bound,removed_bound,added_source,removed_source`, one row
+per membership *interval*, so a company that left and rejoined has two rows. Symbols are
+Yahoo-style (`BRK-B`), matching `swing.universe.to_yahoo_symbol`.
+
+**The four original columns are unchanged and existing readers are unaffected.** They keep their
+position, their names and their meaning; a read/write round-trip leaves them byte-identical; the
+`unknown` sentinel and the empty-`removed`-means-still-a-member convention are exactly as described
+below. The four new columns are additive, optional and trailing — a consumer reading
+`symbol,name,added,removed` positionally or by name sees no difference.
+
+| Column | Values | Meaning |
+|---|---|---|
+| `added_bound` / `removed_bound` | `exact` | The source states this date. |
+| | `no_later_than` | Derived by diffing quarterly fund filings, so the true date is at or before it ([§11.4](#114-from-snapshots-to-dates-and-why-they-are-bounds)). |
+| | empty | The date column is empty or `unknown`; there is nothing to qualify. |
+| `added_source` / `removed_source` | `wikipedia`, `edgar`, empty | Which source produced the date. Wikipedia's exact dates win wherever it has one. |
 
 The date columns carry five distinguishable states, and keeping them distinct is the point of the
 exercise — an inferred date would otherwise be indistinguishable from a sourced one:
@@ -64,7 +92,7 @@ exercise — an inferred date would otherwise be indistinguishable from a source
 | `added` empty | No source states an addition. The symbol was already a member when the change table's coverage begins. |
 | `removed` empty | The symbol is in today's committed snapshot and no later removal is recorded: **still a member as of the fetch date.** |
 | `removed` = `unknown` | The sources record an addition but no removal, *and* the symbol is absent from today's snapshot. It left on a date nobody wrote down. |
-| `added` = `unknown` | The symbol is a current member but its last recorded event is a *removal*. An unrecorded re-addition happened. Two rows across all three files. |
+| `added` = `unknown` | The symbol is a current member but its last recorded event is a *removal*. An unrecorded re-addition happened. Two rows when this was written; **zero today** — EDGAR dated both — but the state is still part of the schema and a reader must still handle it. |
 
 Nothing is interpolated, and no membership is inferred from a company's mere existence.
 
@@ -474,9 +502,11 @@ gives a reason to move them, and the measurements do support the *direction* and
 The ETF run remains the lower bound and the stock run the upper bound.
 
 **Keep the three CSVs.** They are a strict superset of the committed snapshots and the evidence
-base for this document, and they are not wired into anything. The only cost is that they sit under
-`src/swing/assets/`, so they ship in the wheel — 108 KB. Move them under `docs/` or `research/` if
-that is unwanted; nothing imports them.
+base for this document. The only cost is that they sit under `src/swing/assets/`, so they ship in
+the wheel. *(Written when nothing imported them, and it recommended moving them to `docs/` or
+`research/` if the wheel size was unwanted. That option has since closed: `swing.universe` reads
+them at runtime — see [§1](#1-what-was-reconstructed) — so `src/swing/assets/` is now where they
+belong.)*
 
 **One finding is left on the table deliberately.** §5.2 shows the look-ahead half of the bias
 (7,199 member-years on the union rule, 30% of the backtest; 10,569 / 44% by the per-index arithmetic
@@ -878,8 +908,13 @@ limit — with exponential backoff on 403 and 429. Neither was triggered during 
 writes nothing outside its cache directory and the three `*-membership.csv` files, and importing it
 has no side effects.
 
-Two warnings for whoever runs this next. `scripts/build_membership.py build` **rewrites the same
-three CSVs with the four-column schema**, discarding the provenance columns; run the EDGAR merge
-after it, not before. And these numbers are a measurement of SEC's holdings archive on 2026-08-22 —
-the fund names, the report layouts and the fails-to-deliver URL scheme have all changed at least
-once inside the span this study reads, and they will change again.
+**The ordering rule is now enforced rather than remembered.** `scripts/build_membership.py build`
+writes the same three CSVs from Wikipedia alone, which would discard the EDGAR columns. It no longer
+does that silently: it **refuses, exits 3 and writes nothing** when a target file carries columns it
+does not manage, or when the rebuild would drop more than 5% of the rows. `--force` overrides it and
+says so loudly. So the rule — rebuild from Wikipedia first, then re-run the EDGAR merge — is checked
+by the tool rather than by whoever read this paragraph last.
+
+One warning that is not automated: these numbers are a measurement of SEC's holdings archive on
+2026-08-22. The fund names, the report layouts and the fails-to-deliver URL scheme have all changed
+at least once inside the span this study reads, and they will change again.
