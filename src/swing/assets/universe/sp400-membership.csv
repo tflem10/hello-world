@@ -1,1044 +1,1304 @@
-symbol,name,added,removed
-AA,Alcoa,2021-12-20,
-AAL,American Airlines Group,2024-09-23,
-AAON,AAON,2024-05-03,
-AAP,Advance Auto Parts,,2015-07-08
-AAXN,Axon Enterprise,2019-07-01,unknown
-ABMD,Abiomed,2016-03-30,2018-05-31
-ACC,American Campus Communities,,2022-08-10
-ACHC,Acadia Healthcare,2017-04-06,2025-09-22
-ACI,Albertsons,,2013-12-20
-ACI,Albertsons,2025-03-11,
-ACIW,ACI Worldwide,,2023-11-13
-ACM,AECOM,,
-ADC,Agree Realty,2023-02-06,
-ADNT,Adient,2018-08-22,2024-09-23
-ADS,Alliance Data Systems,,2013-12-20
-ADS,Alliance Data Systems,2020-06-22,unknown
-ADTN,ADTRAN,,2014-10-31
-ADVS,Advent Software,,2015-07-08
-AEIS,Advanced Energy,2026-02-02,
-AEO,American Eagle Outfitters,,2022-09-19
-AFG,American Financial Group,,
-AGCO,AGCO,,
-AGP,AMERIGROUP,,2012-12-21
-AHL,Aspen Insurance Holdings,,2019-02-21
-AHR,American Healthcare REIT,2026-02-02,
-AINV,Apollo Investment,,2014-02-28
-AIRC,Apartment Income REIT,2020-12-21,2024-06-28
-AIT,Applied Industrial Technologies,2024-03-18,
-AJG,Arthur J. Gallagher & Co.,,2016-05-27
-ALB,Albemarle Corporation,,2016-06-30
-ALE,"Allete, Inc.",2018-03-07,2025-12-17
-ALEX,Alexander & Baldwin,2012-06-29,2020-02-07
-ALGM,Allegro MicroSystems,2022-12-19,
-ALGN,Align Technology,2014-01-23,2017-06-19
-ALK,Alaska Air Group,,2016-05-12
-ALK,Alaska Air Group,2025-03-24,
-ALLY,Ally Financial,2023-09-18,
-ALSN,Allison Transmission,2026-07-06,
-ALTM,Arcadium Lithium,2024-01-02,2025-03-06
-ALTR,Altair Engineering,2024-06-24,2025-03-31
-ALV,Autoliv,2023-03-20,
-AM,Antero Midstream,,2012-04-30
-AM,Antero Midstream,2019-09-23,
-AMCX,AMC Networks,,2020-12-02
-AMD,Advanced Micro Devices,2013-09-20,2017-03-20
-AME,Ametek,,2013-09-20
-AMED,Amedisys,2019-02-21,2025-08-19
-AMG,Affiliated Managers Group,,2014-06-30
-AMG,Affiliated Managers Group,2019-12-13,
-AMH,American Homes 4 Rent,2024-03-01,
-AMKR,Amkor Technology,2021-02-16,
-AMSG,AmSurg Corp,,2016-12-01
-AN,AutoNation,2017-08-08,
-ANF,Abercrombie & Fitch,2013-12-20,2016-10-03
-ANF,Abercrombie & Fitch,2024-07-22,
-ANR,Alpha Natural Resources,2012-10-01,2014-04-30
-ANSS,ANSYS Inc,,2017-06-19
-AOL,AOL Inc,,2015-06-25
-AOS,A.O. Smith,2013-11-04,2017-07-26
-APG,APi Group,2025-06-24,
-APOL,Apollo Education,2013-06-28,2015-11-30
-APPF,AppFolio,2024-04-01,
-APPS,Digital Turbine,2021-09-07,2022-06-29
-APY,Apergy Corp.,2018-05-10,unknown
-AR,Antero Resources,2022-10-20,
-ARE,Alexandria Real Estate Equities,,2017-03-20
-ARMK,Aramark,2023-03-20,
-ARRS,Arris International,2014-06-20,2019-04-11
-ARW,Arrow Electronics,,
-ARWR,Arrowhead Pharmaceuticals,2019-12-13,2025-01-27
-ARWR,Arrowhead Pharmaceuticals,2026-02-09,
-ASB,Associated Bank,,
-ASGN,ASGN Inc.,2018-10-11,2026-03-23
-ASH,Ashland Global,,
-ASNA,Ascena Retail Group,,2016-11-10
-ATGE,Adtalem Global Education,,2021-07-07
-ATI,ATI Inc.,2015-07-01,2020-09-21
-ATI,ATI Inc.,2025-03-24,
-ATML,Atmel,,2016-04-06
-ATR,AptarGroup,,
-ATW,Atwood Oceanics,,2016-01-19
-AVAV,AeroVironment,2025-07-18,
-AVNS,Avanos Medical,,2021-05-17
-AVNT,Avient,,
-AVP,Avon Products,,2018-03-19
-AVT,Avnet,,
-AVTR,Avantor,2024-07-26,
-AXON,Axon Enterprise,,2023-05-04
-AXTA,Axalta,2023-03-20,
-AYI,Acuity Brands,,2016-05-03
-AYI,Acuity Brands,2018-06-18,
-AZPN,Aspen Technology,2021-05-17,2025-03-11
-AZTA,Azenta,,2024-11-25
-BAH,Booz Allen Hamilton,2025-12-22,
-BBBY,Bed Bath & Beyond,2017-07-26,2020-06-22
-BBG,Bill Barrett Corporation,,2014-09-30
-BBWI,"Bath & Body Works, Inc.",2025-03-24,
-BC,Brunswick,2013-12-20,
-BCO,Brink's,,2014-06-20
-BCO,Brink's,2017-09-18,
-BDC,Belden Inc.,2014-06-30,
-BEAV,B/E Aerospace,,2017-04-19
-BERY,Berry Global,2023-06-19,2025-05-01
-BFH,Bread Financial,,2022-11-02
-BGC,General Cable,,2014-05-30
-BHF,Brighthouse Financial,2019-04-03,
-BID,Sotheby's,,2019-10-03
-BIG,Big Lots,,2019-03-18
-BILL,Bill Holdings,2024-12-23,
-BIO,Bio-Rad Laboratories,,2020-06-22
-BIO,Bio-Rad Laboratories,2024-09-23,
-BIVV,Bioverativ,2017-02-03,2018-03-08
-BJ,BJ's Wholesale Club,2019-10-30,
-BKH,Black Hills Corporation,,
-BKS,Barnes & Noble,,2013-09-27
-BLD,TopBuild Corp.,2020-06-30,2026-07-01
-BLDR,Builders FirstSource,2020-08-17,2023-12-18
-BLKB,Blackbaud,2017-06-29,2026-06-22
-BMR,BioMed Realty Trust,,2016-01-27
-BMRN,BioMarin Pharmaceutical,2024-06-24,
-BMS,Bemis Company,2014-12-04,2019-06-07
-BOBE,Bob Evans Farms,,2014-06-06
-BOH,Bank of Hawaii,,2023-06-01
-BR,Broadridge Financial Solutions,,2018-06-18
-BRBR,BellRing Brands,2022-03-14,2026-06-22
-BRCD,Brocade Communications,2016-05-31,2017-11-22
-BRE,BRE Properties,,2014-04-01
-BRKR,Bruker,2021-12-02,
-BRKS,Brooks Automation,2021-01-07,unknown
-BRO,Brown & Brown,,2021-09-20
-BROS,Dutch Bros Inc.,2026-02-02,
-BRX,Brixmor Property Group,2019-02-06,
-BSY,Bentley Systems,2025-10-06,
-BTSG,BrightSpring Health Services,2026-07-17,
-BTU,Peabody Energy,2014-09-19,2015-06-30
-BURL,Burlington Stores,2023-11-07,
-BWA,BorgWarner,2025-12-22,
-BWLD,Buffalo Wild Wings,,2018-02-05
-BWXT,BWX Technologies,2023-06-19,
-BYD,Boyd Gaming,2018-02-13,
-BYI,Bally Technologies,,2014-11-24
-CAA,CalAtlantic Homes,,2018-02-13
-CAB,Cabela's,2012-10-04,2017-09-26
-CABO,Cable One,2015-06-30,2024-04-22
-CACI,CACI International,2018-12-03,
-CADE,Cadence Bank,,2026-02-02
-CAKE,Cheesecake Factory,,2020-06-22
-CALX,Calix,2022-01-04,2024-03-18
-CAR,Avis Budget Group,2016-09-16,
-CARS,Cars.com,2017-06-02,2019-09-23
-CART,Maplebear Inc.,2025-01-14,
-CASY,Casey's,2015-06-25,2026-04-09
-CATY,Cathay Bank,,2023-09-18
-CAVA,Cava Group,2025-03-31,
-CBOE,CBOE Holdings,,2017-03-01
-CBRL,Cracker Barrel,2015-06-29,2023-03-20
-CBSH,Commerce Bancshares,,
-CBST,Cubist Pharmaceuticals,2013-09-26,unknown
-CBT,Cabot Corp,,
-CC,Chemours,2015-06-30,2016-02-01
-CC,Chemours,2017-01-04,2025-03-24
-CCK,Crown Holdings,2023-06-19,
-CCMP,CMC Materials,2019-12-02,2022-07-07
-CCP,Care Capital Properties,,2017-08-17
-CDAY,Ceridian,2019-10-30,2021-09-20
-CDE,Coeur Mining,2026-06-22,
-CDK,CDK Global,2014-09-30,2022-07-06
-CDNS,Cadence Design Systems,,2017-09-18
-CDP,COPT Defense Properties,,
-CEB,CEB Inc.,,2017-04-05
-CELH,Celsius Holdings,2022-08-10,
-CFR,Frost Bank,,
-CFX,Colfax,2019-03-18,unknown
-CG,Carlyle Group (The),2023-11-30,
-CGNX,Cognex,2014-09-19,
-CHD,Church & Dwight,,2015-12-29
-CHDN,Churchill Downs Inc.,2016-06-24,
-CHE,Chemed Corp.,2018-06-18,
-CHFC,Chemical Financial,2016-09-01,2019-08-01
-CHH,Choice Hotels,2019-12-10,
-CHK,Chesapeake Energy,2018-03-19,2020-02-27
-CHK,Chesapeake Energy,2023-08-21,unknown
-CHRD,Chord Energy,2023-03-20,
-CHS,Chico's FAS,,2017-07-19
-CHWY,Chewy,2024-11-06,
-CHX,ChampionX,,2025-07-18
-CIEN,Ciena,,2026-02-09
-CIT,CIT Group,2020-01-21,2022-01-04
-CIVI,Civitas Resources,2023-09-29,2026-01-30
-CLB,Core Laboratories,2017-07-12,2020-04-27
-CLC,CLARCOR Inc.,,2017-03-01
-CLF,Cleveland-Cliffs,2014-04-01,2015-04-24
-CLF,Cleveland-Cliffs,2021-03-01,
-CLGX,CoreLogic,,2021-06-09
-CLH,Clean Harbors,,
-CLI,Mack-Cali Realty,,2020-09-21
-CMA,Comerica,2024-12-23,2026-02-02
-CMC,Commercial Metals,,
-CMD,Cantel Medical Corporation,2018-03-19,2021-06-02
-CMP,Compass Minerals,,2022-02-01
-CNC,Centene,2014-09-03,2016-03-30
-CNH,CNH Industrial,2024-09-23,
-CNK,Cinemark Holdings,,2021-08-30
-CNL,CLECO,,2016-04-14
-CNM,Core & Main,2023-11-13,
-CNO,CNO Financial Group,2015-04-07,
-CNQR,Concur Technologies,,2014-12-04
-CNVR,Conversant,,2014-12-09
-CNX,CNX Resources,2016-03-04,
-CNXC,Concentrix,2020-12-01,2026-06-22
-COHR,Coherent Corp.,,2026-03-23
-COHR,Coherent Corp.,2017-03-20,2022-07-05
-COKE,Coca-Cola Consolidated,2022-07-20,
-COLB,Columbia Banking System,2023-03-01,
-COLM,Columbia Sportswear,2019-12-17,
-CONE,CyrusOne,2017-03-01,2022-03-30
-COO,The Cooper Companies,,2016-09-22
-COR,CoreSite,2017-08-10,2021-12-28
-COTY,Coty,2020-09-21,2026-06-22
-CPE,Callon Petroleum,2017-09-18,2019-09-26
-CPRI,Capri Holdings,2021-01-07,
-CPRT,Copart,,2018-07-02
-CPT,Camden,,2022-04-04
-CPWR,Compuware,,2014-12-08
-CR,Crane,2023-04-04,
-CRBG,Corebridge Financial,2025-12-17,
-CRC,California Resources,2014-11-28,2016-02-25
-CRI,Carter's,2012-01-13,2024-12-23
-CRK,Comstock Resources,,2012-02-03
-CRL,Charles River Laboratories,,2021-05-14
-CRNC,Cerence,2021-07-07,2022-03-14
-CROX,Crocs,2021-06-02,
-CRS,Carpenter Technology,,2020-08-03
-CRS,Carpenter Technology,2024-12-23,
-CRUS,Cirrus Logic,2016-09-21,
-CSAL,Communications Sales & Leasing,2015-04-24,unknown
-CSC,Computer Sciences Corp.,2015-11-30,2017-04-04
-CSL,Carlisle Companies,,
-CST,CST Brands,2013-05-01,2017-06-29
-CTB,Cooper Tire & Rubber Co.,2017-02-13,2018-06-18
-CTLT,Catalent,,2020-09-21
-CTRE,CareTrust REIT,2026-03-23,
-CUBE,CubeSmart,2022-12-19,
-CUZ,Cousins Properties,2016-10-05,
-CVEO,Civeo,2014-05-30,2014-12-16
-CVET,Covetrus,2019-02-11,2019-10-30
-CVG,Convergys,,2018-10-10
-CVLT,CommVault Systems,,
-CW,Curtiss-Wright,2016-02-01,
-CXT,Crane NXT,,
-CXW,CoreCivic,,2020-08-17
-CY,Cypress Semiconductor,,2020-04-13
-CYH,Community Health Systems,,2016-10-05
-CYN,City National Corp,,2015-11-02
-CYT,Cytec Industries,,2015-12-14
-CYTK,Cytokinetics,2024-03-18,
-CZR,Caesars Entertainment,,2021-03-22
-CZR,Caesars Entertainment,2019-02-04,2020-07-24
-DAN,Dana Incorporated,,2023-06-19
-DAR,Darling Ingredients,2020-01-29,
-DBD,Diebold Nixdorf,,2018-05-10
-DBX,Dropbox,2023-06-19,
-DCI,Donaldson Company,,
-DCT,DCT Industrial Trust,2016-04-04,2018-08-22
-DDD,3D Systems,2013-05-08,2018-05-10
-DDS,Dillard's,2017-02-28,2020-06-22
-DECK,Deckers Brands,,2024-03-18
-DEI,Douglas Emmett,,2023-06-19
-DF,Dean Foods,2013-05-23,2018-03-19
-DHC,Diversified Healthcare Trust,,2020-05-27
-DINO,HF Sinclair,,
-DKS,Dick's Sporting Goods,,
-DLB,Dolby,2023-08-22,
-DLPH,Delphi Technologies,2017-12-06,2020-10-07
-DLX,Deluxe Corporation,,2020-08-03
-DNB,Dun & Bradstreet Corp,2017-04-05,2019-02-11
-DNKN,Dunkin' Brands,2015-04-27,2020-12-21
-DNOW,DNOW Inc.,2014-05-30,2020-06-22
-DNR,Denbury Resources,,2017-03-20
-DO,Diamond Offshore Drilling,2016-09-30,2019-03-18
-DOC,Physicians Realty Trust,2020-05-18,2024-03-01
-DOCN,DigitalOcean,2026-04-09,
-DOCS,Doximity,2023-06-19,
-DOCU,Docusign,2024-10-11,
-DPZ,Domino's Pizza,2013-05-30,2020-05-06
-DRC,Dresser-Rand Group,,2015-06-29
-DRE,Duke Realty,,2017-07-26
-DRQ,Dril-Quip,,2019-02-04
-DST,DST Systems,,2018-04-19
-DT,Dynatrace,2022-09-19,
-DTM,DT Midstream,2021-07-02,
-DUOL,Duolingo,2024-04-22,
-DV,DeVry,2012-09-28,unknown
-DWA,DreamWorks Animation,,2016-08-26
-DY,Dycom Industries,2016-08-19,2023-03-20
-DY,Dycom Industries,2025-12-22,
-EAT,Brinker International,,2020-06-25
-EBS,Emergent BioSolutions,2020-07-24,2021-11-30
-EDR,Education Realty Trust,2016-05-27,2018-09-20
-EEFT,Euronet Worldwide,2022-02-01,
-EGN,Energen,,2018-12-03
-EGP,EastGroup Properties,2019-05-07,
-EHC,Encompass Health,2018-01-02,
-ELAN,Elanco,2025-09-02,
-ELF,e.l.f. Beauty,2024-01-23,
-ELS,Equity Lifestyle Properties,2023-07-24,
-ELY,Callaway Golf,2021-06-15,unknown
-EME,Emcor,2016-06-30,2025-09-22
-ENDP,Endo International,2017-03-02,2018-06-18
-ENH,Endurance Specialty Holdings,2015-07-30,2017-03-29
-ENOV,Enovis,,2025-01-14
-ENPH,Enphase Energy,2020-04-27,2021-01-07
-ENR,Energizer,,2023-09-18
-ENS,EnerSys,2016-08-26,
-ENSG,Ensign Group,2024-10-01,
-ENTG,Entegris,2025-03-06,
-ENV,Envestnet,2021-06-09,2023-11-07
-EPC,Edgewell Personal Care,2015-06-30,2021-03-22
-EPR,EPR Properties,2016-01-19,
-EQH,Equitable Holdings,2023-12-18,
-EQT,EQT Corporation,2018-11-13,2022-10-03
-EQY,Equity One,,2017-03-02
-ERI,Eldorado Resorts,2018-08-20,unknown
-ERIE,Erie Indemnity,2023-08-08,2024-09-23
-ESAB,ESAB,2022-04-05,
-ESI,ITT Educational Services,,2012-12-31
-ESL,Esterline Technologies,,2019-03-18
-ESNT,Essent Group Ltd.,2020-05-26,
-ESS,Essex Property,,2014-04-01
-ESV,Ensco plc,2016-03-30,unknown
-ETRN,Equitrans Midstream,2018-11-13,2024-07-22
-ETSY,Etsy,2019-09-23,2020-09-21
-EV,Eaton Vance,,2021-03-01
-EVR,Evercore,2018-03-26,
-EWBC,East West Bancorp,,
-EXE,Expand Energy,,2025-03-24
-EXEL,Exelixis,2018-07-02,
-EXLS,EXL Service,2022-10-03,
-EXP,Eagle Materials,2013-04-30,
-EXPO,"Exponent, Inc.",2023-03-22,
-EXR,Extra Space Storage,2013-01-29,2016-01-19
-FAF,First American Financial Corporation,,
-FBHS,Fortune Brands Home & Security,,2016-06-24
-FBIN,Fortune Brands Innovations,2022-12-19,
-FCFS,FirstCash,2019-09-23,
-FCN,FTI Consulting,,2017-08-08
-FCN,FTI Consulting,2019-10-24,
-FCS,Fairchild Semiconductor,,2016-09-21
-FDS,FactSet,,2021-12-20
-FEIC,FEI Company,2014-04-01,2016-09-22
-FFIN,First Financial Bankshares,2019-03-22,
-FHI,Federated Hermes,,
-FHN,First Horizon,2013-06-21,
-FICO,Fair Isaac,,2023-03-20
-FII,Federated Investors,2012-12-31,unknown
-FIVE,Five Below,2018-04-19,
-FIX,Comfort Systems USA,2023-12-18,2025-12-22
-FL,Foot Locker,,2016-04-04
-FL,Foot Locker,2019-08-09,2023-09-18
-FLEX,Flex Ltd.,2024-11-25,2026-06-22
-FLG,Flagstar Bank,,
-FLO,Flowers Foods,,2026-05-18
-FLR,Fluor,2019-06-04,
-FLS,Flowserve,2021-03-22,
-FMER,FirstMerit,,2016-08-19
-FN,Fabrinet,2024-09-23,
-FNB,FNB Corporation,2016-02-09,
-FND,Floor & Decor,2023-10-20,
-FNF,Fidelity National Financial,,2014-06-30
-FNF,Fidelity National Financial,2023-09-18,
-FNFG,First Niagara Bank,,2016-07-29
-FOSL,Fossil Group,2016-01-05,2017-03-20
-FOUR,Shift4,2024-11-20,
-FOXF,Fox Factory,2020-09-21,2024-04-03
-FR,First Industrial Realty Trust,2016-03-30,
-FRT,Federal Realty Investment Trust,,2016-02-01
-FSLR,First Solar,2017-03-20,2022-12-19
-FST,Forest Oil,,2013-06-28
-FTI,TechnipFMC,2025-09-12,
-FTNT,Fortinet,2014-01-28,2018-10-11
-FTR,Frontier Communications,2017-03-20,2017-12-06
-FULT,Fulton Financial Corporation,,2023-06-19
-FYBR,Frontier Communications,2022-10-03,2026-01-22
-G,Genpact,2021-05-03,
-GAP,Gap Inc.,,
-GATX,GATX,,
-GBCI,Glacier Bancorp,2020-06-22,
-GDDY,GoDaddy,2023-09-18,2024-06-24
-GDI,Gardner Denver,,2013-07-30
-GDOT,Green Dot Corp,2019-01-18,2020-01-31
-GEF,"Greif, Inc.",,
-GEO,GEO Group,2017-03-16,2020-11-13
-GES,Guess? Inc,,2016-11-01
-GGG,Graco Inc.,,
-GHC,Graham Holdings,2014-09-19,
-GHL,Greenhill & Co.,,2014-06-30
-GLPI,Gaming and Leisure Properties,2023-09-18,
-GMCR,Keurig Green Mountain,,2014-03-21
-GME,GameStop,2016-04-22,
-GMED,Globus Medical,2016-12-06,
-GNRC,Generac Holdings,2020-02-07,2021-03-22
-GNTX,Gentex,,
-GNW,Genworth Financial,2015-11-18,2021-05-03
-GO,Grocery Outlet,2020-06-25,2024-06-24
-GPK,Graphic Packaging,2023-06-19,
-GPN,Global Payments Inc,,2016-04-22
-GPOR,Gulfport Energy Corp,,2018-12-12
-GPRO,Gen-Probe,,2012-07-31
-GPS,Gap,2022-02-03,unknown
-GRUB,Grubhub,2019-08-09,2021-06-15
-GT,Goodyear Tire & Rubber,2019-02-27,2026-07-06
-GTLS,Chart Industries,2022-03-30,2026-07-17
-GTM,ZoomInfo,,2026-03-23
-GVA,Granite Construction,,2019-12-13
-GWR,Genesee & Wyoming,2012-10-01,2019-12-26
-GWRE,Guidewire Software,2025-01-27,
-GXO,GXO Logistics,2021-08-02,
-GXP,Great Plains Energy,,2018-06-05
-H,Hyatt,2023-10-12,
-HAE,Haemonetics,2018-06-18,
-HAIN,Hain Celestial Group,2013-12-23,2022-10-03
-HALO,Halozyme,2020-11-13,
-HBI,Hanesbrands,2021-12-20,2023-03-20
-HCSG,Healthcare Services Group,2018-02-05,2021-09-20
-HE,Hawaiian Electric Industries,,2023-09-18
-HELE,Helen of Troy Limited,2016-05-31,2024-09-23
-HFC,HollyFrontier,,2018-06-18
-HFC,HollyFrontier,2021-06-04,unknown
-HGV,Hilton Grand Vacations,2023-03-20,
-HII,Huntington Ingalls,,2018-01-03
-HIMS,Hims & Hers Health,2025-03-24,
-HIW,Highwoods Properties,,2023-09-18
-HL,Hecla Mining,2025-12-22,
-HLI,Houlihan Lokey,2023-12-18,
-HLNE,Hamilton Lane,2024-09-23,
-HLS,HealthSouth,2016-11-03,2018-01-02
-HMA,Health Management Associates,,2014-01-28
-HNI,HNI Corporation,,2021-02-16
-HNT,Health Net,,2016-03-30
-HOG,Harley-Davidson,2020-06-22,
-HOLX,Hologic,,2016-03-30
-HOMB,Home BancShares,2017-06-02,
-HPP,Hudson Pacific Properties,2020-05-27,2022-09-19
-HQY,HealthEquity,2018-09-17,
-HR,Healthcare Realty Trust,2016-03-07,2022-07-21
-HR,Healthcare Realty Trust,unknown,
-HRB,H&R Block,2020-09-21,
-HRC,Hillrom,,2021-12-20
-HSC,Harsco,,2015-06-30
-HSH,The Hillshire Brands,2012-06-28,2014-08-14
-HSNI,HSN Inc,,2018-01-02
-HTA,Healthcare Trust of America,2022-07-21,unknown
-HTSI,Harris Teeter Supermarkets,,2014-01-28
-HTZ,Hertz,2023-03-20,2024-06-24
-HUBB,Hubbell Incorporated,,2023-10-18
-HWC,Hancock Whitney,,
-HXL,Hexcel,2020-06-22,
-HYH,Halyard Health,2014-10-31,unknown
-IAA,"IAA, Inc.",2020-08-03,2023-03-22
-IART,Integra LifeSciences,2018-06-05,2024-06-24
-IBKR,Interactive Brokers,2018-01-02,2025-08-28
-IBOC,Intl Bancshares Corp,,
-ICUI,ICU Medical,2018-03-19,2023-11-30
-IDA,Idacorp,,
-IDCC,InterDigital,,2021-04-12
-IDCC,InterDigital,2026-03-23,
-IDTI,Integrated Device Technology,,2019-04-01
-IDXX,IDEXX Laboratories,,2017-01-04
-IESC,IES Holdings,2026-07-01,
-IEX,IDEX Corp.,,2019-08-09
-IGT,International Game Technology,2014-06-20,unknown
-IIVI,II-VI,2019-09-26,unknown
-ILG,"ILG, Inc.",2017-09-18,2018-09-04
-ILMN,"Illumina, Inc.",2024-06-24,
-IM,Ingram Micro,,2016-12-06
-INCR,INC Research,2017-04-05,unknown
-INGN,Inogen,,2019-09-18
-INGR,Ingredion,,
-INT,World Fuel Services,,2021-08-04
-IPGP,IPG Photonics,2014-12-08,2018-03-07
-IPGP,IPG Photonics,2022-06-21,
-IPI,Intrepid Potash,,2014-06-27
-IRDM,Iridium Communications,2021-02-12,2025-12-22
-IRT,Independence Realty Trust,2022-05-19,
-ISCA,International Speedway,,2019-10-18
-ISIL,Intersil,,2017-02-28
-IT,Gartner,,2017-04-05
-ITT,ITT Inc.,,
-JACK,Jack in the Box,2015-07-08,2022-02-03
-JAH,Jarden,2012-08-07,2016-04-18
-JAZZ,Jazz Pharmaceuticals,2020-09-21,
-JBGS,JBG Smith,2017-07-19,2023-03-20
-JBL,Jabil,2014-11-04,2023-12-18
-JBLU,JetBlue,,2023-09-18
-JCOM,j2 Global,2015-12-14,unknown
-JCP,J. C. Penney,,2017-06-02
-JDSU,JDS Uniphase,2013-12-20,unknown
-JEF,Jefferies,,2013-02-28
-JEF,Jefferies,2019-09-26,
-JHG,Janus Henderson,,2026-07-01
-JKHY,Jack Henry & Associates,,2018-11-13
-JLL,Jones Lang LaSalle,,
-JOY,Joy Global,,2017-04-06
-JWN,Nordstrom,2020-06-22,2025-05-22
-KAR,KAR Auction Services,2019-09-23,2021-12-02
-KATE,Kate Spade & Company,2014-03-21,2017-07-12
-KBH,KB Home,,
-KBR,"KBR, Inc.",,
-KD,Kyndryl,2021-11-05,
-KEX,Kirby Corporation,,
-KEYS,Keysight Technologies,2014-10-31,2018-11-13
-KFY,Korn/Ferry,,2012-10-01
-KLXI,KLX Inc.,2014-12-16,2018-09-18
-KMPR,Kemper Corporation,,2026-03-23
-KMT,Kennametal,,2023-03-20
-KN,Knowles Corporation,2014-02-28,2018-05-02
-KNF,Knife River Corporation,2023-06-01,
-KNSL,Kinsale Capital Group,2020-12-29,
-KNX,Knight-Swift,2017-07-12,
-KRC,Kilroy Realty Corp,2013-02-28,
-KRG,Kite Realty Group Trust,2021-10-22,
-KRYS,Krystal Biotech,2026-07-24,
-KSS,Kohl's,2020-09-21,2023-10-03
-KSU,Kansas City Southern,,2013-05-23
-KTOS,Kratos Defense & Security Solutions,2025-09-22,
-KWK,Quicksilver Resources,,2013-05-23
-LAD,Lithia Motors,2020-09-01,
-LAMR,Lamar Advertising Company,,
-LDOS,Leidos Holdings,,2019-08-09
-LEA,Lear,2019-12-13,
-LECO,Lincoln Electric,,
-LEG,Leggett & Platt,2021-12-20,2024-06-24
-LFUS,Littelfuse,2016-11-28,
-LGND,Ligand Pharmaceuticals,2018-11-13,2021-09-07
-LHCG,LHC Group,2020-04-13,2023-02-23
-LHO,LaSalle Hotel Properties,2014-06-30,2018-12-03
-LII,Lennox International,,2024-12-23
-LITE,Lumentum,2018-04-04,2026-03-23
-LIVN,LivaNova,,
-LKQ,LKQ Corp,,2016-05-23
-LM,Legg Mason,2016-12-01,2020-08-03
-LNCE,Snyder's-Lance,2016-02-25,2018-03-26
-LNCR,Lincare Holdings,,2012-08-07
-LNT,Alliant Energy,,2016-06-30
-LNTH,Lantheus Holdings,2022-10-12,
-LNW,Light & Wonder,,2025-11-13
-LOGM,LogMeIn,2017-02-02,2020-09-01
-LOPE,Grand Canyon Education,2019-12-13,
-LPNT,LifePoint Health Inc.,,2018-11-06
-LPS,Lender Processing Services,,2014-01-02
-LPT,Liberty Property Trust,,2020-01-29
-LPX,Louisiana-Pacific,,
-LSCC,Lattice Semiconductor,2021-04-20,
-LSI,Life Storage,,2023-07-24
-LSTR,Landstar System,,
-LTM,Life Time Fitness Inc.,,2015-06-10
-LW,Lamb Weston Holdings,2016-11-10,2018-12-03
-LXK,Lexmark International,2012-09-28,2016-11-28
-LYV,Live Nation Entertainment,2014-06-20,2019-12-13
-M,Macy's,2021-12-20,
-MAA,Mid-America Apartments,,2016-12-01
-MAC,Macerich,,2013-05-08
-MAC,Macerich,2019-12-13,2023-06-19
-MAN,ManpowerGroup,,2025-09-22
-MANH,Manhattan Associates,2015-06-10,
-MASI,Masimo,,2014-06-20
-MASI,Masimo,2017-03-20,2026-06-11
-MAT,Mattel,2019-06-07,
-MATW,Matthews International,,2014-05-30
-MATX,Matson,,2014-03-21
-MBFI,MB Financial,2016-07-29,2019-03-22
-MCRS,MICROS Systems,,2014-09-03
-MCY,Mercury General,,2022-09-19
-MD,Mednax,,2020-11-13
-MDC,MDC Holdings,,2016-05-31
-MDP,Meredith Corp,,2020-04-27
-MDR,McDermott International,2018-05-10,2019-09-23
-MDRX,Allscripts Healthcare Solutions,,2020-06-22
-MDSO,Medidata Solutions,2017-06-26,2019-10-24
-MDU,MDU Resources,,2024-10-11
-MEDP,Medpace,2020-09-21,
-MENT,Mentor Graphics,,2017-04-03
-MHK,Mohawk Industries,,2013-12-20
-MIDD,Middleby,2020-06-22,
-MIK,The Michaels Companies,2017-03-29,2019-09-23
-MIME,Mimecast,2021-08-30,2022-05-19
-MKSI,MKS Instruments,2017-11-22,
-MKTX,MarketAxess,2015-11-02,2019-07-01
-MLI,Mueller Industries,2024-11-26,
-MLKN,MillerKnoll,,2022-10-18
-MLM,Martin Marietta Materials,,2014-07-01
-MMS,Maximus Inc.,,
-MNK,Mallinckrodt,2013-06-28,2014-08-18
-MNK,Mallinckrodt,2017-07-26,2019-09-23
-MNST,Monster Beverage,,2012-06-28
-MODG,Topgolf Callaway Brands,,2023-12-18
-MOG-A,Moog Inc.,2026-03-23,
-MOH,Molina Healthcare,,2022-03-02
-MOH,Molina Healthcare,2026-07-22,
-MORN,"Morningstar, Inc.",2023-09-18,
-MP,MP Materials,2022-07-27,2024-09-23
-MP,MP Materials,2025-09-22,
-MPW,Medical Properties Trust,2016-05-23,2024-03-18
-MPWR,Monolithic Power Systems,2016-09-02,2021-02-12
-MRCY,Mercury Systems,2019-10-08,2023-08-21
-MRX,Medicis Pharmaceutical,,2012-12-11
-MSA,MSA Safety,,
-MSCC,Microsemi,2016-01-19,2018-05-31
-MSCI,MSCI Inc,,2018-04-04
-MSM,MSC Industrial Direct,,
-MTD,Mettler-Toledo,,2016-09-02
-MTDR,Matador Resources,2017-06-02,2020-06-22
-MTDR,Matador Resources,2022-04-04,
-MTG,MGIC Investment Corporation,2020-11-13,
-MTN,Vail Resorts,2023-09-18,
-MTSI,MACOM Technology Solutions,2022-08-17,
-MTX,Minerals Technologies,,2022-09-19
-MTZ,MasTec,2018-11-12,
-MUR,Murphy Oil,2017-07-26,
-MUSA,Murphy USA,2013-08-30,
-MZTI,The Marzetti Company,,
-NARI,Inari Medical,2022-05-03,2024-04-01
-NATI,National Instruments,,2023-10-12
-NAVI,Navient,2018-06-05,2023-06-19
-NBIX,Neurocrine Biosciences,2021-03-30,
-NBR,Nabors Industries,,2018-12-10
-NDN,99¢ Only Stores,,2012-01-13
-NDSN,Nordson,,2022-02-15
-NE,Noble Corporation,,2017-05-16
-NEOG,Neogen,2020-10-07,2025-03-24
-NEU,NewMarket Corporation,,
-NFG,National Fuel Gas,,
-NGVT,Ingevity Corp.,2019-03-18,2023-06-19
-NJR,New Jersey Resources,2016-03-08,
-NKTR,Nektar Therapeutics,2019-10-03,2021-12-20
-NLY,Annaly Capital Management,2022-09-19,
-NNN,NNN Reit,,
-NOG,Northern Oil & Gas,,2013-05-01
-NOV,NOV Inc.,2021-09-20,
-NOVT,Novanta,2022-07-26,
-NSA,National Storage Affiliates Trust,2021-05-14,2026-07-22
-NSP,Insperity,2018-11-06,2025-12-22
-NSR,Neustar,,2017-08-10
-NTCT,NetScout Systems,,2021-11-05
-NTNX,Nutanix,2025-09-22,
-NUS,Nu Skin Enterprises,2017-03-02,2022-12-01
-NUVA,NuVasive,2016-09-22,2022-12-19
-NVE,NV Energy,,2013-12-23
-NVR,NVR,,2019-09-26
-NVST,Envista Holdings,2021-04-12,
-NVT,nVent Electric plc,2018-05-02,
-NWE,NorthWestern Energy,2016-09-22,
-NXST,Nexstar Media Group,2022-12-01,
-NXT,Nextpower,2024-06-24,
-NYT,New York Times Company,,
-OA,Orbital ATK,,2018-06-11
-OAS,Oasis Petroleum,2018-05-01,2019-12-13
-OC,Owens Corning,2019-09-23,
-ODFL,Old Dominion Freight Line,2013-12-20,2019-12-02
-OGE,OGE Energy,,
-OGS,One Gas,2014-01-31,
-OHI,Omega Healthcare Investors,,
-OI,O-I Glass,2016-12-01,2021-03-30
-OII,Oceaneering International,,2019-10-30
-OIS,Oil States International,,2017-10-02
-OKTA,"Okta, Inc.",2025-05-01,
-OLED,Universal Display,2018-12-10,
-OLLI,Ollie's Bargain Outlet,2018-06-11,
-OLN,Olin Corporation,,
-OMCL,Omnicell,2022-07-05,2023-09-18
-OMI,Owens & Minor,,2018-03-19
-ONB,Old National Bank,2022-02-18,
-ONTO,Onto Innovation,2023-10-18,
-OPCH,Option Care Health,2021-08-30,
-ORA,Ormat Technologies,2022-07-07,
-ORI,Old Republic International,,
-OSK,Oshkosh,,
-OVV,Ovintiv,2023-06-19,
-OZK,Bank OZK,,
-OZRK,Bank of the Ozarks,2015-05-29,unknown
-P,Everpure,,
-PACW,PacWest Bancorp,,2023-04-05
-PAG,Penske Automotive Group,2023-08-04,
-PATH,UiPath,2026-01-02,
-PAY,VeriFone,,2018-08-20
-PB,Prosperity Bancshares,,
-PBF,PBF Energy,2017-04-28,2020-09-21
-PBF,PBF Energy,2022-12-01,
-PBH,Prestige Brands,2016-04-14,2021-01-29
-PBI,Pitney Bowes,2017-03-01,2019-04-03
-PCH,PotlatchDeltic,,2026-02-02
-PCTY,Paylocity,2020-04-27,
-PCX,Patriot Coal,,2012-06-29
-PDCE,PDC Energy,2022-02-15,2023-08-08
-PDCO,Patterson Companies,2018-03-19,2024-01-05
-PEB,Pebblebrook Hotel Trust,2018-12-03,2023-03-20
-PEGA,Pegasystems,2025-05-22,
-PEN,"Penumbra, Inc.",2019-09-23,
-PENN,Penn Entertainment,2018-10-10,2021-03-22
-PENN,Penn Entertainment,2022-09-19,2024-06-24
-PETM,PetSmart,,2012-10-04
-PFGC,Performance Food Group,2021-09-03,
-PGNY,Progyny,2021-04-20,2024-09-23
-PII,Polaris,,
-PINS,Pinterest,2025-12-22,
-PK,Park Hotels & Resorts,2019-09-18,
-PKG,Packaging Corporation of America,,2017-07-26
-PLCM,Polycom,,2016-09-30
-PLNT,Planet Fitness,2023-06-19,
-PLT,Plantronics,,2019-12-10
-PNFP,Pinnacle Financial Partners,2017-06-19,
-PNR,Pentair,,2012-09-28
-PNRA,Panera Bread,,2017-07-12
-POL,PolyOne,2014-04-30,unknown
-POOL,Pool Corporation,2016-01-27,2020-10-07
-POR,Portland General Electric,2022-06-29,
-POST,Post Holdings,2012-02-03,
-POWI,Power Integrations,2021-12-20,2025-12-22
-PPC,Pilgrim's Pride,2019-09-23,
-PPS,Post Properties,,2016-12-01
-PR,Permian Resources,2023-09-18,
-PRAH,PRA Health Sciences,2018-05-31,2021-07-02
-PRG,PROG Holdings,,2022-04-06
-PRGO,Perrigo,2021-09-20,2025-12-22
-PRI,Primerica,2013-02-12,
-PRSP,Perspecta Inc.,,2021-05-07
-PRXL,PAREXEL,,2017-10-02
-PSB,PS Business Parks,2019-04-11,2022-07-20
-PSN,Parsons Corporation,2024-09-23,
-PSS,Collective Brands,,2012-10-01
-PSTG,Pure Storage,2024-01-05,unknown
-PTC,PTC Inc.,,2021-04-20
-PTEN,Patterson-UTI Energy,,2020-05-26
-PVH,PVH Corp.,2022-09-19,
-PVTB,PrivateBancorp,2016-03-01,2017-06-26
-PXP,Plains Exploration & Production,,2013-05-30
-PZZA,Papa John's,2016-12-01,2023-09-18
-QCP,Quality Care Properties,2016-11-01,2018-08-01
-QDEL,QuidelOrtho,2020-06-22,2024-07-26
-QEP,QEP Resources,,2019-09-23
-QLGC,QLogic,,2013-06-21
-QLYS,Qualys,2020-06-22,
-QRVO,Qorvo,,2015-06-11
-R,Ryder,2017-06-19,
-RAH,Ralcorp,,2013-01-29
-RAMP,LiveRamp,,2022-06-21
-RAX,Rackspace,,2016-11-03
-RBA,RB Global,2024-06-24,
-RBC,RBC Bearings,2023-09-18,
-RCII,Rent-A-Center,,2016-02-09
-RCM,R1 RCM,2021-05-07,2024-11-20
-RDC,Rowan Companies,2014-08-18,2019-04-11
-RE,Everest Re,,2017-06-19
-REG,Regency Centers,,2017-03-02
-REGN,Regeneron Pharmaceuticals,,2013-04-30
-REXR,Rexford Industrial Realty,2020-08-03,
-REZI,Resideo Technologies,,2020-06-22
-RGA,Reinsurance Group of America,,
-RGEN,Repligen,2019-09-23,
-RGLD,Royal Gold,,
-RGS,Regis,,2013-12-20
-RH,RH,2016-04-06,2017-02-03
-RH,RH,2019-12-26,
-RIG,Transocean,2017-07-26,2020-09-21
-RJF,Raymond James Financial,,2017-03-20
-RLGY,Realogy,2018-09-20,2019-06-04
-RLI,RLI Corp.,2019-11-27,
-RMBS,Rambus,2023-12-18,
-RMD,ResMed,,2017-07-26
-RNR,RenaissanceRe,2014-01-02,
-ROIV,Roivant Sciences,2024-04-01,
-ROKU,"Roku, Inc.",2026-06-22,
-ROVI,Rovi,,2015-11-18
-RPM,RPM International,,
-RRC,Range Resources,2018-06-18,2019-09-23
-RRC,Range Resources,2022-03-02,
-RRD,RR Donnelley,2012-12-11,2016-09-27
-RRX,Regal Rexnord,,
-RS,"Reliance, Inc.",,
-RSH,RadioShack,,2012-09-28
-RUN,Sunrun,2020-08-03,2024-04-01
-RVBD,Riverbed Technology Inc,,2015-04-27
-RXO,RXO,2022-11-01,2023-01-05
-RYAM,Rayonier Advanced Materials,2014-06-27,2014-11-28
-RYAN,Ryan Specialty,2024-06-28,
-RYN,Rayonier,,
-SABR,Sabre,2017-04-19,2022-12-01
-SAFM,Sanderson Farms,2017-09-26,2022-07-27
-SAI,SAIC,2013-09-20,unknown
-SAIA,Saia,2021-08-30,
-SAIC,Science Applications Intl Corp,2013-09-27,
-SAIL,SailPoint Technologies,2020-10-05,2022-08-17
-SAM,Boston Beer Company,,
-SANM,Sanmina Corporation,2026-06-22,
-SARO,StandardAero,2026-01-22,
-SATS,EchoStar,2025-03-24,2026-03-23
-SBH,Sally Beauty Holdings,2016-09-27,2020-10-05
-SBNY,Signature Bank,,2021-12-20
-SBRA,Sabra Health Care REIT,2017-08-17,
-SCHL,Scholastic,,2013-12-20
-SCI,Service Corp Intl,,
-SCOR,comScore,2016-02-01,2017-02-13
-SEDG,SolarEdge,2019-10-18,2021-12-20
-SEIC,SEI Investments Company,,
-SF,Stifel,,
-SFD,Smithfield Foods,,2013-09-26
-SFG,StanCorp Financial,,2016-03-08
-SFM,Sprouts Farmers Market,2016-02-09,
-SGI,Somnigroup International,,
-SGMS,Scientific Games,,2014-04-17
-SGMS,Scientific Games,2018-01-03,unknown
-SHAW,The Shaw Group,,2013-02-12
-SHC,Sotera Health,2022-06-21,
-SIG,Signet Jewelers Ltd,2018-03-19,2019-09-23
-SIGI,Selective Insurance Group,2019-09-23,
-SIRI,SiriusXM,2026-06-11,
-SIRO,Sirona Dental Systems,2014-01-28,2016-03-01
-SITM,SiTime,2021-11-30,2023-06-19
-SITM,SiTime,2026-03-23,
-SIVB,SVB Financial,,2018-03-19
-SIX,Six Flags,2017-10-02,2022-07-26
-SKS,Saks,,2013-11-04
-SKT,Tanger Factory Outlet Centers,2014-10-17,2020-01-21
-SKX,Skechers,,2025-09-12
-SLAB,Silicon Labs,,
-SLG,SL Green Realty,2021-03-22,2023-03-20
-SLGN,Silgan Holdings,,
-SLH,Solera Holdings,,2016-03-04
-SLM,SLM Corp,2014-04-30,
-SLXP,Salix Pharmaceuticals,2013-07-30,2015-04-07
-SM,SM Energy,,2019-07-09
-SMCI,Supermicro,2022-12-22,2024-03-18
-SMG,Scotts Miracle-Gro Company,,
-SMTC,Semtech,,2015-06-30
-SMTC,Semtech,2019-04-11,2022-12-19
-SMTC,Semtech,2026-06-22,
-SN,SharkNinja,2026-05-18,
-SNPS,Synopsys,,2017-03-16
-SNV,Synovus,,2026-01-02
-SNX,TD Synnex,2015-12-29,
-SOLS,Solstice Advanced Materials,2026-03-23,
-SON,Sonoco,,
-SPN,Superior Energy Services,,2018-11-14
-SPWR,SunPower,2021-10-05,2023-06-19
-SPXC,SPX Technologies,2025-12-22,
-SR,Spire,,
-SRC,Spirit Realty,2019-07-09,2024-01-23
-SRCL,Stericycle,2018-12-03,2024-11-06
-SRPT,Sarepta Therapeutics,2024-06-03,2025-09-02
-SSB,South State Bank,2023-03-20,
-SSD,Simpson Manufacturing,2020-10-07,
-ST,Sensata Technologies,2023-09-18,
-STAA,STAAR Surgical,2021-01-29,2023-08-22
-STAG,STAG Industrial,2023-05-04,
-STE,STERIS plc,,2019-12-13
-STL,Sterling Bancorp,2017-10-02,2022-02-01
-STLD,Steel Dynamics,,2022-12-22
-STOR,Store Capital,2020-05-06,2023-02-06
-STR,Questar,,2016-09-16
-STRA,"Strategic Education, Inc.",,2013-08-30
-STRA,"Strategic Education, Inc.",2020-06-22,2021-08-03
-STRL,Sterling Infrastructure,2025-11-13,
-STWD,Starwood Property Trust,2023-03-20,
-SUG,Southern Union,,2012-03-26
-SUNE,SunEdison,,2016-04-04
-SVC,Service Properties Trust,,2021-06-04
-SVU,SuperValu,2012-04-30,2016-09-01
-SWAV,Shockwave Medical,2022-06-21,2024-06-03
-SWI,SolarWinds,2012-07-31,2016-02-09
-SWN,Southwestern Energy,2017-04-04,2019-12-13
-SWN,Southwestern Energy,2022-07-06,2024-10-01
-SWX,Southwest Gas Corp,2016-06-30,
-SXT,Sensient Technologies,,2023-09-18
-SYNA,Synaptics,,
-SYNH,Syneos Health,,2023-09-29
-TCBI,Texas Capital Bancshares,2017-03-29,
-TCF,TCF Financial Corporation,,2021-06-09
-TCO,Taubman Centers,,2020-12-29
-TDC,Teradata,2017-06-19,2025-03-24
-TDS,Telephone and Data Systems,,2021-12-20
-TDY,Teledyne Technologies,,2020-06-22
-TECD,Tech Data,,2020-06-30
-TECH,Bio-Techne,,2021-08-30
-TER,Teradyne,2013-12-20,2020-09-21
-TEX,Terex,,
-TFX,Teleflex,,2019-01-18
-TGI,Triumph Group,,2017-02-02
-TGNA,Tegna Inc.,2017-06-02,2024-09-23
-THC,Tenet Health,2016-04-18,
-THG,Hanover Insurance,,
-THO,Thor Industries,,
-THS,TreeHouse Foods,2014-12-09,2021-09-03
-TIBX,TIBCO Software,,2014-12-04
-TIME,Time Inc.,2014-06-06,2017-06-02
-TKO,TKO Group Holdings,,2025-03-24
-TKR,Timken,,
-TLAB,Tellabs,,2013-06-28
-TLN,Talen Energy,2015-06-01,2016-12-06
-TLN,Talen Energy,2025-08-28,
-TMHC,Taylor Morrison,2020-01-31,2026-07-24
-TMST,TimkenSteel,2014-06-30,2015-07-30
-TNB,Thomas & Betts,,2012-05-15
-TNDM,Tandem Diabetes Care,2021-09-20,2023-03-20
-TNL,Travel + Leisure Co.,,
-TOL,Toll Brothers,,
-TOST,"Toast, Inc.",2026-07-01,
-TPH,Tri Pointe Homes,,2022-05-03
-TPL,Texas Pacific Land Corporation,2024-06-24,2024-11-26
-TPX,Tempur-Pedic International,2012-05-15,unknown
-TR,Tootsie Roll,,2021-12-20
-TREE,LendingTree,2018-03-08,2021-10-22
-TREX,Trex,2019-04-01,
-TRGP,Targa Resources,2021-06-09,2022-10-12
-TRIP,Tripadvisor,2019-12-13,2023-09-18
-TRMB,Trimble Inc.,,2021-01-21
-TRMK,Trustmark Corporation,,2021-08-30
-TRN,Trinity Industries,,2022-06-21
-TRU,TransUnion,2025-09-22,
-TSCO,Tractor Supply,,2014-01-23
-TTC,Toro,,
-TTEK,Tetra Tech,2019-08-01,
-TTMI,TTM Technologies,2026-01-30,
-TTWO,Take-Two Interactive,2017-03-20,2018-03-19
-TUP,Tupperware Brands Corp,,2019-09-23
-TW,Towers Watson,,2016-01-05
-TWLO,Twilio,2025-08-19,
-TWTC,TW Telecom,,2014-11-04
-TXNM,TXNM Energy,,
-TXRH,Texas Roadhouse,2016-05-12,
-TYL,Tyler Technologies,2014-12-04,2020-06-22
-UAA,Under Armour,,2014-04-30
-UBSI,United Bankshares,2017-04-12,
-UDR,"UDR, Inc.",,2016-03-07
-UE,Urban Edge Properties,,2022-02-18
-UFPI,UFP Industries,2023-02-23,
-UFS,Domtar,,2021-04-20
-UGI,UGI Corp,,
-UHS,Universal Health Services,,2014-09-19
-ULS,UL Solutions,2025-12-22,
-ULTI,Ultimate Software Group,2014-08-14,2019-05-07
-UMBF,UMB Financial Corp.,2016-12-06,
-UMPQ,Umpqua Bank,2014-04-17,2023-03-01
-UNFI,United Natural Foods,2012-12-21,2018-11-12
-UNIT,Uniti Group,,2019-12-17
-UNM,Unum,2021-09-20,
-UNT,Unit Corp,,2015-07-01
-UNVR,Univar Solutions,2020-06-22,2023-08-04
-URBN,Urban Outfitters,2017-03-20,2022-06-21
-URI,United Rentals,,2014-09-19
-URS,URS,,2014-10-17
-USFD,US Foods,2023-03-20,
-UTHR,United Therapeutics,,
-UTIW,UTi Worldwide,,2014-05-28
-UVV,Universal,,2014-10-31
-VAC,Marriott Vacations Worldwide,2018-09-04,2025-12-22
-VAL,Valaris,,2017-06-02
-VAL,Valaris,,2019-09-23
-VAL,Valaris,2023-03-20,
-VC,Visteon,2018-07-11,
-VCI,Valassis Communications,,2014-01-31
-VFC,VF Corporation,2025-03-24,
-VIAV,Viavi Solutions,2026-06-22,
-VICR,Vicor Corporation,2021-12-20,2023-10-20
-VICR,Vicor Corporation,2026-03-23,
-VLY,Valley Bank,,
-VMI,Valmont Industries,,
-VNO,Vornado Realty Trust,2023-01-05,
-VNOM,Viper Energy,2024-09-23,
-VNT,Vontier,2021-03-22,
-VOYA,Voya Financial,2021-12-28,
-VRTX,Vertex Pharmaceuticals,,2013-09-20
-VSAT,Viasat,2016-05-03,2023-03-20
-VSCO,Victoria's Secret,2021-08-04,2023-06-19
-VSH,Vishay Intertechnology,,2024-12-23
-VSM,Versum Materials,2016-10-03,2019-10-08
-VST,Vistra,2023-09-18,2024-05-03
-VSTO,Vista Outdoor,,2017-03-20
-VSTS,Vestis,2023-10-02,2023-12-18
-VVC,Vectren,,2019-02-06
-VVV,Valvoline,2017-05-16,
-VYX,NCR Voyix,,2024-01-02
-WAB,Wabtec,,2019-02-27
-WABC,Westamerica Bancorporation,,2014-09-19
-WAFD,"WaFd, Inc.",,2023-03-20
-WAL,Western Alliance Bancorporation,2024-09-23,
-WBMD,WebMD,2016-04-04,2017-09-18
-WBS,Webster Bank,,
-WCC,WESCO International,2023-06-19,
-WCG,WellCare,,2018-09-17
-WCN,Waste Connections,,2016-05-31
-WDR,Waddell & Reed,,2017-04-28
-WEN,Wendy's,,2025-09-22
-WERN,Werner Enterprises,,2024-06-24
-WETF,WisdomTree Investments,2015-06-11,2017-03-29
-WEX,WEX Inc.,,
-WFRD,Weatherford International,2023-09-18,
-WGL,WGL Holdings,,2018-07-11
-WH,Wyndham Hotels & Resorts,,
-WHR,Whirlpool Corporation,2024-03-18,
-WIN,Windstream,,2015-06-01
-WING,Wingstop,2020-09-21,
-WLK,Westlake Corporation,2022-10-18,
-WLY,John Wiley & Sons,,2023-06-19
-WMG,Warner Music Group,2024-06-24,
-WMS,Advanced Drainage Systems,2023-03-20,
-WNR,Western Refining,2014-11-24,2017-06-02
-WOLF,Wolfspeed,,2024-09-23
-WOOF,VCA Inc.,,2017-09-18
-WOR,Worthington Industries,,2023-11-30
-WPC,W. P. Carey,2023-11-30,
-WPG,Washington Prime Group,2014-05-28,2018-05-01
-WPX,WPX Energy,2014-03-21,2021-01-07
-WR,Westar Energy (renamed Evergy),,2018-06-05
-WRB,W.R. Berkley,,2019-11-27
-WRI,Weingarten Realty,,2021-08-04
-WSM,"Williams-Sonoma, Inc.",,2025-03-24
-WSO,Watsco,,
-WST,West Pharmaceutical Services,2015-07-08,2020-05-18
-WTFC,Wintrust Financial,2017-04-03,
-WTRG,Essential Utilities,,
-WTS,Watts Water Technologies,2022-02-01,
-WTW,Weight Watchers,2018-09-18,unknown
-WU,Western Union,2021-12-20,2025-10-06
-WW,WW International,,2021-09-20
-WWAV,WhiteWave Foods,2013-05-23,2017-04-12
-WWD,"Woodward, Inc.",,
-WWE,World Wrestling Entertainment,2018-08-01,unknown
-WXS,Wright Express,2012-03-26,unknown
-WYND,Wyndham Destinations,2018-05-31,unknown
-X,U.S. Steel,2014-07-01,2025-06-24
-XEC,Cimarex Energy,,2014-06-20
-XEC,Cimarex Energy,2020-02-27,2021-10-05
-XLS,Exelis,,2015-05-29
-XPO,"XPO, Inc.",2019-03-18,
-XRAY,Dentsply Sirona,2024-04-03,
-XRX,Xerox,2021-03-22,2023-09-18
-Y,Alleghany,,2022-10-20
-YELP,Yelp,2018-12-12,2022-06-21
-YETI,Yeti Holdings,2021-01-21,
-ZBRA,Zebra Technologies,,2019-12-13
-ZD,Ziff Davis,,2024-09-23
-ZI,ZoomInfo,2023-06-19,unknown
-ZION,Zions Bancorporation,2024-03-18,
+symbol,name,added,removed,added_bound,removed_bound,added_source,removed_source
+AA,Alcoa,2021-12-20,,exact,,wikipedia,
+AAI,AirTran Holdings Inc.(1)(2),,2011-06-30,,no_later_than,,edgar
+AAL,American Airlines Group,2024-09-23,,exact,,wikipedia,
+AAN,Aaron’s Inc.,2009-06-30,2020-12-31,no_later_than,no_later_than,edgar,edgar
+AAON,AAON,2024-05-03,,exact,,wikipedia,
+AAP,Advance Auto Parts,,2015-07-08,,exact,,wikipedia
+AAXN,Axon Enterprise,2019-07-01,2021-03-31,exact,no_later_than,wikipedia,edgar
+ABMD,Abiomed,2016-03-30,2018-05-31,exact,exact,wikipedia,wikipedia
+ACC,American Campus Communities,2011-09-30,2022-08-10,no_later_than,exact,edgar,wikipedia
+ACF,AmeriCredit Corp.(1)(2),,2010-12-31,,no_later_than,,edgar
+ACHC,Acadia Healthcare,2017-04-06,2025-09-22,exact,exact,wikipedia,wikipedia
+ACI,Albertsons,,2013-12-20,,exact,,wikipedia
+ACI,Albertsons,2025-03-11,,exact,,wikipedia,
+ACIW,ACI Worldwide,,2023-11-13,,exact,,wikipedia
+ACM,AECOM,2009-06-30,,no_later_than,,edgar,
+ACV,Alberto-Culver Co.,2006-12-31,2011-06-30,no_later_than,no_later_than,edgar,edgar
+ADC,Agree Realty,2023-02-06,,exact,,wikipedia,
+ADCT,ADC Telecommunications Inc.(a),2007-06-30,2010-12-31,no_later_than,no_later_than,edgar,edgar
+ADNT,Adient,2018-08-22,2024-09-23,exact,exact,wikipedia,wikipedia
+ADS,Alliance Data Systems,,2013-12-20,,exact,,wikipedia
+ADS,Alliance Data Systems,2020-06-22,2022-06-30,exact,no_later_than,wikipedia,edgar
+ADTN,ADTRAN,,2014-10-31,,exact,,wikipedia
+ADVS,Advent Software,,2015-07-08,,exact,,wikipedia
+AEIS,Advanced Energy,2026-02-02,,exact,,wikipedia,
+AEO,American Eagle Outfitters,,2022-09-19,,exact,,wikipedia
+AF,Astoria Financial Corp.,,2015-03-31,,no_later_than,,edgar
+AFFX,Affymetrix Inc.(2),,2010-09-30,,no_later_than,,edgar
+AFG,American Financial Group,,,,,,
+AGCO,AGCO,,,,,,
+AGP,AMERIGROUP,2011-09-30,2012-12-21,no_later_than,exact,edgar,wikipedia
+AHL,Aspen Insurance Holdings,,2019-02-21,,exact,,wikipedia
+AHR,American Healthcare REIT,2026-02-02,,exact,,wikipedia,
+AINV,Apollo Investment,,2014-02-28,,exact,,wikipedia
+AIRC,Apartment Income REIT,2020-12-21,2024-06-28,exact,exact,wikipedia,wikipedia
+AIT,Applied Industrial Technologies,2024-03-18,,exact,,wikipedia,
+AIY,Apollo Investment Corp.,2008-03-31,2014-03-31,no_later_than,no_later_than,edgar,edgar
+AJG,Arthur J. Gallagher & Co.,,2016-05-27,,exact,,wikipedia
+AKRX,Akorn Inc.,2015-03-31,2018-12-31,no_later_than,no_later_than,edgar,edgar
+ALB,Albemarle Corporation,,2016-06-30,,exact,,wikipedia
+ALE,"Allete, Inc.",2018-03-07,2025-12-17,exact,exact,wikipedia,wikipedia
+ALEX,Alexander & Baldwin,2012-06-29,2020-02-07,exact,exact,wikipedia,wikipedia
+ALGM,Allegro MicroSystems,2022-12-19,,exact,,wikipedia,
+ALGN,Align Technology,2014-01-23,2017-06-19,exact,exact,wikipedia,wikipedia
+ALK,Alaska Air Group,,2016-05-12,,exact,,wikipedia
+ALK,Alaska Air Group,2025-03-24,,exact,,wikipedia,
+ALLY,Ally Financial,2023-09-18,,exact,,wikipedia,
+ALSN,Allison Transmission,2026-07-06,,exact,,wikipedia,
+ALTM,Arcadium Lithium,2024-01-02,2025-03-06,exact,exact,wikipedia,wikipedia
+ALTR,Altair Engineering,2024-06-24,2025-03-31,exact,exact,wikipedia,wikipedia
+ALV,Autoliv,2023-03-20,,exact,,wikipedia,
+AM,Antero Midstream,,2012-04-30,,exact,,wikipedia
+AM,Antero Midstream,2019-09-23,,exact,,wikipedia,
+AMCX,AMC Networks,2011-06-30,2020-12-02,no_later_than,exact,edgar,wikipedia
+AMD,Advanced Micro Devices,2013-09-20,2017-03-20,exact,exact,wikipedia,wikipedia
+AME,Ametek,,2013-09-20,,exact,,wikipedia
+AMED,Amedisys,2019-02-21,2025-08-19,exact,exact,wikipedia,wikipedia
+AMG,Affiliated Managers Group,2008-06-30,2014-06-30,no_later_than,exact,edgar,wikipedia
+AMG,Affiliated Managers Group,2019-12-13,,exact,,wikipedia,
+AMH,American Homes 4 Rent,2024-03-01,,exact,,wikipedia,
+AMKR,Amkor Technology,2021-02-16,,exact,,wikipedia,
+AMSG,AmSurg Corp,,2016-12-01,,exact,,wikipedia
+AMSGP,AmSurg Corp.,2015-12-31,2016-12-31,no_later_than,no_later_than,edgar,edgar
+AN,AutoNation,2017-08-08,,exact,,wikipedia,
+ANF,Abercrombie & Fitch Co. Class A,,2007-03-31,,no_later_than,,edgar
+ANF,Abercrombie & Fitch,2013-12-20,2016-10-03,exact,exact,wikipedia,wikipedia
+ANF,Abercrombie & Fitch,2024-07-22,,exact,,wikipedia,
+ANN,AnnTaylor Stores Corp.(2),,2015-09-30,,no_later_than,,edgar
+ANR,Alpha Natural Resources,2012-10-01,2014-04-30,exact,exact,wikipedia,wikipedia
+ANSS,ANSYS Inc,2008-09-30,2017-06-19,no_later_than,exact,edgar,wikipedia
+AOL,AOL Inc,,2015-06-25,,exact,,wikipedia
+AOS,A.O. Smith,2013-11-04,2017-07-26,exact,exact,wikipedia,wikipedia
+APG,APi Group,2025-06-24,,exact,,wikipedia,
+APH,Amphenol Corp. Class A,,2008-09-30,,no_later_than,,edgar
+APOL,Apollo Education,2013-06-28,2015-11-30,exact,exact,wikipedia,wikipedia
+APPF,AppFolio,2024-04-01,,exact,,wikipedia,
+APPS,Digital Turbine,2021-09-07,2022-06-29,exact,exact,wikipedia,wikipedia
+APY,Apergy Corp.,2018-05-10,2020-06-30,exact,no_later_than,wikipedia,edgar
+AR,Antero Resources,2022-10-20,,exact,,wikipedia,
+ARE,Alexandria Real Estate Equities,2007-12-31,2017-03-20,no_later_than,exact,edgar,wikipedia
+ARG,Airgas Inc.(1),,2009-09-30,,no_later_than,,edgar
+ARM,ArvinMeritor Inc.(1),,2009-06-30,,no_later_than,,edgar
+ARMK,Aramark,2023-03-20,,exact,,wikipedia,
+ARRS,Arris International,2014-06-20,2019-04-11,exact,exact,wikipedia,wikipedia
+ARW,Arrow Electronics,,,,,,
+ARWR,Arrowhead Pharmaceuticals,2019-12-13,2025-01-27,exact,exact,wikipedia,wikipedia
+ARWR,Arrowhead Pharmaceuticals,2026-02-09,,exact,,wikipedia,
+ASB,Associated Bank,2007-06-30,,no_later_than,,edgar,
+ASGN,ASGN Inc.,2018-10-11,2026-03-23,exact,exact,wikipedia,wikipedia
+ASH,Ashland Global,2008-12-31,,no_later_than,,edgar,
+ASNA,Ascena Retail Group,,2016-11-10,,exact,,wikipedia
+ATGE,Adtalem Global Education,2017-06-30,2021-07-07,no_later_than,exact,edgar,wikipedia
+ATI,ATI Inc.,2015-07-01,2020-09-21,exact,exact,wikipedia,wikipedia
+ATI,ATI Inc.,2025-03-24,,exact,,wikipedia,
+ATK,Alliant Techsystems Inc.(1)(2),,2015-03-31,,no_later_than,,edgar
+ATML,Atmel,,2016-04-06,,exact,,wikipedia
+ATO,Atmos Energy Corp.,2009-12-31,2019-03-31,no_later_than,no_later_than,edgar,edgar
+ATR,AptarGroup,2008-03-31,,no_later_than,,edgar,
+ATW,Atwood Oceanics,2009-12-31,2016-01-19,no_later_than,exact,edgar,wikipedia
+AVAV,AeroVironment,2025-07-18,,exact,,wikipedia,
+AVCT,Avocent Corp.(1)(2),,2009-12-31,,no_later_than,,edgar
+AVNS,Avanos Medical,2018-09-30,2021-05-17,no_later_than,exact,edgar,wikipedia
+AVNT,Avient,2020-09-30,,no_later_than,,edgar,
+AVP,Avon Products,2015-03-31,2018-03-19,no_later_than,exact,edgar,wikipedia
+AVT,Avnet,,,,,,
+AVTR,Avantor,2024-07-26,,exact,,wikipedia,
+AXON,Axon Enterprise,2021-03-31,2023-05-04,no_later_than,exact,edgar,wikipedia
+AXTA,Axalta,2023-03-20,,exact,,wikipedia,
+AYI,Acuity Brands,2010-06-30,2016-05-03,no_later_than,exact,edgar,wikipedia
+AYI,Acuity Brands,2018-06-18,,exact,,wikipedia,
+AZPN,Aspen Technology,2021-05-17,2025-03-11,exact,exact,wikipedia,wikipedia
+AZTA,Azenta,2021-12-31,2024-11-25,no_later_than,exact,edgar,wikipedia
+BAH,Booz Allen Hamilton,2025-12-22,,exact,,wikipedia,
+BBBY,Bed Bath & Beyond,2017-07-26,2020-06-22,exact,exact,wikipedia,wikipedia
+BBG,Bill Barrett Corporation,2007-09-30,2014-09-30,no_later_than,exact,edgar,wikipedia
+BBWI,"Bath & Body Works, Inc.",2025-03-24,,exact,,wikipedia,
+BC,Brunswick,2013-12-20,,exact,,wikipedia,
+BCO,Brink's,,2014-06-20,,exact,,wikipedia
+BCO,Brink's,2017-09-18,,exact,,wikipedia,
+BDC,Belden Inc.,2014-06-30,,exact,,wikipedia,
+BEAV,B/E Aerospace,2007-12-31,2017-04-19,no_later_than,exact,edgar,wikipedia
+BEC,Beckman Coulter Inc.(1),,2011-06-30,,no_later_than,,edgar
+BERY,Berry Global,2023-06-19,2025-05-01,exact,exact,wikipedia,wikipedia
+BEZ,Baldor Electric Co.,2010-09-30,2011-03-31,no_later_than,no_later_than,edgar,edgar
+BFH,Bread Financial,2022-06-30,2022-11-02,no_later_than,exact,edgar,wikipedia
+BGC,General Cable,2011-09-30,2014-05-30,no_later_than,exact,edgar,wikipedia
+BHF,Brighthouse Financial,2019-04-03,,exact,,wikipedia,
+BID,Sotheby's,,2019-10-03,,exact,,wikipedia
+BIG,Big Lots,2013-03-31,2019-03-18,no_later_than,exact,edgar,wikipedia
+BILL,Bill Holdings,2024-12-23,,exact,,wikipedia,
+BIO,Bio-Rad Laboratories,2008-12-31,2020-06-22,no_later_than,exact,edgar,wikipedia
+BIO,Bio-Rad Laboratories,2024-09-23,,exact,,wikipedia,
+BIVV,Bioverativ,2017-02-03,2018-03-08,exact,exact,wikipedia,wikipedia
+BJ,BJ’s Wholesale Club Inc.(1)(2),,2011-09-30,,no_later_than,,edgar
+BJ,BJ's Wholesale Club,2019-10-30,,exact,,wikipedia,
+BKC,Burger King Holdings Inc.,2010-03-31,2010-12-31,no_later_than,no_later_than,edgar,edgar
+BKH,Black Hills Corporation,,,,,,
+BKNG,Priceline.com Inc.,2008-09-30,2009-12-31,no_later_than,no_later_than,edgar,edgar
+BKS,Barnes & Noble,,2013-09-27,,exact,,wikipedia
+BLC,Belo Corp.,2006-09-30,2009-06-30,no_later_than,no_later_than,edgar,edgar
+BLD,TopBuild Corp.,2020-06-30,2026-07-01,exact,exact,wikipedia,wikipedia
+BLDR,Builders FirstSource,2020-08-17,2023-12-18,exact,exact,wikipedia,wikipedia
+BLKB,Blackbaud,2017-06-29,2026-06-22,exact,exact,wikipedia,wikipedia
+BLUD,Immucor Inc.(a),2009-06-30,2011-09-30,no_later_than,no_later_than,edgar,edgar
+BMR,BioMed Realty Trust,2012-06-30,2016-01-27,no_later_than,exact,edgar,wikipedia
+BMRN,BioMarin Pharmaceutical,2024-06-24,,exact,,wikipedia,
+BMS,Bemis Company,2014-12-04,2019-06-07,exact,exact,wikipedia,wikipedia
+BOBE,Bob Evans Farms,,2014-06-06,,exact,,wikipedia
+BOH,Bank of Hawaii,,2023-06-01,,exact,,wikipedia
+BR,Broadridge Financial Solutions,2007-03-31,2018-06-18,no_later_than,exact,edgar,wikipedia
+BRBR,BellRing Brands,2022-03-14,2026-06-22,exact,exact,wikipedia,wikipedia
+BRCD,Brocade Communications,2016-05-31,2017-11-22,exact,exact,wikipedia,wikipedia
+BRE,BRE Properties,2007-12-31,2014-04-01,no_later_than,exact,edgar,wikipedia
+BRKR,Bruker,2021-12-02,,exact,,wikipedia,
+BRKS,Brooks Automation,2021-01-07,2021-12-31,exact,no_later_than,wikipedia,edgar
+BRO,Brown & Brown,,2021-09-20,,exact,,wikipedia
+BROS,Dutch Bros Inc.,2026-02-02,,exact,,wikipedia,
+BRX,Brixmor Property Group,2019-02-06,,exact,,wikipedia,
+BSY,Bentley Systems,2025-10-06,,exact,,wikipedia,
+BTH,Blyth Inc.(1),,2009-12-31,,no_later_than,,edgar
+BTSG,BrightSpring Health Services,2026-07-17,,exact,,wikipedia,
+BTU,Peabody Energy Corp.,,2006-12-31,,no_later_than,,edgar
+BTU,Peabody Energy,2014-09-19,2015-06-30,exact,exact,wikipedia,wikipedia
+BUCY,Bucyrus International Inc.,2008-12-31,2011-09-30,no_later_than,no_later_than,edgar,edgar
+BURL,Burlington Stores,2023-11-07,,exact,,wikipedia,
+BWA,BorgWarner Inc.,,2011-12-31,,no_later_than,,edgar
+BWA,BorgWarner,2025-12-22,,exact,,wikipedia,
+BWLD,Buffalo Wild Wings,2015-03-31,2018-02-05,no_later_than,exact,edgar,wikipedia
+BWXT,BWX Technologies,2023-06-19,,exact,,wikipedia,
+BXS,BancorpSouth Bank,2017-12-31,2021-12-31,no_later_than,no_later_than,edgar,edgar
+BYD,Boyd Gaming Corp.,,2011-06-30,,no_later_than,,edgar
+BYD,Boyd Gaming,2018-02-13,,exact,,wikipedia,
+BYI,Bally Technologies,2010-03-31,2014-11-24,no_later_than,exact,edgar,wikipedia
+BZH,Beazer Homes USA Inc.(1),,2007-03-31,,no_later_than,,edgar
+BZH,Beazer Homes USA Inc.(1),2007-06-30,2007-09-30,no_later_than,no_later_than,edgar,edgar
+CAA,CalAtlantic Homes,2015-12-31,2018-02-13,no_later_than,exact,edgar,wikipedia
+CAB,Cabela's,2012-10-04,2017-09-26,exact,exact,wikipedia,wikipedia
+CABO,Cable One,2015-06-30,2024-04-22,exact,exact,wikipedia,wikipedia
+CACI,CACI International,2018-12-03,,exact,,wikipedia,
+CADE,Cadence Bank,2021-12-31,2026-02-02,no_later_than,exact,edgar,wikipedia
+CAKE,Cheesecake Factory,,2020-06-22,,exact,,wikipedia
+CALX,Calix,2022-01-04,2024-03-18,exact,exact,wikipedia,wikipedia
+CALY,Callaway Golf Co.,,2009-12-31,,no_later_than,,edgar
+CAM,Cameron International Corp.(1),2006-06-30,2008-03-31,no_later_than,no_later_than,edgar,edgar
+CAR,Avis Budget Group Inc.,2006-09-30,2008-12-31,no_later_than,no_later_than,edgar,edgar
+CAR,Avis Budget Group,2016-09-16,,exact,,wikipedia,
+CARS,Cars.com,2017-06-02,2019-09-23,exact,exact,wikipedia,wikipedia
+CART,Maplebear Inc.,2025-01-14,,exact,,wikipedia,
+CASY,Casey's,2015-06-25,2026-04-09,exact,exact,wikipedia,wikipedia
+CATY,Cathay Bank,,2023-09-18,,exact,,wikipedia
+CAVA,Cava Group,2025-03-31,,exact,,wikipedia,
+CBB,Cincinnati Bell Inc.(2),,2011-03-31,,no_later_than,,edgar
+CBOE,CBOE Holdings,2012-03-31,2017-03-01,no_later_than,exact,edgar,wikipedia
+CBRL,CBRL Group Inc.,,2008-09-30,,no_later_than,,edgar
+CBRL,Cracker Barrel,2015-06-29,2023-03-20,exact,exact,wikipedia,wikipedia
+CBSH,Commerce Bancshares,2008-06-30,,no_later_than,,edgar,
+CBST,Cubist Pharmaceuticals,2013-09-26,unknown,exact,,wikipedia,
+CBT,Cabot Corp,,,,,,
+CC,Chemours,2015-06-30,2016-02-01,exact,exact,wikipedia,wikipedia
+CC,Chemours,2017-01-04,2025-03-24,exact,exact,wikipedia,wikipedia
+CCK,Crown Holdings,2023-06-19,,exact,,wikipedia,
+CCMP,Cabot Microelectronics Corp.(1)(2),,2006-09-30,,no_later_than,,edgar
+CCMP,CMC Materials,2019-12-02,2022-07-07,exact,exact,wikipedia,wikipedia
+CCP,Care Capital Properties,2015-09-30,2017-08-17,no_later_than,exact,edgar,wikipedia
+CDAY,Ceridian,2019-10-30,2021-09-20,exact,exact,wikipedia,wikipedia
+CDE,Coeur Mining,2026-06-22,,exact,,wikipedia,
+CDK,CDK Global,2014-09-30,2022-07-06,exact,exact,wikipedia,wikipedia
+CDNS,Cadence Design Systems,,2017-09-18,,exact,,wikipedia
+CDP,COPT Defense Properties,2023-09-30,,no_later_than,,edgar,
+CDW,CDW Corp.(1),,2007-12-31,,no_later_than,,edgar
+CEB,CEB Inc.,,2017-04-05,,exact,,wikipedia
+CECO,Career Education Corp.(2),,2011-12-31,,no_later_than,,edgar
+CEIX,CONSOL Energy Inc.,2016-03-31,2017-12-31,no_later_than,no_later_than,edgar,edgar
+CELH,Celsius Holdings,2022-08-10,,exact,,wikipedia,
+CEPH,Cephalon Inc.(1)(2),,2008-12-31,,no_later_than,,edgar
+CERN,Cerner Corp.,2007-03-31,2010-06-30,no_later_than,no_later_than,edgar,edgar
+CF,CF Industries Holdings Inc.,2007-12-31,2008-09-30,no_later_than,no_later_than,edgar,edgar
+CFL,Brinks Home Security Holdings Inc.(a),2008-12-31,2010-06-30,no_later_than,no_later_than,edgar,edgar
+CFR,Frost Bank,,,,,,
+CFX,Colfax,2019-03-18,2022-06-30,exact,no_later_than,wikipedia,edgar
+CG,Carlyle Group (The),2023-11-30,,exact,,wikipedia,
+CGCO,Commerce Group Inc.,2007-06-30,2008-06-30,no_later_than,no_later_than,edgar,edgar
+CGNX,Cognex,2014-09-19,,exact,,wikipedia,
+CHD,Church & Dwight,,2015-12-29,,exact,,wikipedia
+CHDN,Churchill Downs Inc.,2016-06-24,,exact,,wikipedia,
+CHE,Chemed Corp.,2018-06-18,,exact,,wikipedia,
+CHFC,Chemical Financial,2016-09-01,2019-08-01,exact,exact,wikipedia,wikipedia
+CHH,Choice Hotels,2019-12-10,,exact,,wikipedia,
+CHK,Chesapeake Energy,2018-03-19,2020-02-27,exact,exact,wikipedia,wikipedia
+CHK,Chesapeake Energy,2023-08-21,2024-12-31,exact,no_later_than,wikipedia,edgar
+CHRD,Chord Energy,2023-03-20,,exact,,wikipedia,
+CHRS,Charming Shoppes Inc. (1),2006-09-30,2008-12-31,no_later_than,no_later_than,edgar,edgar
+CHRW,CH Robinson Worldwide Inc.,,2007-03-31,,no_later_than,,edgar
+CHS,Chico's FAS,,2017-07-19,,exact,,wikipedia
+CHSI,Catalyst Health Solutions Inc.(a)(b),2011-06-30,2012-09-30,no_later_than,no_later_than,edgar,edgar
+CHWY,Chewy,2024-11-06,,exact,,wikipedia,
+CHX,ChampionX,2020-06-30,2025-07-18,no_later_than,exact,edgar,wikipedia
+CIEN,Ciena,2009-12-31,2026-02-09,no_later_than,exact,edgar,wikipedia
+CIT,CIT Group,2020-01-21,2022-01-04,exact,exact,wikipedia,wikipedia
+CIVI,Civitas Resources,2023-09-29,2026-01-30,exact,exact,wikipedia,wikipedia
+CLB,Core Laboratories,2017-07-12,2020-04-27,exact,exact,wikipedia,wikipedia
+CLC,CLARCOR Inc.,2011-12-31,2017-03-01,no_later_than,exact,edgar,wikipedia
+CLF,Cleveland-Cliffs Inc.,2007-09-30,2009-12-31,no_later_than,no_later_than,edgar,edgar
+CLF,Cleveland-Cliffs,2014-04-01,2015-04-24,exact,exact,wikipedia,wikipedia
+CLF,Cleveland-Cliffs,2021-03-01,,exact,,wikipedia,
+CLGX,CoreLogic,2010-06-30,2021-06-09,no_later_than,exact,edgar,wikipedia
+CLH,Clean Harbors,2008-12-31,,no_later_than,,edgar,
+CLI,Mack-Cali Realty,,2020-09-21,,exact,,wikipedia
+CMA,Comerica,2024-12-23,2026-02-02,exact,exact,wikipedia,wikipedia
+CMC,Commercial Metals,2006-06-30,,no_later_than,,edgar,
+CMD,Cantel Medical Corporation,2018-03-19,2021-06-02,exact,exact,wikipedia,wikipedia
+CMG,Chipotle Mexican Grill Inc. Class A(a)(b),2007-12-31,2011-06-30,no_later_than,no_later_than,edgar,edgar
+CMP,Compass Minerals,2010-12-31,2022-02-01,no_later_than,exact,edgar,wikipedia
+CNC,Centene,2014-09-03,2016-03-30,exact,exact,wikipedia,wikipedia
+CNH,CNH Industrial,2024-09-23,,exact,,wikipedia,
+CNK,Cinemark Holdings,2012-06-30,2021-08-30,no_later_than,exact,edgar,wikipedia
+CNL,CLECO,,2016-04-14,,exact,,wikipedia
+CNM,Core & Main,2023-11-13,,exact,,wikipedia,
+CNO,CNO Financial Group,2015-04-07,,exact,,wikipedia,
+CNQR,Concur Technologies,2010-12-31,2014-12-04,no_later_than,exact,edgar,wikipedia
+CNVR,Conversant,2014-03-31,2014-12-09,no_later_than,exact,edgar,wikipedia
+CNW,Con-way Inc.,2006-06-30,2015-12-31,no_later_than,no_later_than,edgar,edgar
+CNX,CNX Resources,2016-03-04,,exact,,wikipedia,
+CNXC,Concentrix,2020-12-01,2026-06-22,exact,exact,wikipedia,wikipedia
+COHR,Coherent Corp.,2017-03-20,2022-07-05,exact,exact,wikipedia,wikipedia
+COHR,Coherent Corp.,2017-03-31,2026-03-23,no_later_than,exact,edgar,wikipedia
+COKE,Coca-Cola Consolidated,2022-07-20,,exact,,wikipedia,
+COLB,Columbia Banking System,2023-03-01,,exact,,wikipedia,
+COLM,Columbia Sportswear,2019-12-17,,exact,,wikipedia,
+CONE,CyrusOne,2017-03-01,2022-03-30,exact,exact,wikipedia,wikipedia
+COO,The Cooper Companies,2011-03-31,2016-09-22,no_later_than,exact,edgar,wikipedia
+COR,CoreSite,2017-08-10,2021-12-28,exact,exact,wikipedia,wikipedia
+COTY,Coty,2020-09-21,2026-06-22,exact,exact,wikipedia,wikipedia
+CPE,Callon Petroleum,2017-09-18,2019-09-26,exact,exact,wikipedia,wikipedia
+CPRI,Capri Holdings,2021-01-07,,exact,,wikipedia,
+CPRT,Copart,,2018-07-02,,exact,,wikipedia
+CPT,Camden,2007-12-31,2022-04-04,no_later_than,exact,edgar,wikipedia
+CPWR,Compuware,2011-12-31,2014-12-08,no_later_than,exact,edgar,wikipedia
+CR,Crane,2023-04-04,,exact,,wikipedia,
+CRBG,Corebridge Financial,2025-12-17,,exact,,wikipedia,
+CRC,California Resources,2014-11-28,2016-02-25,exact,exact,wikipedia,wikipedia
+CREE,Cree Inc.(1)(2),,2007-03-31,,no_later_than,,edgar
+CREE,Cree Inc.(1)(2),2007-06-30,2021-12-31,no_later_than,no_later_than,edgar,edgar
+CRI,Carter's,2012-01-13,2024-12-23,exact,exact,wikipedia,wikipedia
+CRK,Comstock Resources,2008-12-31,2012-02-03,no_later_than,exact,edgar,wikipedia
+CRL,Charles River Laboratories,,2021-05-14,,exact,,wikipedia
+CRNC,Cerence,2021-07-07,2022-03-14,exact,exact,wikipedia,wikipedia
+CROX,Crocs,2021-06-02,,exact,,wikipedia,
+CRS,Carpenter Technology,2007-06-30,2020-08-03,no_later_than,exact,edgar,wikipedia
+CRS,Carpenter Technology,2024-12-23,,exact,,wikipedia,
+CRUS,Cirrus Logic,2016-09-21,,exact,,wikipedia,
+CSAL,Communications Sales & Leasing,2015-04-24,unknown,exact,,wikipedia,
+CSC,Computer Sciences Corp.,2015-11-30,2017-04-04,exact,exact,wikipedia,wikipedia
+CSGS,CSG Systems International Inc.(2),,2008-06-30,,no_later_than,,edgar
+CSL,Carlisle Companies,,,,,,
+CST,CST Brands,2013-05-01,2017-06-29,exact,exact,wikipedia,wikipedia
+CTB,Cooper Tire & Rubber Co.,2017-02-13,2018-06-18,exact,exact,wikipedia,wikipedia
+CTLT,Catalent,2015-09-30,2020-09-21,no_later_than,exact,edgar,wikipedia
+CTRE,CareTrust REIT,2026-03-23,,exact,,wikipedia,
+CTSH,Cognizant Technology Solutions Corp.(1)(2),,2006-12-31,,no_later_than,,edgar
+CTV,CommScope Inc.(1)(2),,2011-03-31,,no_later_than,,edgar
+CUBE,CubeSmart,2022-12-19,,exact,,wikipedia,
+CUZ,Cousins Properties Inc.,2007-06-30,2011-12-31,no_later_than,no_later_than,edgar,edgar
+CUZ,Cousins Properties,2016-10-05,,exact,,wikipedia,
+CVD,Covance Inc.(2),,2015-03-31,,no_later_than,,edgar
+CVEO,Civeo,2014-05-30,2014-12-16,exact,exact,wikipedia,wikipedia
+CVET,Covetrus,2019-02-11,2019-10-30,exact,exact,wikipedia,wikipedia
+CVG,Convergys,2009-12-31,2018-10-10,no_later_than,exact,edgar,wikipedia
+CVLT,CommVault Systems,2013-03-31,,no_later_than,,edgar,
+CVSA,DeVry Inc.(1)(2),,2009-06-30,,no_later_than,,edgar
+CVSA,DeVry Inc.(1)(2),2012-09-30,2017-06-30,no_later_than,no_later_than,edgar,edgar
+CW,Curtiss-Wright,2016-02-01,,exact,,wikipedia,
+CXT,Crane NXT,2023-06-30,,no_later_than,,edgar,
+CXW,CoreCivic,2008-03-31,2020-08-17,no_later_than,exact,edgar,wikipedia
+CY,Cypress Semiconductor,,2020-04-13,,exact,,wikipedia
+CY,Cypress Semiconductor Corp.(1)(2),2011-03-31,2020-06-30,no_later_than,no_later_than,edgar,edgar
+CYH,Community Health Systems,,2016-10-05,,exact,,wikipedia
+CYN,City National Corp,,2015-11-02,,exact,,wikipedia
+CYT,Cytec Industries,,2015-12-14,,exact,,wikipedia
+CYTK,Cytokinetics,2024-03-18,,exact,,wikipedia,
+CZR,Caesars Entertainment,2019-02-04,2020-07-24,exact,exact,wikipedia,wikipedia
+CZR,Caesars Entertainment,2019-03-31,2021-03-22,no_later_than,exact,edgar,wikipedia
+DAN,Dana Incorporated,2015-03-31,2023-06-19,no_later_than,exact,edgar,wikipedia
+DAR,Darling Ingredients,2020-01-29,,exact,,wikipedia,
+DBD,Diebold Nixdorf,,2018-05-10,,exact,,wikipedia
+DBRN,Dress Barn Inc.(a),2010-06-30,2010-12-31,no_later_than,no_later_than,edgar,edgar
+DBX,Dropbox,2023-06-19,,exact,,wikipedia,
+DCI,Donaldson Company,,,,,,
+DCT,DCT Industrial Trust,2016-04-04,2018-08-22,exact,exact,wikipedia,wikipedia
+DDD,3D Systems,2013-05-08,2018-05-10,exact,exact,wikipedia,wikipedia
+DDR,Developers Diversified Realty Corp.(1),,2007-03-31,,no_later_than,,edgar
+DDS,Dillard's,2017-02-28,2020-06-22,exact,exact,wikipedia,wikipedia
+DECK,Deckers Brands,2010-12-31,2024-03-18,no_later_than,exact,edgar,wikipedia
+DEI,Douglas Emmett,2015-06-30,2023-06-19,no_later_than,exact,edgar,wikipedia
+DF,Dean Foods Co.(2),,2006-06-30,,no_later_than,,edgar
+DF,Dean Foods,2013-05-23,2018-03-19,exact,exact,wikipedia,wikipedia
+DHC,Diversified Healthcare Trust,2020-03-31,2020-05-27,no_later_than,exact,edgar,wikipedia
+DINO,HF Sinclair,2022-03-31,,no_later_than,,edgar,
+DIS,Walt Disney Co. (The),2009-12-31,2010-03-31,no_later_than,no_later_than,edgar,edgar
+DKS,Dick's Sporting Goods,2006-12-31,,no_later_than,,edgar,
+DLB,Dolby,2023-08-22,,exact,,wikipedia,
+DLPH,Delphi Technologies,2017-12-06,2020-10-07,exact,exact,wikipedia,wikipedia
+DLTR,Dollar Tree Stores Inc.(1)(2),,2011-12-31,,no_later_than,,edgar
+DLX,Deluxe Corporation,,2020-08-03,,exact,,wikipedia
+DNB,Dun & Bradstreet Corp.(2),,2008-12-31,,no_later_than,,edgar
+DNB,Dun & Bradstreet Corp,2017-04-05,2019-02-11,exact,exact,wikipedia,wikipedia
+DNKN,Dunkin' Brands,2015-04-27,2020-12-21,exact,exact,wikipedia,wikipedia
+DNOW,DNOW Inc.,2014-05-30,2020-06-22,exact,exact,wikipedia,wikipedia
+DNR,Denbury Resources,,2017-03-20,,exact,,wikipedia
+DNR,Denbury Resources Inc.(2),2015-03-31,2017-03-31,no_later_than,no_later_than,edgar,edgar
+DO,Diamond Offshore Drilling,2016-09-30,2019-03-18,exact,exact,wikipedia,wikipedia
+DOC,Physicians Realty Trust,2020-05-18,2024-03-01,exact,exact,wikipedia,wikipedia
+DOCN,DigitalOcean,2026-04-09,,exact,,wikipedia,
+DOCS,Doximity,2023-06-19,,exact,,wikipedia,
+DOCU,Docusign,2024-10-11,,exact,,wikipedia,
+DPL,DPL Inc.,,2011-12-31,,no_later_than,,edgar
+DPZ,Domino's Pizza,2013-05-30,2020-05-06,exact,exact,wikipedia,wikipedia
+DRC,Dresser-Rand Group,2011-06-30,2015-06-29,no_later_than,exact,edgar,wikipedia
+DRE,Duke Realty,2007-09-30,2017-07-26,no_later_than,exact,edgar,wikipedia
+DRIV,Digital River Inc.(a),2007-06-30,2011-12-31,no_later_than,no_later_than,edgar,edgar
+DRQ,Dril-Quip,2010-12-31,2019-02-04,no_later_than,exact,edgar,wikipedia
+DST,DST Systems,,2018-04-19,,exact,,wikipedia
+DT,Dynatrace,2022-09-19,,exact,,wikipedia,
+DTM,DT Midstream,2021-07-02,,exact,,wikipedia,
+DUOL,Duolingo,2024-04-22,,exact,,wikipedia,
+DV,DeVry,2012-09-28,unknown,exact,,wikipedia,
+DWA,DreamWorks Animation,2008-06-30,2016-08-26,no_later_than,exact,edgar,wikipedia
+DY,Dycom Industries Inc.(1)(2),,2009-12-31,,no_later_than,,edgar
+DY,Dycom Industries,2016-08-19,2023-03-20,exact,exact,wikipedia,wikipedia
+DY,Dycom Industries,2025-12-22,,exact,,wikipedia,
+EAC,Encore Acquisition Co.,2007-03-31,2010-03-31,no_later_than,no_later_than,edgar,edgar
+EAT,Brinker International,,2020-06-25,,exact,,wikipedia
+EBS,Emergent BioSolutions,2020-07-24,2021-11-30,exact,exact,wikipedia,wikipedia
+EDR,Education Realty Trust,2016-05-27,2018-09-20,exact,exact,wikipedia,wikipedia
+EEFT,Euronet Worldwide,2022-02-01,,exact,,wikipedia,
+EGN,Energen,2007-12-31,2018-12-03,no_later_than,exact,edgar,wikipedia
+EGP,EastGroup Properties,2019-05-07,,exact,,wikipedia,
+EHC,Encompass Health,2018-01-02,,exact,,wikipedia,
+ELAN,Elanco,2025-09-02,,exact,,wikipedia,
+ELF,e.l.f. Beauty,2024-01-23,,exact,,wikipedia,
+ELS,Equity Lifestyle Properties,2023-07-24,,exact,,wikipedia,
+ELY,Callaway Golf,2021-06-15,2022-09-30,exact,no_later_than,wikipedia,edgar
+EME,Emcor,2016-06-30,2025-09-22,exact,exact,wikipedia,wikipedia
+ENDP,Endo Pharmaceuticals Holdings Inc.(a),2007-06-30,2014-03-31,no_later_than,no_later_than,edgar,edgar
+ENDP,Endo International,2017-03-02,2018-06-18,exact,exact,wikipedia,wikipedia
+ENH,Endurance Specialty Holdings,2015-07-30,2017-03-29,exact,exact,wikipedia,wikipedia
+ENOV,Enovis,2022-06-30,2025-01-14,no_later_than,exact,edgar,wikipedia
+ENPH,Enphase Energy,2020-04-27,2021-01-07,exact,exact,wikipedia,wikipedia
+ENR,Energizer,,2023-09-18,,exact,,wikipedia
+ENS,EnerSys,2016-08-26,,exact,,wikipedia,
+ENSG,Ensign Group,2024-10-01,,exact,,wikipedia,
+ENTG,Entegris,2025-03-06,,exact,,wikipedia,
+ENV,Envestnet,2021-06-09,2023-11-07,exact,exact,wikipedia,wikipedia
+EPC,Edgewell Personal Care,2015-06-30,2021-03-22,exact,exact,wikipedia,wikipedia
+EPR,EPR Properties,2016-01-19,,exact,,wikipedia,
+EQH,Equitable Holdings,2023-12-18,,exact,,wikipedia,
+EQIX,Equinix Inc.(a),2009-06-30,2015-03-31,no_later_than,no_later_than,edgar,edgar
+EQT,Equitable Resources Inc.,,2008-12-31,,no_later_than,,edgar
+EQT,EQT Corporation,2018-11-13,2022-10-03,exact,exact,wikipedia,wikipedia
+EQY,Equity One,2007-06-30,2017-03-02,no_later_than,exact,edgar,wikipedia
+ERI,Eldorado Resorts,2018-08-20,2020-09-30,exact,no_later_than,wikipedia,edgar
+ERIE,Erie Indemnity,2023-08-08,2024-09-23,exact,exact,wikipedia,wikipedia
+ES,Northeast Utilities,,2009-06-30,,no_later_than,,edgar
+ESAB,ESAB,2022-04-05,,exact,,wikipedia,
+ESI,ITT Educational Services,,2012-12-31,,exact,,wikipedia
+ESL,Esterline Technologies,2011-09-30,2019-03-18,no_later_than,exact,edgar,wikipedia
+ESNT,Essent Group Ltd.,2020-05-26,,exact,,wikipedia,
+ESS,Essex Property,2008-09-30,2014-04-01,no_later_than,exact,edgar,wikipedia
+ESV,Ensco plc,2016-03-30,unknown,exact,,wikipedia,
+ETM,Entercom Communications Corp.(2),,2008-12-31,,no_later_than,,edgar
+ETRN,Equitrans Midstream,2018-11-13,2024-07-22,exact,exact,wikipedia,wikipedia
+ETSY,Etsy,2019-09-23,2020-09-21,exact,exact,wikipedia,wikipedia
+EV,Eaton Vance,,2021-03-01,,exact,,wikipedia
+EVR,Evercore,2018-03-26,,exact,,wikipedia,
+EW,Edwards Lifesciences Corp.(1)(2),,2011-06-30,,no_later_than,,edgar
+EWBC,East West Bancorp,2010-12-31,,no_later_than,,edgar,
+EXE,Expand Energy,2024-12-31,2025-03-24,no_later_than,exact,edgar,wikipedia
+EXEL,Exelixis,2018-07-02,,exact,,wikipedia,
+EXLS,EXL Service,2022-10-03,,exact,,wikipedia,
+EXP,Eagle Materials,2013-04-30,,exact,,wikipedia,
+EXPD,Expeditors International Washington Inc.(1),,2007-12-31,,no_later_than,,edgar
+EXPO,"Exponent, Inc.",2023-03-22,,exact,,wikipedia,
+EXR,Extra Space Storage,2013-01-29,2016-01-19,exact,exact,wikipedia,wikipedia
+EXTN,Exterran Holdings Inc.,2007-09-30,2011-12-31,no_later_than,no_later_than,edgar,edgar
+FAF,First American Financial Corporation,2010-06-30,,no_later_than,,edgar,
+FAST,Fastenal Co.,,2008-09-30,,no_later_than,,edgar
+FBHS,Fortune Brands Home & Security,2011-12-31,2016-06-24,no_later_than,exact,edgar,wikipedia
+FBIN,Fortune Brands Innovations,2022-12-19,,exact,,wikipedia,
+FCFS,FirstCash,2019-09-23,,exact,,wikipedia,
+FCN,FTI Consulting,2008-12-31,2017-08-08,no_later_than,exact,edgar,wikipedia
+FCN,FTI Consulting,2019-10-24,,exact,,wikipedia,
+FCS,Fairchild Semiconductor,,2016-09-21,,exact,,wikipedia
+FDS,FactSet,2008-09-30,2021-12-20,no_later_than,exact,edgar,wikipedia
+FEIC,FEI Company,2014-04-01,2016-09-22,exact,exact,wikipedia,wikipedia
+FFIN,First Financial Bankshares,2019-03-22,,exact,,wikipedia,
+FFIV,F5 Networks Inc.(1)(2),,2010-12-31,,no_later_than,,edgar
+FG,F&G Annuities & Life Inc,2025-12-31,2026-03-31,no_later_than,no_later_than,edgar,edgar
+FHI,Federated Hermes,2020-03-31,,no_later_than,,edgar,
+FHN,First Horizon,2013-06-21,,exact,,wikipedia,
+FICO,Fair Isaac,,2023-03-20,,exact,,wikipedia
+FII,Federated Investors,2012-12-31,2020-03-31,exact,no_later_than,wikipedia,edgar
+FIS,Certegy Inc.,,2006-12-31,,no_later_than,,edgar
+FIVE,Five Below,2018-04-19,,exact,,wikipedia,
+FIX,Comfort Systems USA,2023-12-18,2025-12-22,exact,exact,wikipedia,wikipedia
+FL,Foot Locker,,2016-04-04,,exact,,wikipedia
+FL,Foot Locker,2019-08-09,2023-09-18,exact,exact,wikipedia,wikipedia
+FLEX,Flex Ltd.,2024-11-25,2026-06-22,exact,exact,wikipedia,wikipedia
+FLG,Flagstar Bank,2024-12-31,,no_later_than,,edgar,
+FLIR,FLIR Systems Inc.(a),2008-06-30,2009-06-30,no_later_than,no_later_than,edgar,edgar
+FLO,Flowers Foods,2008-12-31,2026-05-18,no_later_than,exact,edgar,wikipedia
+FLR,Fluor,2019-06-04,,exact,,wikipedia,
+FLS,Flowserve Corp.(1)(2),,2008-12-31,,no_later_than,,edgar
+FLS,Flowserve,2021-03-22,,exact,,wikipedia,
+FMC,FMC Corp.(2),,2009-09-30,,no_later_than,,edgar
+FMER,FirstMerit,,2016-08-19,,exact,,wikipedia
+FN,Fabrinet,2024-09-23,,exact,,wikipedia,
+FNB,FNB Corporation,2016-02-09,,exact,,wikipedia,
+FND,Floor & Decor,2023-10-20,,exact,,wikipedia,
+FNF,Fidelity National Financial,,2014-06-30,,exact,,wikipedia
+FNF,Fidelity National Financial,2023-09-18,,exact,,wikipedia,
+FNFG,First Niagara Bank,,2016-07-29,,exact,,wikipedia
+FOE,Ferro Corp.(1),,2009-06-30,,no_later_than,,edgar
+FOSL,Fossil Inc.(a),2009-06-30,2012-06-30,no_later_than,no_later_than,edgar,edgar
+FOSL,Fossil Group,2016-01-05,2017-03-20,exact,exact,wikipedia,wikipedia
+FOUR,Shift4,2024-11-20,,exact,,wikipedia,
+FOXF,Fox Factory,2020-09-21,2024-04-03,exact,exact,wikipedia,wikipedia
+FR,First Industrial Realty Trust,2016-03-30,,exact,,wikipedia,
+FRT,Federal Realty Investment Trust,2007-12-31,2016-02-01,no_later_than,exact,edgar,wikipedia
+FSLR,First Solar,2017-03-20,2022-12-19,exact,exact,wikipedia,wikipedia
+FSS,Federal Signal Corp.(1),,2010-06-30,,no_later_than,,edgar
+FST,Forest Oil,,2013-06-28,,exact,,wikipedia
+FTI,FMC Technologies Inc.(1)(2),,2009-06-30,,no_later_than,,edgar
+FTI,TechnipFMC,2025-09-12,,exact,,wikipedia,
+FTNT,Fortinet,2014-01-28,2018-10-11,exact,exact,wikipedia,wikipedia
+FTO,Frontier Oil Corp.,2007-03-31,2011-09-30,no_later_than,no_later_than,edgar,edgar
+FTR,Frontier Communications,2017-03-20,2017-12-06,exact,exact,wikipedia,wikipedia
+FULT,Fulton Financial Corporation,2008-12-31,2023-06-19,no_later_than,exact,edgar,wikipedia
+FUN,Six Flags Entertainment Corp.,2017-09-30,2019-09-30,no_later_than,no_later_than,edgar,edgar
+FYBR,Frontier Communications,2022-10-03,2026-01-22,exact,exact,wikipedia,wikipedia
+G,Genpact,2021-05-03,,exact,,wikipedia,
+GAP,Gap Inc.,2024-09-30,,no_later_than,,edgar,
+GATX,GATX,,,,,,
+GBCI,Glacier Bancorp,2020-06-22,,exact,,wikipedia,
+GDDY,GoDaddy,2023-09-18,2024-06-24,exact,exact,wikipedia,wikipedia
+GDI,Gardner Denver,,2013-07-30,,exact,,wikipedia
+GDOT,Green Dot Corp,2019-01-18,2020-01-31,exact,exact,wikipedia,wikipedia
+GEF,"Greif, Inc.",2008-09-30,,no_later_than,,edgar,
+GEO,GEO Group,2017-03-16,2020-11-13,exact,exact,wikipedia,wikipedia
+GES,Guess? Inc,2007-12-31,2016-11-01,no_later_than,exact,edgar,wikipedia
+GETY,Getty Images Inc.,2007-09-30,2008-09-30,no_later_than,no_later_than,edgar,edgar
+GGG,Graco Inc.,,,,,,
+GHC,Washington Post Co. (The) Class B(1),,2007-12-31,,no_later_than,,edgar
+GHC,Graham Holdings,2014-09-19,,exact,,wikipedia,
+GHL,Greenhill & Co.,2010-03-31,2014-06-30,no_later_than,exact,edgar,wikipedia
+GLPI,Gaming and Leisure Properties,2023-09-18,,exact,,wikipedia,
+GLT,Glatfelter Co.(1),,2007-06-30,,no_later_than,,edgar
+GMCR,Keurig Green Mountain,,2014-03-21,,exact,,wikipedia
+GME,GameStop Corp. Class A(1)(2),,2007-12-31,,no_later_than,,edgar
+GME,GameStop,2016-04-22,,exact,,wikipedia,
+GMED,Globus Medical,2016-12-06,,exact,,wikipedia,
+GNRC,Generac Holdings,2020-02-07,2021-03-22,exact,exact,wikipedia,wikipedia
+GNTX,Gentex,,,,,,
+GNW,Genworth Financial,2015-11-18,2021-05-03,exact,exact,wikipedia,wikipedia
+GO,Grocery Outlet,2020-06-25,2024-06-24,exact,exact,wikipedia,wikipedia
+GPK,Graphic Packaging,2023-06-19,,exact,,wikipedia,
+GPN,Global Payments Inc,2007-03-31,2016-04-22,no_later_than,exact,edgar,wikipedia
+GPOR,Gulfport Energy Corp,2013-12-31,2018-12-12,no_later_than,exact,edgar,wikipedia
+GPRO,Gen-Probe,,2012-07-31,,exact,,wikipedia
+GPS,Gap,2022-02-03,2024-09-30,exact,no_later_than,wikipedia,edgar
+GRUB,Grubhub,2019-08-09,2021-06-15,exact,exact,wikipedia,wikipedia
+GT,Goodyear Tire & Rubber,2019-02-27,2026-07-06,exact,exact,wikipedia,wikipedia
+GTLS,Chart Industries,2022-03-30,2026-07-17,exact,exact,wikipedia,wikipedia
+GTM,ZoomInfo,2025-06-30,2026-03-23,no_later_than,exact,edgar,wikipedia
+GVA,Granite Construction,,2019-12-13,,exact,,wikipedia
+GWR,Genesee & Wyoming,2012-10-01,2019-12-26,exact,exact,wikipedia,wikipedia
+GWRE,Guidewire Software,2025-01-27,,exact,,wikipedia,
+GXO,GXO Logistics,2021-08-02,,exact,,wikipedia,
+GXP,Great Plains Energy,,2018-06-05,,exact,,wikipedia
+H,Hyatt,2023-10-12,,exact,,wikipedia,
+HAE,Haemonetics,2018-06-18,,exact,,wikipedia,
+HAIN,Hain Celestial Group,2013-12-23,2022-10-03,exact,exact,wikipedia,wikipedia
+HALO,Halozyme,2020-11-13,,exact,,wikipedia,
+HBI,Hanesbrands Inc. (1),2006-09-30,2015-03-31,no_later_than,no_later_than,edgar,edgar
+HBI,Hanesbrands,2021-12-20,2023-03-20,exact,exact,wikipedia,wikipedia
+HCC,HCC Insurance Holdings Inc.(1),,2015-12-31,,no_later_than,,edgar
+HCSG,Healthcare Services Group,2018-02-05,2021-09-20,exact,exact,wikipedia,wikipedia
+HE,Hawaiian Electric Industries,,2023-09-18,,exact,,wikipedia
+HELE,Helen of Troy Limited,2016-05-31,2024-09-23,exact,exact,wikipedia,wikipedia
+HEW,Hewitt Associates Inc. Class A(a),2009-06-30,2010-12-31,no_later_than,no_later_than,edgar,edgar
+HFC,HollyFrontier,2011-06-30,2018-06-18,no_later_than,exact,edgar,wikipedia
+HFC,HollyFrontier,2021-06-04,2022-03-31,exact,no_later_than,wikipedia,edgar
+HGV,Hilton Grand Vacations,2023-03-20,,exact,,wikipedia,
+HHS,Harte-Hanks Inc.,,2011-06-30,,no_later_than,,edgar
+HI,Hillenbrand Industries Inc.,,2008-06-30,,no_later_than,,edgar
+HII,Huntington Ingalls,2011-03-31,2018-01-03,no_later_than,exact,edgar,wikipedia
+HIMS,Hims & Hers Health,2025-03-24,,exact,,wikipedia,
+HIW,Highwoods Properties,,2023-09-18,,exact,,wikipedia
+HL,Hecla Mining,2025-12-22,,exact,,wikipedia,
+HLI,Houlihan Lokey,2023-12-18,,exact,,wikipedia,
+HLNE,Hamilton Lane,2024-09-23,,exact,,wikipedia,
+HLS,HealthSouth,2016-11-03,2018-01-02,exact,exact,wikipedia,wikipedia
+HLX,Helix Energy Solutions Group Inc.,2008-09-30,2015-12-31,no_later_than,no_later_than,edgar,edgar
+HMA,Health Management Associates,,2014-01-28,,exact,,wikipedia
+HME,Home Properties Inc.,2011-09-30,2015-12-31,no_later_than,no_later_than,edgar,edgar
+HMN,Horace Mann Educators Corp.,,2010-06-30,,no_later_than,,edgar
+HMSY,HMS Holdings Corp.(a),2011-12-31,2015-09-30,no_later_than,no_later_than,edgar,edgar
+HNI,HNI Corporation,,2021-02-16,,exact,,wikipedia
+HNT,Health Net,,2016-03-30,,exact,,wikipedia
+HOG,Harley-Davidson,2020-06-22,,exact,,wikipedia,
+HOLX,Hologic,2007-12-31,2016-03-30,no_later_than,exact,edgar,wikipedia
+HOMB,Home BancShares,2017-06-02,,exact,,wikipedia,
+HP,Helmerich & Payne Inc.(1),,2010-03-31,,no_later_than,,edgar
+HPP,Hudson Pacific Properties,2020-05-27,2022-09-19,exact,exact,wikipedia,wikipedia
+HQY,HealthEquity,2018-09-17,,exact,,wikipedia,
+HR,Healthcare Realty Trust,2016-03-07,2022-07-21,exact,exact,wikipedia,wikipedia
+HR,Healthcare Realty Trust,2016-03-31,,no_later_than,,edgar,
+HRB,H&R Block,2020-09-21,,exact,,wikipedia,
+HRC,Hillrom,2008-06-30,2021-12-20,no_later_than,exact,edgar,wikipedia
+HRL,Hormel Foods Corp.,,2009-06-30,,no_later_than,,edgar
+HSC,Harsco,,2015-06-30,,exact,,wikipedia
+HSH,The Hillshire Brands,2012-06-28,2014-08-14,exact,exact,wikipedia,wikipedia
+HSIC,Henry Schein Inc.(2),,2015-03-31,,no_later_than,,edgar
+HSNI,HSN Inc,,2018-01-02,,exact,,wikipedia
+HTA,Healthcare Trust of America,2022-07-21,unknown,exact,,wikipedia,
+HTSI,Harris Teeter Supermarkets,2012-03-31,2014-01-28,no_later_than,exact,edgar,wikipedia
+HTZ,Hertz,2023-03-20,2024-06-24,exact,exact,wikipedia,wikipedia
+HUBB,Hubbell Incorporated,,2023-10-18,,exact,,wikipedia
+HWC,Hancock Whitney,2011-06-30,,no_later_than,,edgar,
+HXL,Hexcel,2020-06-22,,exact,,wikipedia,
+HYH,Halyard Health,2014-10-31,2018-09-30,exact,no_later_than,wikipedia,edgar
+IAA,"IAA, Inc.",2020-08-03,2023-03-22,exact,exact,wikipedia,wikipedia
+IART,Integra LifeSciences,2018-06-05,2024-06-24,exact,exact,wikipedia,wikipedia
+IBKR,Interactive Brokers,2018-01-02,2025-08-28,exact,exact,wikipedia,wikipedia
+IBOC,Intl Bancshares Corp,2009-06-30,,no_later_than,,edgar,
+ICUI,ICU Medical,2018-03-19,2023-11-30,exact,exact,wikipedia,wikipedia
+IDA,Idacorp,,,,,,
+IDCC,InterDigital,2012-09-30,2021-04-12,no_later_than,exact,edgar,wikipedia
+IDCC,InterDigital,2026-03-23,,exact,,wikipedia,
+IDTI,Integrated Device Technology,,2019-04-01,,exact,,wikipedia
+IDXX,IDEXX Laboratories,2008-09-30,2017-01-04,no_later_than,exact,edgar,wikipedia
+IESC,IES Holdings,2026-07-01,,exact,,wikipedia,
+IEX,IDEX Corp.,2007-09-30,2019-08-09,no_later_than,exact,edgar,wikipedia
+IGT,International Game Technology,2014-06-20,unknown,exact,,wikipedia,
+IIVI,II-VI,2019-09-26,2022-09-30,exact,no_later_than,wikipedia,edgar
+ILG,"ILG, Inc.",2017-09-18,2018-09-04,exact,exact,wikipedia,wikipedia
+ILMN,"Illumina, Inc.",2024-06-24,,exact,,wikipedia,
+IM,Ingram Micro,,2016-12-06,,exact,,wikipedia
+IMN,Imation Corp.(1),,2009-12-31,,no_later_than,,edgar
+INCR,INC Research,2017-04-05,unknown,exact,,wikipedia,
+INFA,Informatica Corp.,2009-09-30,2015-09-30,no_later_than,no_later_than,edgar,edgar
+INGM,Ingram Micro Inc. Class A(2),,2016-12-31,,no_later_than,,edgar
+INGN,Inogen,2018-09-30,2019-09-18,no_later_than,exact,edgar,wikipedia
+INGR,Ingredion,2007-12-31,,no_later_than,,edgar,
+INT,World Fuel Services,2011-12-31,2021-08-04,no_later_than,exact,edgar,wikipedia
+IPGP,IPG Photonics,2014-12-08,2018-03-07,exact,exact,wikipedia,wikipedia
+IPGP,IPG Photonics,2022-06-21,,exact,,wikipedia,
+IPI,Intrepid Potash,2010-03-31,2014-06-27,no_later_than,exact,edgar,wikipedia
+IR,Gardner Denver Inc.,2010-06-30,2013-12-31,no_later_than,no_later_than,edgar,edgar
+IRDM,Iridium Communications,2021-02-12,2025-12-22,exact,exact,wikipedia,wikipedia
+IRT,Independence Realty Trust,2022-05-19,,exact,,wikipedia,
+ISCA,International Speedway,,2019-10-18,,exact,,wikipedia
+ISIL,Intersil,,2017-02-28,,exact,,wikipedia
+ISRG,Intuitive Surgical Inc.(1)(2),,2008-06-30,,no_later_than,,edgar
+IT,Gartner,,2017-04-05,,exact,,wikipedia
+ITRI,Itron Inc.(a),2009-06-30,2015-06-30,no_later_than,no_later_than,edgar,edgar
+ITT,ITT Inc.,2011-12-31,,no_later_than,,edgar,
+J,Jacobs Engineering Group Inc.(1)(2),,2007-12-31,,no_later_than,,edgar
+JACK,Jack in the Box,2015-07-08,2022-02-03,exact,exact,wikipedia,wikipedia
+JAH,Jarden,2012-08-07,2016-04-18,exact,exact,wikipedia,wikipedia
+JAZZ,Jazz Pharmaceuticals,2020-09-21,,exact,,wikipedia,
+JBGS,JBG Smith,2017-07-19,2023-03-20,exact,exact,wikipedia,wikipedia
+JBHT,Hunt (J.B.) Transport Services Inc.(1),,2015-06-30,,no_later_than,,edgar
+JBL,Jabil,2014-11-04,2023-12-18,exact,exact,wikipedia,wikipedia
+JBLU,JetBlue,,2023-09-18,,exact,,wikipedia
+JBLU,JetBlue Airways Corp.(1)(2),2006-06-30,2023-09-30,no_later_than,no_later_than,edgar,edgar
+JCG,J. Crew Group Inc.,2008-09-30,2011-03-31,no_later_than,no_later_than,edgar,edgar
+JCOM,j2 Global,2015-12-14,2021-12-31,exact,no_later_than,wikipedia,edgar
+JCP,J. C. Penney,2013-12-31,2017-06-02,no_later_than,exact,edgar,wikipedia
+JDSU,JDS Uniphase,2013-12-20,unknown,exact,,wikipedia,
+JEF,Jefferies,,2013-02-28,,exact,,wikipedia
+JEF,Jefferies,2019-09-26,,exact,,wikipedia,
+JHG,Janus Henderson,,2026-07-01,,exact,,wikipedia
+JKHY,Jack Henry & Associates,,2018-11-13,,exact,,wikipedia
+JLL,Jones Lang LaSalle,2007-09-30,,no_later_than,,edgar,
+JNS,Janus Capital Group Inc.,2011-12-31,2017-06-30,no_later_than,no_later_than,edgar,edgar
+JOY,Joy Global,,2017-04-06,,exact,,wikipedia
+JWA,John Wiley & Sons Inc,2019-09-30,2022-06-30,no_later_than,no_later_than,edgar,edgar
+JWN,Nordstrom,2020-06-22,2025-05-22,exact,exact,wikipedia,wikipedia
+KAR,KAR Auction Services,2019-09-23,2021-12-02,exact,exact,wikipedia,wikipedia
+KATE,Kate Spade & Company,2014-03-21,2017-07-12,exact,exact,wikipedia,wikipedia
+KBH,KB Home,2009-12-31,,no_later_than,,edgar,
+KBR,"KBR, Inc.",2007-06-30,,no_later_than,,edgar,
+KCI,Kinetic Concepts Inc.(a)(b),2007-12-31,2011-12-31,no_later_than,no_later_than,edgar,edgar
+KD,Kyndryl,2021-11-05,,exact,,wikipedia,
+KELYA,Kelly Services Inc. Class A(1),,2009-12-31,,no_later_than,,edgar
+KEM,KEMET Corp.(1)(2),,2008-09-30,,no_later_than,,edgar
+KEX,Kirby Corporation,2009-09-30,,no_later_than,,edgar,
+KEYS,Keysight Technologies,2014-10-31,2018-11-13,exact,exact,wikipedia,wikipedia
+KFY,Korn/Ferry,,2012-10-01,,exact,,wikipedia
+KLXI,KLX Inc.,2014-12-16,2018-09-18,exact,exact,wikipedia,wikipedia
+KMPR,Kemper Corporation,,2026-03-23,,exact,,wikipedia
+KMT,Kennametal,,2023-03-20,,exact,,wikipedia
+KMX,CarMax Inc.(1)(2),,2010-06-30,,no_later_than,,edgar
+KN,Knowles Corporation,2014-02-28,2018-05-02,exact,exact,wikipedia,wikipedia
+KNF,Knife River Corporation,2023-06-01,,exact,,wikipedia,
+KNSL,Kinsale Capital Group,2020-12-29,,exact,,wikipedia,
+KNX,Swift Transportation Co. Inc.(2),,2007-06-30,,no_later_than,,edgar
+KNX,Knight-Swift,2017-07-12,,exact,,wikipedia,
+KODK,Eastman Kodak Co.(a)(b),2010-12-31,2011-12-31,no_later_than,no_later_than,edgar,edgar
+KRC,Kilroy Realty Corp,2013-02-28,,exact,,wikipedia,
+KRG,Kite Realty Group Trust,2021-10-22,,exact,,wikipedia,
+KRYS,Krystal Biotech,2026-07-24,,exact,,wikipedia,
+KSS,Kohl's,2020-09-21,2023-10-03,exact,exact,wikipedia,wikipedia
+KSU,Kansas City Southern,,2013-05-23,,exact,,wikipedia
+KTOS,Kratos Defense & Security Solutions,2025-09-22,,exact,,wikipedia,
+KWK,Quicksilver Resources,,2013-05-23,,exact,,wikipedia
+LAB,LaBranche & Co. Inc.(1)(2),,2006-03-31,,no_later_than,,edgar
+LAD,Lithia Motors,2020-09-01,,exact,,wikipedia,
+LAMR,Lamar Advertising Company,2007-12-31,,no_later_than,,edgar,
+LANC,Lancaster Colony Corp.(1),,2025-09-30,,no_later_than,,edgar
+LAUR,Laureate Education Inc.(1)(2),,2007-09-30,,no_later_than,,edgar
+LDOS,Leidos Holdings,2008-09-30,2019-08-09,no_later_than,exact,edgar,wikipedia
+LDOS,SAIC Inc.,2013-12-31,2019-09-30,no_later_than,no_later_than,edgar,edgar
+LEA,Lear Corp.,,2006-03-31,,no_later_than,,edgar
+LEA,Lear Corp.,2006-06-30,2008-12-31,no_later_than,no_later_than,edgar,edgar
+LEA,Lear,2019-12-13,,exact,,wikipedia,
+LECO,Lincoln Electric,2006-06-30,,no_later_than,,edgar,
+LEE,Lee Enterprises Inc.,,2008-09-30,,no_later_than,,edgar
+LEG,Leggett & Platt,2021-12-20,2024-06-24,exact,exact,wikipedia,wikipedia
+LFUS,Littelfuse,2016-11-28,,exact,,wikipedia,
+LGND,Ligand Pharmaceuticals,2018-11-13,2021-09-07,exact,exact,wikipedia,wikipedia
+LHCG,LHC Group,2020-04-13,2023-02-23,exact,exact,wikipedia,wikipedia
+LHO,LaSalle Hotel Properties,2014-06-30,2018-12-03,exact,exact,wikipedia,wikipedia
+LHX,Harris Corp.,,2008-09-30,,no_later_than,,edgar
+LII,Lennox International,2009-06-30,2024-12-23,no_later_than,exact,edgar,wikipedia
+LITE,Lumentum,2018-04-04,2026-03-23,exact,exact,wikipedia,wikipedia
+LIVN,LivaNova,2015-12-31,,no_later_than,,edgar,
+LKQ,LKQ Corp,2008-12-31,2016-05-23,no_later_than,exact,edgar,wikipedia
+LM,Legg Mason Inc.,,2006-06-30,,no_later_than,,edgar
+LM,Legg Mason,2016-12-01,2020-08-03,exact,exact,wikipedia,wikipedia
+LNCE,Snyder's-Lance,2016-02-25,2018-03-26,exact,exact,wikipedia,wikipedia
+LNCR,Lincare Holdings,,2012-08-07,,exact,,wikipedia
+LNT,Alliant Energy,,2016-06-30,,exact,,wikipedia
+LNTH,Lantheus Holdings,2022-10-12,,exact,,wikipedia,
+LNW,Light & Wonder,2022-06-30,2025-11-13,no_later_than,exact,edgar,wikipedia
+LOGM,LogMeIn,2017-02-02,2020-09-01,exact,exact,wikipedia,wikipedia
+LOPE,Grand Canyon Education,2019-12-13,,exact,,wikipedia,
+LPNT,LifePoint Health Inc.,,2018-11-06,,exact,,wikipedia
+LPS,Lender Processing Services,2008-09-30,2014-01-02,no_later_than,exact,edgar,wikipedia
+LPT,Liberty Property Trust,,2020-01-29,,exact,,wikipedia
+LPX,Louisiana-Pacific,2006-12-31,,no_later_than,,edgar,
+LRCX,Lam Research Corp.(2),,2012-06-30,,no_later_than,,edgar
+LSCC,Lattice Semiconductor Corp.(1)(2),,2007-12-31,,no_later_than,,edgar
+LSCC,Lattice Semiconductor,2021-04-20,,exact,,wikipedia,
+LSI,Life Storage,2016-09-30,2023-07-24,no_later_than,exact,edgar,wikipedia
+LSTR,Landstar System,2009-06-30,,no_later_than,,edgar,
+LTM,Life Time Fitness Inc.,2007-09-30,2015-06-10,no_later_than,exact,edgar,wikipedia
+LW,Lamb Weston Holdings,2016-11-10,2018-12-03,exact,exact,wikipedia,wikipedia
+LXK,Lexmark International,2012-09-28,2016-11-28,exact,exact,wikipedia,wikipedia
+LYV,Live Nation Entertainment,2014-06-20,2019-12-13,exact,exact,wikipedia,wikipedia
+LZ,Lubrizol Corp.,,2011-09-30,,no_later_than,,edgar
+M,Macy's,2021-12-20,,exact,,wikipedia,
+MAA,Mid-America Apartments,2013-12-31,2016-12-01,no_later_than,exact,edgar,wikipedia
+MAC,Macerich,,2013-05-08,,exact,,wikipedia
+MAC,Macerich,2019-12-13,2023-06-19,exact,exact,wikipedia,wikipedia
+MAN,ManpowerGroup,,2025-09-22,,exact,,wikipedia
+MANH,Manhattan Associates,2015-06-10,,exact,,wikipedia,
+MANT,ManTech International Corp. Class A(a),2008-12-31,2014-06-30,no_later_than,no_later_than,edgar,edgar
+MASI,Masimo,2008-12-31,2014-06-20,no_later_than,exact,edgar,wikipedia
+MASI,Masimo,2017-03-20,2026-06-11,exact,exact,wikipedia,wikipedia
+MAT,Mattel,2019-06-07,,exact,,wikipedia,
+MATK,Martek Biosciences Corp.(1)(2),,2006-09-30,,no_later_than,,edgar
+MATK,Martek Biosciences Corp.(1)(2),2006-12-31,2007-06-30,no_later_than,no_later_than,edgar,edgar
+MATW,Matthews International,2007-06-30,2014-05-30,no_later_than,exact,edgar,wikipedia
+MATX,Matson,2012-09-30,2014-03-21,no_later_than,exact,edgar,wikipedia
+MBFI,MB Financial,2016-07-29,2019-03-22,exact,exact,wikipedia,wikipedia
+MCHP,Microchip Technology Inc.,,2007-09-30,,no_later_than,,edgar
+MCRL,Micrel Inc.(1)(2),,2007-12-31,,no_later_than,,edgar
+MCRS,MICROS Systems,2009-06-30,2014-09-03,no_later_than,exact,edgar,wikipedia
+MCY,Mercury General,,2022-09-19,,exact,,wikipedia
+MD,Mednax,2010-06-30,2020-11-13,no_later_than,exact,edgar,wikipedia
+MDC,MDC Holdings,2006-03-31,2016-05-31,no_later_than,exact,edgar,wikipedia
+MDP,Meredith Corp,2011-03-31,2020-04-27,no_later_than,exact,edgar,wikipedia
+MDR,McDermott International,2018-05-10,2019-09-23,exact,exact,wikipedia,wikipedia
+MDRX,Allscripts Healthcare Solutions,2010-09-30,2020-06-22,no_later_than,exact,edgar,wikipedia
+MDSO,Medidata Solutions,2017-06-26,2019-10-24,exact,exact,wikipedia,wikipedia
+MDU,MDU Resources,,2024-10-11,,exact,,wikipedia
+ME,Mariner Energy Inc.(a),2008-12-31,2010-12-31,no_later_than,no_later_than,edgar,edgar
+MEDP,Medpace,2020-09-21,,exact,,wikipedia,
+MEG,Media General Inc. Class A(1),,2008-12-31,,no_later_than,,edgar
+MENT,Mentor Graphics,,2017-04-03,,exact,,wikipedia
+MFE,McAfee Inc.(2),,2008-12-31,,no_later_than,,edgar
+MGI,MoneyGram International Inc.,,2008-03-31,,no_later_than,,edgar
+MHK,Mohawk Industries,,2013-12-20,,exact,,wikipedia
+MIDD,Middleby,2020-06-22,,exact,,wikipedia,
+MIK,The Michaels Companies,2017-03-29,2019-09-23,exact,exact,wikipedia,wikipedia
+MIME,Mimecast,2021-08-30,2022-05-19,exact,exact,wikipedia,wikipedia
+MKSI,MKS Instruments,2017-11-22,,exact,,wikipedia,
+MKTX,MarketAxess,2015-11-02,2019-07-01,exact,exact,wikipedia,wikipedia
+MLHR,Herman Miller Inc.,,2021-12-31,,no_later_than,,edgar
+MLI,Mueller Industries,2024-11-26,,exact,,wikipedia,
+MLKN,MillerKnoll,2021-12-31,2022-10-18,no_later_than,exact,edgar,wikipedia
+MLM,Martin Marietta Materials,,2014-07-01,,exact,,wikipedia
+MMS,Maximus Inc.,2015-03-31,,no_later_than,,edgar,
+MNK,Mallinckrodt,2013-06-28,2014-08-18,exact,exact,wikipedia,wikipedia
+MNK,Mallinckrodt,2017-07-26,2019-09-23,exact,exact,wikipedia,wikipedia
+MNST,Monster Beverage,2006-12-31,2012-06-28,no_later_than,exact,edgar,wikipedia
+MOD,Modine Manufacturing Co.,,2009-06-30,,no_later_than,,edgar
+MODG,Topgolf Callaway Brands,2022-09-30,2023-12-18,no_later_than,exact,edgar,wikipedia
+MOG-A,Moog Inc.,2026-03-23,,exact,,wikipedia,
+MOH,Molina Healthcare,2015-06-30,2022-03-02,no_later_than,exact,edgar,wikipedia
+MOH,Molina Healthcare,2026-07-22,,exact,,wikipedia,
+MORN,"Morningstar, Inc.",2023-09-18,,exact,,wikipedia,
+MP,MP Materials,2022-07-27,2024-09-23,exact,exact,wikipedia,wikipedia
+MP,MP Materials,2025-09-22,,exact,,wikipedia,
+MPS,MPS Group Inc.(2),,2010-03-31,,no_later_than,,edgar
+MPT,Medical Properties Trust Inc.,2016-06-30,2019-09-30,no_later_than,no_later_than,edgar,edgar
+MPW,Medical Properties Trust,2016-05-23,2024-03-18,exact,exact,wikipedia,wikipedia
+MPWR,Monolithic Power Systems,2016-09-02,2021-02-12,exact,exact,wikipedia,wikipedia
+MRCY,Mercury Systems,2019-10-08,2023-08-21,exact,exact,wikipedia,wikipedia
+MRX,Medicis Pharmaceutical,2006-03-31,2012-12-11,no_later_than,exact,edgar,wikipedia
+MSA,MSA Safety,,,,,,
+MSCC,Microsemi,2016-01-19,2018-05-31,exact,exact,wikipedia,wikipedia
+MSCI,MSCI Inc,2009-12-31,2018-04-04,no_later_than,exact,edgar,wikipedia
+MSM,MSC Industrial Direct,,,,,,
+MTCH,HSN Inc.,2011-12-31,2018-03-31,no_later_than,no_later_than,edgar,edgar
+MTD,Mettler-Toledo,2008-12-31,2016-09-02,no_later_than,exact,edgar,wikipedia
+MTDR,Matador Resources,2017-06-02,2020-06-22,exact,exact,wikipedia,wikipedia
+MTDR,Matador Resources,2022-04-04,,exact,,wikipedia,
+MTG,MGIC Investment Corporation,2020-11-13,,exact,,wikipedia,
+MTN,Vail Resorts,2023-09-18,,exact,,wikipedia,
+MTSI,MACOM Technology Solutions,2022-08-17,,exact,,wikipedia,
+MTX,Minerals Technologies,,2022-09-19,,exact,,wikipedia
+MTZ,MasTec,2018-11-12,,exact,,wikipedia,
+MUR,Murphy Oil,2017-07-26,,exact,,wikipedia,
+MUSA,Murphy USA,2013-08-30,,exact,,wikipedia,
+MV,Metavante Technologies Inc.(a),2007-12-31,2009-12-31,no_later_than,no_later_than,edgar,edgar
+MVL,Marvel Entertainment Inc.(a),2008-06-30,2010-03-31,no_later_than,no_later_than,edgar,edgar
+MWW,Monster Worldwide Inc.(a),2011-12-31,2013-12-31,no_later_than,no_later_than,edgar,edgar
+MZTI,The Marzetti Company,2025-09-30,,no_later_than,,edgar,
+NAL,NewAlliance Bancshares Inc.,2009-06-30,2011-06-30,no_later_than,no_later_than,edgar,edgar
+NARI,Inari Medical,2022-05-03,2024-04-01,exact,exact,wikipedia,wikipedia
+NATI,National Instruments,,2023-10-12,,exact,,wikipedia
+NAVI,Navient,2018-06-05,2023-06-19,exact,exact,wikipedia,wikipedia
+NBIX,Neurocrine Biosciences,2021-03-30,,exact,,wikipedia,
+NBL,Noble Energy Inc.,,2007-12-31,,no_later_than,,edgar
+NBR,Nabors Industries,2015-03-31,2018-12-10,no_later_than,exact,edgar,wikipedia
+NCI,Navigant Consulting Inc.(1)(2),,2011-03-31,,no_later_than,,edgar
+NCR,NCR Corp.,2007-09-30,2023-12-31,no_later_than,no_later_than,edgar,edgar
+NDN,99¢ Only Stores,,2012-01-13,,exact,,wikipedia
+NDOI,Endo International PLC,2014-03-31,2015-03-31,no_later_than,no_later_than,edgar,edgar
+NDOI,Endo International PLC,2017-03-31,2018-09-30,no_later_than,no_later_than,edgar,edgar
+NDSN,Nordson,,2022-02-15,,exact,,wikipedia
+NE,Noble Corporation,,2017-05-16,,exact,,wikipedia
+NEOG,Neogen,2020-10-07,2025-03-24,exact,exact,wikipedia,wikipedia
+NEU,NewMarket Corporation,2010-06-30,,no_later_than,,edgar,
+NEWP,Newport Corp.(1)(2),,2007-06-30,,no_later_than,,edgar
+NFG,National Fuel Gas,,,,,,
+NFLX,NetFlix Inc.,2007-03-31,2010-12-31,no_later_than,no_later_than,edgar,edgar
+NFX,Newfield Exploration Co.(2),,2010-12-31,,no_later_than,,edgar
+NGVT,Ingevity Corp.,2019-03-18,2023-06-19,exact,exact,wikipedia,wikipedia
+NHP,Nationwide Health Properties Inc.,2007-06-30,2011-09-30,no_later_than,no_later_than,edgar,edgar
+NJR,New Jersey Resources,2016-03-08,,exact,,wikipedia,
+NKTR,Nektar Therapeutics,2019-10-03,2021-12-20,exact,exact,wikipedia,wikipedia
+NLY,Annaly Capital Management,2022-09-19,,exact,,wikipedia,
+NNN,NNN Reit,2011-12-31,,no_later_than,,edgar,
+NOG,Northern Oil & Gas,2011-03-31,2013-05-01,no_later_than,exact,edgar,wikipedia
+NOV,NOV Inc.,2021-09-20,,exact,,wikipedia,
+NOVT,Novanta,2022-07-26,,exact,,wikipedia,
+NQM,Nuveen Investments Inc. Class A,2006-12-31,2007-12-31,no_later_than,no_later_than,edgar,edgar
+NSA,National Storage Affiliates Trust,2021-05-14,2026-07-22,exact,exact,wikipedia,wikipedia
+NSP,Insperity,2018-11-06,2025-12-22,exact,exact,wikipedia,wikipedia
+NSR,Neustar,2007-03-31,2017-08-10,no_later_than,exact,edgar,wikipedia
+NST,NSTAR(1),,2012-06-30,,no_later_than,,edgar
+NTCT,NetScout Systems,2015-09-30,2021-11-05,no_later_than,exact,edgar,wikipedia
+NTNX,Nutanix,2025-09-22,,exact,,wikipedia,
+NTY,NBTY Inc.(a),2007-06-30,2010-12-31,no_later_than,no_later_than,edgar,edgar
+NUS,Nu Skin Enterprises,2017-03-02,2022-12-01,exact,exact,wikipedia,wikipedia
+NUVA,NuVasive,2016-09-22,2022-12-19,exact,exact,wikipedia,wikipedia
+NVE,NV Energy,2008-12-31,2013-12-23,no_later_than,exact,edgar,wikipedia
+NVR,NVR,2007-06-30,2019-09-26,no_later_than,exact,edgar,wikipedia
+NVST,Envista Holdings,2021-04-12,,exact,,wikipedia,
+NVT,nVent Electric plc,2018-05-02,,exact,,wikipedia,
+NWE,NorthWestern Energy,2016-09-22,,exact,,wikipedia,
+NXST,Nexstar Media Group,2022-12-01,,exact,,wikipedia,
+NXT,Nextpower,2024-06-24,,exact,,wikipedia,
+NYCB,New York Community Bancorp Inc.(1),,2024-12-31,,no_later_than,,edgar
+NYT,New York Times Company,2010-12-31,,no_later_than,,edgar,
+O,Realty Income Corp.,2007-12-31,2015-06-30,no_later_than,no_later_than,edgar,edgar
+OA,Orbital ATK,2015-03-31,2018-06-11,no_later_than,exact,edgar,wikipedia
+OAS,Oasis Petroleum,2018-05-01,2019-12-13,exact,exact,wikipedia,wikipedia
+OC,Owens Corning,2019-09-23,,exact,,wikipedia,
+OCR,Omnicare Inc.(1),,2015-09-30,,no_later_than,,edgar
+ODFL,Old Dominion Freight Line,2013-12-20,2019-12-02,exact,exact,wikipedia,wikipedia
+ODP,Office Depot Inc.(a),2010-12-31,2018-09-30,no_later_than,no_later_than,edgar,edgar
+OFC,Corporate Office Properties Trust,2009-06-30,2023-09-30,no_later_than,no_later_than,edgar,edgar
+OGE,OGE Energy,,,,,,
+OGS,One Gas,2014-01-31,,exact,,wikipedia,
+OHI,Omega Healthcare Investors,2008-12-31,,no_later_than,,edgar,
+OI,O-I Glass,2016-12-01,2021-03-30,exact,exact,wikipedia,wikipedia
+OII,Oceaneering International,2008-09-30,2019-10-30,no_later_than,exact,edgar,wikipedia
+OIS,Oil States International,2011-06-30,2017-10-02,no_later_than,exact,edgar,wikipedia
+OKE,ONEOK Inc.,,2010-03-31,,no_later_than,,edgar
+OKTA,"Okta, Inc.",2025-05-01,,exact,,wikipedia,
+OLED,Universal Display,2018-12-10,,exact,,wikipedia,
+OLLI,Ollie's Bargain Outlet,2018-06-11,,exact,,wikipedia,
+OLN,Olin Corporation,,,,,,
+OMCL,Omnicell,2022-07-05,2023-09-18,exact,exact,wikipedia,wikipedia
+OMI,Owens & Minor,2009-06-30,2018-03-19,no_later_than,exact,edgar,wikipedia
+ONB,Old National Bank,2022-02-18,,exact,,wikipedia,
+ONTO,Onto Innovation,2023-10-18,,exact,,wikipedia,
+OPCH,Option Care Health,2021-08-30,,exact,,wikipedia,
+ORA,Ormat Technologies,2022-07-07,,exact,,wikipedia,
+ORI,Old Republic International,,,,,,
+ORLY,O’Reilly Automotive Inc.(1)(2),,2009-06-30,,no_later_than,,edgar
+OSIP,OSI Pharmaceuticals Inc.(a)(b),2009-06-30,2010-06-30,no_later_than,no_later_than,edgar,edgar
+OSK,Oshkosh,2006-06-30,,no_later_than,,edgar,
+OVV,Ovintiv,2023-06-19,,exact,,wikipedia,
+OZK,Bank OZK,2015-06-30,,no_later_than,,edgar,
+OZRK,Bank of the Ozarks,2015-05-29,unknown,exact,,wikipedia,
+P,Everpure,,,,,,
+PACW,PacWest Bancorp,2008-06-30,2023-04-05,no_later_than,exact,edgar,wikipedia
+PACW,PacWest Bancorp,2014-06-30,2023-06-30,no_later_than,no_later_than,edgar,edgar
+PAG,Penske Automotive Group,2023-08-04,,exact,,wikipedia,
+PALM,Palm Inc.(1),2006-06-30,2010-09-30,no_later_than,no_later_than,edgar,edgar
+PAS,PepsiAmericas Inc.,,2010-03-31,,no_later_than,,edgar
+PATH,UiPath,2026-01-02,,exact,,wikipedia,
+PAY,VeriFone,2011-09-30,2018-08-20,no_later_than,exact,edgar,wikipedia
+PB,Prosperity Bancshares,2010-03-31,,no_later_than,,edgar,
+PBF,PBF Energy,2017-04-28,2020-09-21,exact,exact,wikipedia,wikipedia
+PBF,PBF Energy,2022-12-01,,exact,,wikipedia,
+PBH,Prestige Brands,2016-04-14,2021-01-29,exact,exact,wikipedia,wikipedia
+PBI,Pitney Bowes,2017-03-01,2019-04-03,exact,exact,wikipedia,wikipedia
+PCH,PotlatchDeltic,,2026-02-02,,exact,,wikipedia
+PCP,Precision Castparts Corp.,,2007-06-30,,no_later_than,,edgar
+PCTY,Paylocity,2020-04-27,,exact,,wikipedia,
+PCX,Patriot Coal,,2012-06-29,,exact,,wikipedia
+PDCE,PDC Energy,2022-02-15,2023-08-08,exact,exact,wikipedia,wikipedia
+PDCO,Patterson Companies,2018-03-19,2024-01-05,exact,exact,wikipedia,wikipedia
+PDE,Pride International Inc.(2),,2011-06-30,,no_later_than,,edgar
+PDLI,PDL BioPharma Inc.,2006-03-31,2008-12-31,no_later_than,no_later_than,edgar,edgar
+PEB,Pebblebrook Hotel Trust,2018-12-03,2023-03-20,exact,exact,wikipedia,wikipedia
+PEGA,Pegasystems,2025-05-22,,exact,,wikipedia,
+PEN,"Penumbra, Inc.",2019-09-23,,exact,,wikipedia,
+PENN,Penn Entertainment,2018-10-10,2021-03-22,exact,exact,wikipedia,wikipedia
+PENN,Penn Entertainment,2022-09-19,2024-06-24,exact,exact,wikipedia,wikipedia
+PETM,PetSmart,,2012-10-04,,exact,,wikipedia
+PFGC,Performance Food Group,2021-09-03,,exact,,wikipedia,
+PGNY,Progyny,2021-04-20,2024-09-23,exact,exact,wikipedia,wikipedia
+PII,Polaris,2010-12-31,,no_later_than,,edgar,
+PINS,Pinterest,2025-12-22,,exact,,wikipedia,
+PK,Park Hotels & Resorts,2019-09-18,,exact,,wikipedia,
+PKG,Packaging Corporation of America,,2017-07-26,,exact,,wikipedia
+PLCM,Polycom,,2016-09-30,,exact,,wikipedia
+PLD,AMB Property Corp.,,2011-06-30,,no_later_than,,edgar
+PLNT,Planet Fitness,2023-06-19,,exact,,wikipedia,
+PLT,Plantronics,2019-09-30,2019-12-10,no_later_than,exact,edgar,wikipedia
+PLXS,Plexus Corp.(1)(2),,2007-03-31,,no_later_than,,edgar
+PNFP,Pinnacle Financial Partners,2017-06-19,,exact,,wikipedia,
+PNM,PNM Resources Inc.,,2024-09-30,,no_later_than,,edgar
+PNR,Pentair,,2012-09-28,,exact,,wikipedia
+PNRA,Panera Bread,2009-06-30,2017-07-12,no_later_than,exact,edgar,wikipedia
+POL,PolyOne,2014-04-30,2020-09-30,exact,no_later_than,wikipedia,edgar
+POM,Pepco Holdings Inc.,,2007-12-31,,no_later_than,,edgar
+POOL,Pool Corporation,2016-01-27,2020-10-07,exact,exact,wikipedia,wikipedia
+POR,Portland General Electric,2022-06-29,,exact,,wikipedia,
+POST,Post Holdings,2012-02-03,,exact,,wikipedia,
+POWI,Power Integrations,2021-12-20,2025-12-22,exact,exact,wikipedia,wikipedia
+PPC,Pilgrim's Pride,2019-09-23,,exact,,wikipedia,
+PPDI,Pharmaceutical Product Development Inc.,2006-03-31,2011-12-31,no_later_than,no_later_than,edgar,edgar
+PPS,Post Properties,2015-12-31,2016-12-01,no_later_than,exact,edgar,wikipedia
+PR,Permian Resources,2023-09-18,,exact,,wikipedia,
+PRAH,PRA Health Sciences,2018-05-31,2021-07-02,exact,exact,wikipedia,wikipedia
+PRG,PROG Holdings,2020-12-31,2022-04-06,no_later_than,exact,edgar,wikipedia
+PRGO,Perrigo Co.(1),,2011-12-31,,no_later_than,,edgar
+PRGO,Perrigo,2021-09-20,2025-12-22,exact,exact,wikipedia,wikipedia
+PRI,Primerica,2013-02-12,,exact,,wikipedia,
+PRSP,Perspecta Inc.,2018-09-30,2021-05-07,no_later_than,exact,edgar,wikipedia
+PRX,Par Pharmaceutical Companies Inc.(1)(2),,2008-09-30,,no_later_than,,edgar
+PRXL,PAREXEL,2015-09-30,2017-10-02,no_later_than,exact,edgar,wikipedia
+PSB,PS Business Parks,2019-04-11,2022-07-20,exact,exact,wikipedia,wikipedia
+PSN,Parsons Corporation,2024-09-23,,exact,,wikipedia,
+PSS,Collective Brands,2007-09-30,2012-10-01,no_later_than,exact,edgar,wikipedia
+PSTG,Pure Storage,2024-01-05,unknown,exact,,wikipedia,
+PSYS,Psychiatric Solutions Inc. (1),2006-09-30,2010-12-31,no_later_than,no_later_than,edgar,edgar
+PTC,PTC Inc.,2006-12-31,2021-04-20,no_later_than,exact,edgar,wikipedia
+PTEN,Patterson-UTI Energy,,2020-05-26,,exact,,wikipedia
+PVH,Phillips-Van Heusen Corp.,2007-03-31,2013-03-31,no_later_than,no_later_than,edgar,edgar
+PVH,PVH Corp.,2022-09-19,,exact,,wikipedia,
+PVTB,PrivateBancorp,2016-03-01,2017-06-26,exact,exact,wikipedia,wikipedia
+PWR,Quanta Services Inc.(1)(2),,2009-06-30,,no_later_than,,edgar
+PXD,Pioneer Natural Resources Co.,,2008-09-30,,no_later_than,,edgar
+PXP,Plains Exploration & Production,,2013-05-30,,exact,,wikipedia
+PZZA,Papa John's,2016-12-01,2023-09-18,exact,exact,wikipedia,wikipedia
+QCP,Quality Care Properties,2016-11-01,2018-08-01,exact,exact,wikipedia,wikipedia
+QDEL,QuidelOrtho,2020-06-22,2024-07-26,exact,exact,wikipedia,wikipedia
+QEP,QEP Resources,2015-06-30,2019-09-23,no_later_than,exact,edgar,wikipedia
+QLGC,QLogic,2011-03-31,2013-06-21,no_later_than,exact,edgar,wikipedia
+QLYS,Qualys,2020-06-22,,exact,,wikipedia,
+QRVO,Qorvo,2015-03-31,2015-06-11,no_later_than,exact,edgar,wikipedia
+QSFT,Quest Software Inc.,2009-09-30,2012-12-31,no_later_than,no_later_than,edgar,edgar
+R,Ryder,2017-06-19,,exact,,wikipedia,
+RAH,Ralcorp,2008-09-30,2013-01-29,no_later_than,exact,edgar,wikipedia
+RAMP,LiveRamp,,2022-06-21,,exact,,wikipedia
+RAX,Rackspace,2010-09-30,2016-11-03,no_later_than,exact,edgar,wikipedia
+RBA,RB Global,2024-06-24,,exact,,wikipedia,
+RBC,Regal Beloit Corp.,2009-12-31,2021-12-31,no_later_than,no_later_than,edgar,edgar
+RBC,RBC Bearings,2023-09-18,,exact,,wikipedia,
+RCII,Rent-A-Center,,2016-02-09,,exact,,wikipedia
+RCM,R1 RCM,2021-05-07,2024-11-20,exact,exact,wikipedia,wikipedia
+RDC,Rowan Companies,2014-08-18,2019-04-11,exact,exact,wikipedia,wikipedia
+RDK,Ruddick Corp.,,2012-03-31,,no_later_than,,edgar
+RDN,Radian Group Inc.,,2008-09-30,,no_later_than,,edgar
+RE,Everest Re,,2017-06-19,,exact,,wikipedia
+REG,Regency Centers,,2017-03-02,,exact,,wikipedia
+REGN,Regeneron Pharmaceuticals,2011-12-31,2013-04-30,no_later_than,exact,edgar,wikipedia
+REXR,Rexford Industrial Realty,2020-08-03,,exact,,wikipedia,
+REZI,Resideo Technologies,2018-12-31,2020-06-22,no_later_than,exact,edgar,wikipedia
+RFMD,RF Micro Devices Inc.(2),,2015-03-31,,no_later_than,,edgar
+RGA,Reinsurance Group of America,2008-12-31,,no_later_than,,edgar,
+RGEN,Repligen,2019-09-23,,exact,,wikipedia,
+RGLD,Royal Gold,2012-06-30,,no_later_than,,edgar,
+RGS,Regis,,2013-12-20,,exact,,wikipedia
+RH,RH,2016-04-06,2017-02-03,exact,exact,wikipedia,wikipedia
+RH,RH,2019-12-26,,exact,,wikipedia,
+RIG,Transocean,2017-07-26,2020-09-21,exact,exact,wikipedia,wikipedia
+RJF,Raymond James Financial,,2017-03-20,,exact,,wikipedia
+RKT,Rock-Tenn Co. Class A,2010-06-30,2015-06-30,no_later_than,no_later_than,edgar,edgar
+RL,Polo Ralph Lauren Corp.(1),,2007-03-31,,no_later_than,,edgar
+RLGY,Realogy,2018-09-20,2019-06-04,exact,exact,wikipedia,wikipedia
+RLI,RLI Corp.,2019-11-27,,exact,,wikipedia,
+RMBS,Rambus,2023-12-18,,exact,,wikipedia,
+RMD,ResMed,2006-09-30,2017-07-26,no_later_than,exact,edgar,wikipedia
+RMR,RMR Group Inc. (The),2015-12-31,2016-06-30,no_later_than,no_later_than,edgar,edgar
+RNR,RenaissanceRe,2014-01-02,,exact,,wikipedia,
+ROIV,Roivant Sciences,2024-04-01,,exact,,wikipedia,
+ROKU,"Roku, Inc.",2026-06-22,,exact,,wikipedia,
+ROL,Rollins Inc.(1),,2018-09-30,,no_later_than,,edgar
+ROP,Roper Industries Inc.,2006-03-31,2009-12-31,no_later_than,no_later_than,edgar,edgar
+ROSE,Rosetta Resources Inc.,2012-09-30,2015-09-30,no_later_than,no_later_than,edgar,edgar
+ROST,Ross Stores Inc.,,2009-12-31,,no_later_than,,edgar
+ROVI,Rovi,2009-09-30,2015-11-18,no_later_than,exact,edgar,wikipedia
+RPM,RPM International,,,,,,
+RRC,Range Resources,2018-06-18,2019-09-23,exact,exact,wikipedia,wikipedia
+RRC,Range Resources,2022-03-02,,exact,,wikipedia,
+RRD,RR Donnelley,2012-12-11,2016-09-27,exact,exact,wikipedia,wikipedia
+RRX,Regal Rexnord,2021-12-31,,no_later_than,,edgar,
+RS,"Reliance, Inc.",2006-06-30,,no_later_than,,edgar,
+RSG,Republic Services Inc.,,2008-12-31,,no_later_than,,edgar
+RSH,RadioShack,,2012-09-28,,exact,,wikipedia
+RT,Ruby Tuesday Inc.(1),,2008-06-30,,no_later_than,,edgar
+RUN,Sunrun,2020-08-03,2024-04-01,exact,exact,wikipedia,wikipedia
+RVBD,Riverbed Technology Inc,2010-12-31,2015-04-27,no_later_than,exact,edgar,wikipedia
+RXO,RXO,2022-11-01,2023-01-05,exact,exact,wikipedia,wikipedia
+RYAM,Rayonier Advanced Materials,2014-06-27,2014-11-28,exact,exact,wikipedia,wikipedia
+RYAN,Ryan Specialty,2024-06-28,,exact,,wikipedia,
+RYL,Ryland Group Inc.(1),,2011-12-31,,no_later_than,,edgar
+RYN,Rayonier,,,,,,
+SABR,Sabre,2017-04-19,2022-12-01,exact,exact,wikipedia,wikipedia
+SAFM,Sanderson Farms,2017-09-26,2022-07-27,exact,exact,wikipedia,wikipedia
+SAI,SAIC,2013-09-20,unknown,exact,,wikipedia,
+SAIA,Saia,2021-08-30,,exact,,wikipedia,
+SAIC,Science Applications Intl Corp,2013-09-27,,exact,,wikipedia,
+SAIL,SailPoint Technologies,2020-10-05,2022-08-17,exact,exact,wikipedia,wikipedia
+SAM,Boston Beer Company,2015-03-31,,no_later_than,,edgar,
+SANM,Sanmina Corporation,2026-06-22,,exact,,wikipedia,
+SARO,StandardAero,2026-01-22,,exact,,wikipedia,
+SATS,EchoStar,2025-03-24,2026-03-23,exact,exact,wikipedia,wikipedia
+SBH,Sally Beauty Holdings,2016-09-27,2020-10-05,exact,exact,wikipedia,wikipedia
+SBNY,Signature Bank,2011-12-31,2021-12-20,no_later_than,exact,edgar,wikipedia
+SBRA,Sabra Health Care REIT,2017-08-17,,exact,,wikipedia,
+SCG,SCANA Corp.,,2009-06-30,,no_later_than,,edgar
+SCHL,Scholastic,,2013-12-20,,exact,,wikipedia
+SCI,Service Corp Intl,2007-12-31,,no_later_than,,edgar,
+SCOR,comScore,2016-02-01,2017-02-13,exact,exact,wikipedia,wikipedia
+SEDG,SolarEdge,2019-10-18,2021-12-20,exact,exact,wikipedia,wikipedia
+SEIC,SEI Investments Company,,,,,,
+SEPR,Sepracor Inc.(1)(2),,2009-12-31,,no_later_than,,edgar
+SF,Stifel,2015-03-31,,no_later_than,,edgar,
+SFD,Smithfield Foods,,2013-09-26,,exact,,wikipedia
+SFG,StanCorp Financial,,2016-03-08,,exact,,wikipedia
+SFM,Sprouts Farmers Market,2016-02-09,,exact,,wikipedia,
+SGI,Somnigroup International,2012-06-30,,no_later_than,,edgar,
+SGMS,Scientific Games,2006-06-30,2014-04-17,no_later_than,exact,edgar,wikipedia
+SGMS,Scientific Games,2018-01-03,2022-06-30,exact,no_later_than,wikipedia,edgar
+SHAW,The Shaw Group,2008-06-30,2013-02-12,no_later_than,exact,edgar,wikipedia
+SHC,Sotera Health,2022-06-21,,exact,,wikipedia,
+SIG,Signet Jewelers Ltd.,2011-12-31,2015-09-30,no_later_than,no_later_than,edgar,edgar
+SIG,Signet Jewelers Ltd,2018-03-19,2019-09-23,exact,exact,wikipedia,wikipedia
+SIGI,Selective Insurance Group,2019-09-23,,exact,,wikipedia,
+SII,Smith International Inc.(1),,2006-12-31,,no_later_than,,edgar
+SIRI,SiriusXM,2026-06-11,,exact,,wikipedia,
+SIRO,Sirona Dental Systems,2014-01-28,2016-03-01,exact,exact,wikipedia,wikipedia
+SITM,SiTime,2021-11-30,2023-06-19,exact,exact,wikipedia,wikipedia
+SITM,SiTime,2026-03-23,,exact,,wikipedia,
+SIVB,SVB Financial,,2018-03-19,,exact,,wikipedia
+SIX,Six Flags,2017-10-02,2022-07-26,exact,exact,wikipedia,wikipedia
+SJM,Smucker (J.M.) Co. (The)(1),,2008-12-31,,no_later_than,,edgar
+SKS,Saks,,2013-11-04,,exact,,wikipedia
+SKT,Tanger Factory Outlet Centers,2014-10-17,2020-01-21,exact,exact,wikipedia,wikipedia
+SKX,Skechers,2015-06-30,2025-09-12,no_later_than,exact,edgar,wikipedia
+SLAB,Silicon Labs,,,,,,
+SLG,SL Green Realty Corp.,2008-12-31,2015-03-31,no_later_than,no_later_than,edgar,edgar
+SLG,SL Green Realty,2021-03-22,2023-03-20,exact,exact,wikipedia,wikipedia
+SLGN,Silgan Holdings,2009-12-31,,no_later_than,,edgar,
+SLH,Solera Holdings,2009-12-31,2016-03-04,no_later_than,exact,edgar,wikipedia
+SLM,SLM Corp,2014-04-30,,exact,,wikipedia,
+SLXP,Salix Pharmaceuticals,2013-07-30,2015-04-07,exact,exact,wikipedia,wikipedia
+SM,SM Energy,2010-12-31,2019-07-09,no_later_than,exact,edgar,wikipedia
+SMCI,Supermicro,2022-12-22,2024-03-18,exact,exact,wikipedia,wikipedia
+SMG,Scotts Miracle-Gro Company,,,,,,
+SMTC,Semtech,,2015-06-30,,exact,,wikipedia
+SMTC,Semtech,2019-04-11,2022-12-19,exact,exact,wikipedia,wikipedia
+SMTC,Semtech,2026-06-22,,exact,,wikipedia,
+SN,SharkNinja,2026-05-18,,exact,,wikipedia,
+SNDK,SanDisk Corp.(1)(2),,2006-06-30,,no_later_than,,edgar
+SNH,Senior Housing Properties Trust,2009-12-31,2020-03-31,no_later_than,no_later_than,edgar,edgar
+SNPS,Synopsys,,2017-03-16,,exact,,wikipedia
+SNV,Synovus,2007-12-31,2026-01-02,no_later_than,exact,edgar,wikipedia
+SNX,TD Synnex,2015-12-29,,exact,,wikipedia,
+SOLS,Solstice Advanced Materials,2026-03-23,,exact,,wikipedia,
+SON,Sonoco,,,,,,
+SPB,Spectrum Brands Holdings Inc,2019-09-30,2019-12-31,no_later_than,no_later_than,edgar,edgar
+SPN,Superior Energy Services,,2018-11-14,,exact,,wikipedia
+SPWR,SunPower Corp. Class B,2008-09-30,2008-12-31,no_later_than,no_later_than,edgar,edgar
+SPWR,SunPower,2021-10-05,2023-06-19,exact,exact,wikipedia,wikipedia
+SPXC,SPX Corp.(1),,2015-09-30,,no_later_than,,edgar
+SPXC,SPX Technologies,2025-12-22,,exact,,wikipedia,
+SR,Spire,2019-03-31,,no_later_than,,edgar,
+SRC,Spirit Realty,2019-07-09,2024-01-23,exact,exact,wikipedia,wikipedia
+SRCL,Stericycle Inc.(1)(2),,2008-12-31,,no_later_than,,edgar
+SRCL,Stericycle,2018-12-03,2024-11-06,exact,exact,wikipedia,wikipedia
+SRPT,Sarepta Therapeutics,2024-06-03,2025-09-02,exact,exact,wikipedia,wikipedia
+SRX,SRA International Inc. Class A(2),,2011-09-30,,no_later_than,,edgar
+SSB,South State Bank,2023-03-20,,exact,,wikipedia,
+SSD,Simpson Manufacturing,2020-10-07,,exact,,wikipedia,
+SSS,Sovran Self Storage Inc.,2015-09-30,2016-09-30,no_later_than,no_later_than,edgar,edgar
+ST,Sensata Technologies,2023-09-18,,exact,,wikipedia,
+STAA,STAAR Surgical,2021-01-29,2023-08-22,exact,exact,wikipedia,wikipedia
+STAG,STAG Industrial,2023-05-04,,exact,,wikipedia,
+STE,STERIS plc,,2019-12-13,,exact,,wikipedia
+STL,Sterling Bancorp,2017-10-02,2022-02-01,exact,exact,wikipedia,wikipedia
+STLD,Steel Dynamics,,2022-12-22,,exact,,wikipedia
+STOR,Store Capital,2020-05-06,2023-02-06,exact,exact,wikipedia,wikipedia
+STR,Questar,,2016-09-16,,exact,,wikipedia
+STR,Questar Corp.,2010-06-30,2016-09-30,no_later_than,no_later_than,edgar,edgar
+STRA,"Strategic Education, Inc.",2006-12-31,2013-08-30,no_later_than,exact,edgar,wikipedia
+STRA,"Strategic Education, Inc.",2020-06-22,2021-08-03,exact,exact,wikipedia,wikipedia
+STRL,Sterling Infrastructure,2025-11-13,,exact,,wikipedia,
+STWD,Starwood Property Trust,2023-03-20,,exact,,wikipedia,
+SUG,Southern Union,2008-12-31,2012-03-26,no_later_than,exact,edgar,wikipedia
+SUNE,SunEdison,,2016-04-04,,exact,,wikipedia
+SVC,Service Properties Trust,2019-09-30,2021-06-04,no_later_than,exact,edgar,wikipedia
+SVR,Syniverse Holdings Inc.(a),2009-06-30,2011-03-31,no_later_than,no_later_than,edgar,edgar
+SVU,SuperValu,2012-04-30,2016-09-01,exact,exact,wikipedia,wikipedia
+SWAV,Shockwave Medical,2022-06-21,2024-06-03,exact,exact,wikipedia,wikipedia
+SWI,SolarWinds,2012-07-31,2016-02-09,exact,exact,wikipedia,wikipedia
+SWKS,Skyworks Solutions Inc.,2010-09-30,2015-03-31,no_later_than,no_later_than,edgar,edgar
+SWN,Southwestern Energy Co.(2),,2008-06-30,,no_later_than,,edgar
+SWN,Southwestern Energy,2017-04-04,2019-12-13,exact,exact,wikipedia,wikipedia
+SWN,Southwestern Energy,2022-07-06,2024-10-01,exact,exact,wikipedia,wikipedia
+SWX,Southwest Gas Corp,2016-06-30,,exact,,wikipedia,
+SXT,Sensient Technologies,,2023-09-18,,exact,,wikipedia
+SY,Sybase Inc.(1)(2),,2010-09-30,,no_later_than,,edgar
+SYNA,Synaptics,2015-09-30,,no_later_than,,edgar,
+SYNH,Syneos Health,2018-03-31,2023-09-29,no_later_than,exact,edgar,wikipedia
+TBL,Timberland Co. Class A(2),,2011-09-30,,no_later_than,,edgar
+TCBI,Texas Capital Bancshares,2017-03-29,,exact,,wikipedia,
+TCF,TCF Financial Corporation,,2021-06-09,,exact,,wikipedia
+TCO,Taubman Centers,2011-03-31,2020-12-29,no_later_than,exact,edgar,wikipedia
+TDC,Teradata,2017-06-19,2025-03-24,exact,exact,wikipedia,wikipedia
+TDS,Telephone and Data Systems,,2021-12-20,,exact,,wikipedia
+TDW,Tidewater Inc.,,2015-09-30,,no_later_than,,edgar
+TDY,Teledyne Technologies,2015-03-31,2020-06-22,no_later_than,exact,edgar,wikipedia
+TECD,Tech Data,,2020-06-30,,exact,,wikipedia
+TECH,Bio-Techne,,2021-08-30,,exact,,wikipedia
+TER,Teradyne,2013-12-20,2020-09-21,exact,exact,wikipedia,wikipedia
+TEX,Terex,2008-12-31,,no_later_than,,edgar,
+TFX,Teleflex,,2019-01-18,,exact,,wikipedia
+TGI,Triumph Group,2011-06-30,2017-02-02,no_later_than,exact,edgar,wikipedia
+TGNA,Tegna Inc.,2017-06-02,2024-09-23,exact,exact,wikipedia,wikipedia
+THC,Tenet Health,2016-04-18,,exact,,wikipedia,
+THG,Hanover Insurance,,,,,,
+THO,Thor Industries,,,,,,
+THOR,Thoratec Corp.(a),2008-12-31,2015-12-31,no_later_than,no_later_than,edgar,edgar
+THS,TreeHouse Foods,2014-12-09,2021-09-03,exact,exact,wikipedia,wikipedia
+TIBX,TIBCO Software,2010-06-30,2014-12-04,no_later_than,exact,edgar,wikipedia
+TIME,Time Inc.,2014-06-06,2017-06-02,exact,exact,wikipedia,wikipedia
+TIN,Temple-Inland Inc.(a),2007-12-31,2012-03-31,no_later_than,no_later_than,edgar,edgar
+TKO,TKO Group Holdings,2023-09-30,2025-03-24,no_later_than,exact,edgar,wikipedia
+TKR,Timken,,,,,,
+TLAB,Tellabs,2011-12-31,2013-06-28,no_later_than,exact,edgar,wikipedia
+TLN,Talen Energy,2015-06-01,2016-12-06,exact,exact,wikipedia,wikipedia
+TLN,Talen Energy,2025-08-28,,exact,,wikipedia,
+TMHC,Taylor Morrison,2020-01-31,2026-07-24,exact,exact,wikipedia,wikipedia
+TMST,TimkenSteel,2014-06-30,2015-07-30,exact,exact,wikipedia,wikipedia
+TNB,Thomas & Betts,,2012-05-15,,exact,,wikipedia
+TNDM,Tandem Diabetes Care,2021-09-20,2023-03-20,exact,exact,wikipedia,wikipedia
+TNL,Travel + Leisure Co.,2021-03-31,,no_later_than,,edgar,
+TOL,Toll Brothers,,,,,,
+TOST,"Toast, Inc.",2026-07-01,,exact,,wikipedia,
+TPH,Tri Pointe Homes,2015-09-30,2022-05-03,no_later_than,exact,edgar,wikipedia
+TPL,Texas Pacific Land Corporation,2024-06-24,2024-11-26,exact,exact,wikipedia,wikipedia
+TPX,Tempur-Pedic International,2012-05-15,2025-03-31,exact,no_later_than,wikipedia,edgar
+TQNT,TriQuint Semiconductor Inc.(2),,2008-09-30,,no_later_than,,edgar
+TR,Tootsie Roll,,2021-12-20,,exact,,wikipedia
+TRA,Terra Industries Inc.(a),2007-12-31,2010-06-30,no_later_than,no_later_than,edgar,edgar
+TREE,LendingTree,2018-03-08,2021-10-22,exact,exact,wikipedia,wikipedia
+TREX,Trex,2019-04-01,,exact,,wikipedia,
+TRGP,Targa Resources,2021-06-09,2022-10-12,exact,exact,wikipedia,wikipedia
+TRIP,Tripadvisor,2019-12-13,2023-09-18,exact,exact,wikipedia,wikipedia
+TRMB,Trimble Inc.,2008-06-30,2021-01-21,no_later_than,exact,edgar,wikipedia
+TRMK,Trustmark Corporation,2009-06-30,2021-08-30,no_later_than,exact,edgar,wikipedia
+TRN,Trinity Industries,,2022-06-21,,exact,,wikipedia
+TRU,TransUnion,2025-09-22,,exact,,wikipedia,
+TSCO,Tractor Supply,2010-06-30,2014-01-23,no_later_than,exact,edgar,wikipedia
+TTC,Toro,2015-09-30,,no_later_than,,edgar,
+TTEK,Tetra Tech,2019-08-01,,exact,,wikipedia,
+TTMI,TTM Technologies,2026-01-30,,exact,,wikipedia,
+TTWO,Take-Two Interactive,2017-03-20,2018-03-19,exact,exact,wikipedia,wikipedia
+TUP,Tupperware Brands Corp,2006-03-31,2019-09-23,no_later_than,exact,edgar,wikipedia
+TW,Towers Watson,2010-03-31,2016-01-05,no_later_than,exact,edgar,wikipedia
+TWLO,Twilio,2025-08-19,,exact,,wikipedia,
+TWTC,TW Telecom,2009-12-31,2014-11-04,no_later_than,exact,edgar,wikipedia
+TXNM,TXNM Energy,2024-09-30,,no_later_than,,edgar,
+TXRH,Texas Roadhouse,2016-05-12,,exact,,wikipedia,
+TYL,Tyler Technologies,2014-12-04,2020-06-22,exact,exact,wikipedia,wikipedia
+UA,Under Armour Inc,2022-06-30,2025-12-31,no_later_than,no_later_than,edgar,edgar
+UAA,Under Armour,,2014-04-30,,exact,,wikipedia
+UAA,Under Armour Inc,2022-06-30,2025-12-31,no_later_than,no_later_than,edgar,edgar
+UBSI,United Bankshares,2017-04-12,,exact,,wikipedia,
+UDR,"UDR, Inc.",,2016-03-07,,exact,,wikipedia
+UE,Urban Edge Properties,2015-03-31,2022-02-18,no_later_than,exact,edgar,wikipedia
+UFPI,UFP Industries,2023-02-23,,exact,,wikipedia,
+UFS,Domtar,2011-06-30,2021-04-20,no_later_than,exact,edgar,wikipedia
+UGI,UGI Corp,2008-12-31,,no_later_than,,edgar,
+UHS,Universal Health Services,,2014-09-19,,exact,,wikipedia
+ULS,UL Solutions,2025-12-22,,exact,,wikipedia,
+ULTI,Ultimate Software Group,2014-08-14,2019-05-07,exact,exact,wikipedia,wikipedia
+UMBF,UMB Financial Corp.,2016-12-06,,exact,,wikipedia,
+UMPQ,Umpqua Bank,2014-04-17,2023-03-01,exact,exact,wikipedia,wikipedia
+UNFI,United Natural Foods,2012-12-21,2018-11-12,exact,exact,wikipedia,wikipedia
+UNIT,Uniti Group,2017-03-31,2019-12-17,no_later_than,exact,edgar,wikipedia
+UNM,Unum,2021-09-20,,exact,,wikipedia,
+UNT,Unit Corp,2008-12-31,2015-07-01,no_later_than,exact,edgar,wikipedia
+UNVR,Univar Solutions,2020-06-22,2023-08-04,exact,exact,wikipedia,wikipedia
+URBN,Urban Outfitters Inc.(1)(2),,2010-03-31,,no_later_than,,edgar
+URBN,Urban Outfitters,2017-03-20,2022-06-21,exact,exact,wikipedia,wikipedia
+URI,United Rentals,,2014-09-19,,exact,,wikipedia
+URS,URS,2007-12-31,2014-10-17,no_later_than,exact,edgar,wikipedia
+USFD,US Foods,2023-03-20,,exact,,wikipedia,
+UTHR,United Therapeutics,2008-09-30,,no_later_than,,edgar,
+UTIW,UTi Worldwide,2011-06-30,2014-05-28,no_later_than,exact,edgar,wikipedia
+UTSI,UTStarcom Inc.(1)(2),,2006-03-31,,no_later_than,,edgar
+UTSI,UTStarcom Inc.(1)(2),2006-06-30,2007-12-31,no_later_than,no_later_than,edgar,edgar
+UVV,Universal,,2014-10-31,,exact,,wikipedia
+VAC,Marriott Vacations Worldwide,2018-09-04,2025-12-22,exact,exact,wikipedia,wikipedia
+VAL,Valaris,,2017-06-02,,exact,,wikipedia
+VAL,Valaris,,2019-09-23,,exact,,wikipedia
+VAL,Valaris,2023-03-20,,exact,,wikipedia,
+VAR,Varian Medical Systems Inc.(1)(2),,2007-03-31,,no_later_than,,edgar
+VARI,Varian Inc.(1)(2),,2010-06-30,,no_later_than,,edgar
+VC,Visteon,2018-07-11,,exact,,wikipedia,
+VCI,Valassis Communications,,2014-01-31,,exact,,wikipedia
+VCI,Valassis Communications Inc.(2),2007-06-30,2008-12-31,no_later_than,no_later_than,edgar,edgar
+VCI,Valassis Communications Inc.(2),2011-09-30,2014-03-31,no_later_than,no_later_than,edgar,edgar
+VCLK,ValueClick Inc.(a),2006-12-31,2014-03-31,no_later_than,no_later_than,edgar,edgar
+VFC,VF Corporation,2025-03-24,,exact,,wikipedia,
+VIAV,JDS Uniphase Corp.,2013-12-31,2015-09-30,no_later_than,no_later_than,edgar,edgar
+VIAV,Viavi Solutions,2026-06-22,,exact,,wikipedia,
+VICR,Vicor Corporation,2021-12-20,2023-10-20,exact,exact,wikipedia,wikipedia
+VICR,Vicor Corporation,2026-03-23,,exact,,wikipedia,
+VLY,Valley Bank,2008-12-31,,no_later_than,,edgar,
+VMI,Valmont Industries,2009-06-30,,no_later_than,,edgar,
+VNO,Vornado Realty Trust,2023-01-05,,exact,,wikipedia,
+VNOM,Viper Energy,2024-09-23,,exact,,wikipedia,
+VNT,Vontier,2021-03-22,,exact,,wikipedia,
+VOYA,Voya Financial,2021-12-28,,exact,,wikipedia,
+VRTX,Vertex Pharmaceuticals,,2013-09-20,,exact,,wikipedia
+VRX,Valeant Pharmaceuticals International,,2010-09-30,,no_later_than,,edgar
+VSAT,Viasat,2016-05-03,2023-03-20,exact,exact,wikipedia,wikipedia
+VSCO,Victoria's Secret,2021-08-04,2023-06-19,exact,exact,wikipedia,wikipedia
+VSH,Vishay Intertechnology,,2024-12-23,,exact,,wikipedia
+VSM,Versum Materials,2016-10-03,2019-10-08,exact,exact,wikipedia,wikipedia
+VST,Vistra,2023-09-18,2024-05-03,exact,exact,wikipedia,wikipedia
+VSTO,Vista Outdoor,2015-03-31,2017-03-20,no_later_than,exact,edgar,wikipedia
+VSTS,Vestis,2023-10-02,2023-12-18,exact,exact,wikipedia,wikipedia
+VVC,Vectren,,2019-02-06,,exact,,wikipedia
+VVV,Valvoline,2017-05-16,,exact,,wikipedia,
+VYX,NCR Voyix,2023-12-31,2024-01-02,no_later_than,exact,edgar,wikipedia
+WAB,Wabtec,2007-12-31,2019-02-27,no_later_than,exact,edgar,wikipedia
+WABC,Westamerica Bancorporation,,2014-09-19,,exact,,wikipedia
+WAFD,"WaFd, Inc.",,2023-03-20,,exact,,wikipedia
+WAL,Western Alliance Bancorporation,2024-09-23,,exact,,wikipedia,
+WBMD,WebMD,2016-04-04,2017-09-18,exact,exact,wikipedia,wikipedia
+WBS,Webster Bank,,,,,,
+WCC,WESCO International,2023-06-19,,exact,,wikipedia,
+WCG,WellCare,2007-03-31,2018-09-17,no_later_than,exact,edgar,wikipedia
+WCN,Waste Connections,2008-12-31,2016-05-31,no_later_than,exact,edgar,wikipedia
+WDC,Western Digital Corp.(1)(2),,2009-06-30,,no_later_than,,edgar
+WDR,Waddell & Reed,,2017-04-28,,exact,,wikipedia
+WEC,Wisconsin Energy Corp.,,2008-12-31,,no_later_than,,edgar
+WELL,Health Care REIT Inc.,2007-12-31,2009-06-30,no_later_than,no_later_than,edgar,edgar
+WEN,Wendy's,2008-09-30,2025-09-22,no_later_than,exact,edgar,wikipedia
+WERN,Werner Enterprises,,2024-06-24,,exact,,wikipedia
+WETF,WisdomTree Investments,2015-06-11,2017-03-29,exact,exact,wikipedia,wikipedia
+WEX,WEX Inc.,2012-03-31,,no_later_than,,edgar,
+WFR,MEMC Electronic Materials Inc.(1)(2),,2007-06-30,,no_later_than,,edgar
+WFR,MEMC Electronic Materials Inc.(1)(2),2011-12-31,2013-06-30,no_later_than,no_later_than,edgar,edgar
+WFRD,Weatherford International,2023-09-18,,exact,,wikipedia,
+WGL,WGL Holdings,,2018-07-11,,exact,,wikipedia
+WH,Wyndham Hotels & Resorts,2018-09-30,,no_later_than,,edgar,
+WHR,Whirlpool Corporation,2024-03-18,,exact,,wikipedia,
+WIN,Windstream,,2015-06-01,,exact,,wikipedia
+WING,Wingstop,2020-09-21,,exact,,wikipedia,
+WL,Wilmington Trust Corp.,,2010-12-31,,no_later_than,,edgar
+WLK,Westlake Corporation,2022-10-18,,exact,,wikipedia,
+WLY,John Wiley & Sons,2006-12-31,2023-06-19,no_later_than,exact,edgar,wikipedia
+WLY,Wiley (John) & Sons Inc. Class A,2022-06-30,2023-06-30,no_later_than,no_later_than,edgar,edgar
+WMG,Warner Music Group,2024-06-24,,exact,,wikipedia,
+WMS,Advanced Drainage Systems,2023-03-20,,exact,,wikipedia,
+WNR,Western Refining,2014-11-24,2017-06-02,exact,exact,wikipedia,wikipedia
+WOLF,Wolfspeed,2021-12-31,2024-09-23,no_later_than,exact,edgar,wikipedia
+WOOF,VCA Inc.,,2017-09-18,,exact,,wikipedia
+WOR,Worthington Industries,,2023-11-30,,exact,,wikipedia
+WPC,W. P. Carey,2023-11-30,,exact,,wikipedia,
+WPG,Washington Prime Group,2014-05-28,2018-05-01,exact,exact,wikipedia,wikipedia
+WPX,WPX Energy,2014-03-21,2021-01-07,exact,exact,wikipedia,wikipedia
+WR,Westar Energy (renamed Evergy),,2018-06-05,,exact,,wikipedia
+WRB,W.R. Berkley,,2019-11-27,,exact,,wikipedia
+WRC,Warnaco Group Inc. (The),2007-09-30,2013-03-31,no_later_than,no_later_than,edgar,edgar
+WRI,Weingarten Realty,,2021-08-04,,exact,,wikipedia
+WSM,"Williams-Sonoma, Inc.",,2025-03-24,,exact,,wikipedia
+WSO,Watsco,2010-12-31,,no_later_than,,edgar,
+WST,West Pharmaceutical Services,2015-07-08,2020-05-18,exact,exact,wikipedia,wikipedia
+WTFC,Wintrust Financial,2017-04-03,,exact,,wikipedia,
+WTR,Aqua America Inc.(1),,2020-03-31,,no_later_than,,edgar
+WTRG,Essential Utilities,2020-03-31,,no_later_than,,edgar,
+WTS,Watts Water Technologies,2022-02-01,,exact,,wikipedia,
+WTW,Weight Watchers,2018-09-18,unknown,exact,,wikipedia,
+WU,Western Union,2021-12-20,2025-10-06,exact,exact,wikipedia,wikipedia
+WW,WW International,2009-06-30,2021-09-20,no_later_than,exact,edgar,wikipedia
+WW,Watson Wyatt Worldwide Inc. Class A,2019-09-30,2021-09-30,no_later_than,no_later_than,edgar,edgar
+WWAV,WhiteWave Foods,2013-05-23,2017-04-12,exact,exact,wikipedia,wikipedia
+WWD,"Woodward, Inc.",2008-12-31,,no_later_than,,edgar,
+WWE,World Wrestling Entertainment,2018-08-01,2023-09-30,exact,no_later_than,wikipedia,edgar
+WXS,Wright Express,2012-03-26,unknown,exact,,wikipedia,
+WYND,Wyndham Destinations,2018-05-31,2021-03-31,exact,no_later_than,wikipedia,edgar
+X,U.S. Steel,2014-07-01,2025-06-24,exact,exact,wikipedia,wikipedia
+X,United States Steel Corp.,2019-09-30,2025-06-30,no_later_than,no_later_than,edgar,edgar
+XEC,Cimarex Energy,2007-03-31,2014-06-20,no_later_than,exact,edgar,wikipedia
+XEC,Cimarex Energy,2020-02-27,2021-10-05,exact,exact,wikipedia,wikipedia
+XLS,Exelis,2011-12-31,2015-05-29,no_later_than,exact,edgar,wikipedia
+XPO,"XPO, Inc.",2019-03-18,,exact,,wikipedia,
+XRAY,DENTSPLY International Inc.,,2008-12-31,,no_later_than,,edgar
+XRAY,Dentsply Sirona,2024-04-03,,exact,,wikipedia,
+XRX,Xerox,2021-03-22,2023-09-18,exact,exact,wikipedia,wikipedia
+Y,Alleghany,2012-03-31,2022-10-20,no_later_than,exact,edgar,wikipedia
+YELP,Yelp,2018-12-12,2022-06-21,exact,exact,wikipedia,wikipedia
+YETI,Yeti Holdings,2021-01-21,,exact,,wikipedia,
+ZBRA,Zebra Technologies,,2019-12-13,,exact,,wikipedia
+ZD,Ziff Davis,2021-12-31,2024-09-23,no_later_than,exact,edgar,wikipedia
+ZI,ZoomInfo,2023-06-19,2025-06-30,exact,no_later_than,wikipedia,edgar
+ZION,Zions Bancorporation,2024-03-18,,exact,,wikipedia,

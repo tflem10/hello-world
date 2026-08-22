@@ -15,11 +15,12 @@ side**, and the difference matters, so both halves are quantified here.
 
 | Question | Answer |
 |---|---|
-| Can point-in-time **membership** be reconstructed free? | **Partly.** Fully for the S&P 500 back to ~2012, for the S&P 400 back to ~2016, and for the S&P 600 only back to 2020. |
+| Can point-in-time **membership** be reconstructed free? | **Partly**, and further than this study first found. From Wikipedia alone: the S&P 500 back to ~2012, the S&P 400 to ~2016, the S&P 600 only to 2020. Adding SEC EDGAR fund filings ([§11](#11-sec-edgar-fund-filings-as-a-membership-source)) reaches **2005 at quarterly resolution for all three**, at the cost of dates that are quarter-bounds rather than exact. |
 | Can the **price history** of departed companies be recovered free? | **No.** 24 of 736 departed tickers (3.3%) yield a clean delisted series. |
 | Is the recovered fraction enough to change any conclusion? | **No.** It is far below the 50% bar, it is concentrated almost entirely in one calendar year, and the data Yahoo *does* return for delisted tickers is wrong more often than it is right. |
 | Should point-in-time membership be wired into the engine? | **Not for survivorship repair** — the prices are not there to repair it with. See [§8](#8-recommendation). |
 | Does the §7 haircut convention need changing? | **No.** The measurements support it; two of §7's supporting claims need correcting (see [§9](#9-corrections-to-backtest-methodologymd-7)). |
+| Is the *look-ahead* half fixable? | **Largely yes**, and it is a separate question from survivorship. Join-date coverage is now 100% / 92% / 88% across the three indices rather than 100% / 76% / 57% ([§11.8](#118-coverage-before-and-after)). |
 
 ---
 
@@ -35,6 +36,7 @@ side**, and the difference matters, so both halves are quantified here.
 8. [Recommendation](#8-recommendation)
 9. [Corrections to backtest-methodology.md §7](#9-corrections-to-backtest-methodologymd-7)
 10. [Reproducing this](#10-reproducing-this)
+11. [SEC EDGAR fund filings as a membership source](#11-sec-edgar-fund-filings-as-a-membership-source)
 
 ---
 
@@ -183,6 +185,12 @@ index's (close for a full-replication tracker, not identical). **This was valida
 say the source is real and usable, and no further.** It does not change the verdict, because it
 solves membership — and membership was never the binding constraint. Prices are (§6).
 
+> **Followed up in [§11](#11-sec-edgar-fund-filings-as-a-membership-source).** The route works. Two
+> of the hopes above did not survive contact: the `N-Q` era gives issuer *names* and nothing else,
+> so only the 2019-onwards quarter of the archive is identifier-keyed, and the HTML exhibit needed a
+> crosswalk built from four separate SEC sources. The conclusion in the last sentence stands
+> unchanged.
+
 ---
 
 ## 3. How complete are the change tables really?
@@ -311,10 +319,30 @@ source states a join date this is measurable **exactly**:
 (For the S&P 400 and 600 the two middle columns coincide: their change tables start in 2012 and
 2019, so every join date they record is inside the window by construction.)
 
-**10,569 of 24,096 nominal member-years — 44% — are periods in which the company was demonstrably
-not in the index it is being backtested as a member of.** That figure is a *lower* bound: the 98
+> **Correction (2026-08-22).** The 10,569 total above is arithmetic *per index*, and that is the
+> wrong denominator for this question. It scores a company against the index it sits in **today**,
+> so a name that was in the S&P 500 from 2010 and moved down to the S&P 400 in 2021 is counted as
+> having eleven years of "pre-membership exposure" — when in truth it never left the tradable
+> universe for a day. What the backtest actually selects from is the *union* of the three indices,
+> and on that basis the figure is **7,199 member-years, 30% of the nominal 24,096**, not 44%.
+>
+> | measure | member-years | share of 24,096 |
+> |---|---|---|
+> | per index, each symbol against its current index only | 10,569 | 44% |
+> | **union across indices, earliest stint start wins** | **7,199** | **30%** |
+> | difference — time spent as a member of a *different* S&P index | 3,370 | 14 pp |
+>
+> The two reconcile exactly: a follow-up package reproduced 10,569 from the same CSVs by per-index
+> arithmetic, and the 3,370-member-year gap is entirely index-to-index migration. **7,199 / 30% is
+> the number to quote**; 10,569 is kept here because it is what the per-index tables above sum to
+> and because the gap between them is itself the finding — a seventh of the apparent look-ahead
+> bias was double counting, not bias. Both figures remain lower bounds for the reason given below.
+
+**7,199 of 24,096 nominal member-years — 30% — are periods in which the company was demonstrably
+not in any index it is being backtested as a member of.** That figure is a *lower* bound: the 98
 S&P 400 and 259 S&P 600 names with no recorded join date contribute zero to it, and some of them
-certainly joined mid-window too.
+certainly joined mid-window too. [§11](#11-sec-edgar-fund-filings-as-a-membership-source) closes
+most of that gap and re-measures the figure.
 
 Two honest qualifications. The measured symbols are a subsample selected by data availability — a
 name has a recorded join date largely because it joined recently — so the per-symbol average is not
@@ -451,12 +479,14 @@ base for this document, and they are not wired into anything. The only cost is t
 that is unwanted; nothing imports them.
 
 **One finding is left on the table deliberately.** §5.2 shows the look-ahead half of the bias
-(10,569 member-years, 44% of the backtest) is separately measurable *and* separately fixable
-without any new price data — the join dates are already in these CSVs. That is a different decision
-from the one this brief gated on the 50% recovery bar, so no interface is sketched here. If it is
-worth pursuing it should be scoped as its own package, with the explicit caveat that join-date
-coverage is 100% / 76% / 57% across the three indices, so the fix would be partial and unevenly
-distributed across the universe.
+(7,199 member-years on the union rule, 30% of the backtest; 10,569 / 44% by the per-index arithmetic
+this document originally quoted) is separately measurable *and* separately fixable without any new
+price data — the join dates are already in these CSVs. That is a different decision from the one
+this brief gated on the 50% recovery bar, so no interface is sketched here. If it is worth pursuing
+it should be scoped as its own package, with the explicit caveat that join-date coverage is
+100% / 76% / 57% across the three indices, so the fix would be partial and unevenly distributed
+across the universe. **[§11](#11-sec-edgar-fund-filings-as-a-membership-source) revisits exactly
+that caveat** and lifts the S&P 600 from 57% to 88%.
 
 ---
 
@@ -508,3 +538,348 @@ and exponential backoff on 429. The script writes nothing outside its cache dire
 **Everything above is a measurement of two third-party sources on 2026-08-22.** Wikipedia articles
 get restructured — one of them was, eleven days before this was written — and Yahoo's retention of
 dead tickers is undocumented and unstable. Re-measure before relying on any of it.
+
+---
+
+## 11. SEC EDGAR fund filings as a membership source
+
+**Fetch date: 2026-08-22.** [§2.5](#25-one-free-source-this-study-did-not-exhaust-sec-edgar) left
+EDGAR as the one free source this study had not exhausted, validated only far enough to say it was
+real. This section turns that spot-check into coverage, and it is the answer to the caveat §8 ends
+on: join-date coverage of 100% / 76% / 57% across the three indices, with the worst-covered index
+also being the highest-turnover one.
+
+Everything here comes from [`scripts/build_membership_edgar.py`](../scripts/build_membership_edgar.py),
+which is separate from `build_membership.py` and writes the same three CSVs.
+
+### 11.1 The source
+
+An index-tracking ETF is a registered fund, so it must file its complete holdings with the SEC. Its
+filings are therefore a dated, primary-source, licence-clean roster of the index it tracks. Three
+iShares trackers cover exactly the three indices this repo backtests:
+
+| index | tracker | series id | holdings filings found | earliest | latest |
+|---|---|---|---|---|---|
+| S&P 500 | IVV | `S000004310` | 96 | 2006-03-01 | 2026-06-04 |
+| S&P 400 | IJH | `S000004307` | 95 | 2006-03-01 | 2026-06-04 |
+| S&P 600 | IJR | `S000004313` | 95 | 2006-03-01 | 2026-06-04 |
+
+EDGAR's browse endpoint accepts a **series id** where it normally wants a CIK, which is the only
+free way to ask "what did this *fund* file" rather than "what did its 380-fund trust file".
+
+Four form types carry a Schedule of Investments, and it takes all four to get quarterly resolution
+across twenty years — a point worth stating because `NPORT-P` alone, the form §2.5 named, starts in
+2019 and would have added almost nothing to the S&P 600 that Wikipedia's change table does not
+already cover from 2019-12-17:
+
+| form | era | what it is | identifiers |
+|---|---|---|---|
+| `N-Q` | 2006–2019 | quarterly holdings, retired when N-PORT arrived | **name only** |
+| `N-CSR` / `N-CSRS` | 2006–present | annual and semi-annual reports | **name only** |
+| `NPORT-P` | 2019–present | structured XML, quarterly | CUSIP + ISIN + LEI |
+
+**The pre-2019 half of the archive has no identifier at all** — just "AAR Corp." and a share count.
+That is the single most important correction to §2.5, which hoped the route would be
+identifier-keyed throughout. It is identifier-keyed for a quarter of its span and name-keyed for
+three quarters of it.
+
+### 11.2 Getting a roster out of a filing
+
+The `N-Q`/`N-CSR`/`N-CSRS` documents are 17–58 MB of HTML covering every fund in the trust, so one
+fund's section has to be cut out of it. Three things had to be right:
+
+- **Two document eras.** Reports from 2019 on put the "Schedule of Investments" banner and the fund
+  name in table cells; before that they sit in bare paragraphs between the tables. A table-only
+  reader finds *nothing* in the older half of the archive.
+- **Summary schedules.** An annual report carries each fund twice — a "Summary Schedule of
+  Investments" listing only the fifty largest positions plus a line called "Other securities", and
+  then the real one. Taking whichever extraction yields more names picks the real one.
+- **The affiliate-transaction table.** It repeats every holding with five to eight numeric columns.
+  A holding line has exactly two (shares, value); anything else is not a holding. Getting this
+  wrong doubles every roster.
+
+A section that cannot be located unambiguously is refused rather than guessed at, because picking
+up the Growth or Value sibling by mistake would silently corrupt every date derived from it. Each
+roster is then checked against the index size it should have; 7 of 243 fall outside tolerance and
+are dropped.
+
+### 11.3 The crosswalk: CUSIP and name to ticker
+
+This is the central engineering problem, and the answer is that **SEC publishes a CUSIP-to-ticker
+crosswalk without ever calling it one**. The fails-to-deliver files, released twice a month since
+2009-07, are plain pipe-delimited text:
+
+```
+SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE
+20241202|B38564108|CMBT|165|CMB.TECH NV (BEL)|11.22
+```
+
+That is a CUSIP, a ticker, and a company name, dated. Because each file is dated the mapping is
+genuinely point-in-time: `724078100` correctly answers `PJC` in 2019 and `PIPR` in 2020, and a
+ticker reassigned later cannot leak backwards into an older roster — which is precisely the defence
+against the recycling failure measured in [§7](#7-ticker-recycling-measured).
+
+Five tiers, each recorded per symbol so the weak ones can be discounted:
+
+| tier | rule | applies to |
+|---|---|---|
+| `cusip` | CUSIP or ISIN-embedded CUSIP → fails-to-deliver ticker for the nearest fortnight | the NPORT era |
+| `nport` | issuer name → the ticker its CUSIP already settled in the NPORT era | the HTML era |
+| `former` | issuer name → ticker via EDGAR's record of the company's **former names** | the HTML era |
+| `sec` | issuer name → `company_tickers.json` title, exact match | current filers only |
+| `ftd` | issuer name → fails-to-deliver *description*, 12-character prefix | anything trading since 2009 |
+
+Every tier is an exact rule with a uniqueness test. A name two tickers answer to is recorded as
+**ambiguous and left unresolved** — a dual-class issuer is one name in `NPORT-P` and two in the HTML
+schedules, and neither answer is safe from the name alone. **No holding is ever guessed into a
+ticker.** Unmatched holdings are counted and reported.
+
+Four fixes mattered more than the tier design:
+
+- **Footnote markers glued to names.** The older schedules write `AeroVironment Inc.(a)(b)` with no
+  `<sup>` to strip. Left in, they halved the match rate on every August-filed `N-Q`.
+- **Punctuation.** "D.R. Horton", "DR Horton" and "D R HORTON" are three spellings of one company
+  across three sources. Comparison keys drop spaces entirely.
+- **Truncated descriptions.** Fails-to-deliver descriptions are cut at 30 characters, so long names
+  can only be compared on a prefix and short ones only in full.
+- **Share-class spelling.** NSCC writes Berkshire class B as `BRKB`; this repo writes `BRK-B`. Four
+  symbols are affected and each would otherwise both fail to fill its own row *and* invent a second
+  row beside it. The alias map is derived from the universe files rather than hand-written.
+
+### 11.4 From snapshots to dates, and why they are bounds
+
+Diffing consecutive rosters gives events, but the filings are quarterly, so an event's date is a
+**bracket, not a moment**. A symbol absent from the roster of 2014-03-31 and present in that of
+2014-06-30 joined somewhere in between. What is written is `2014-06-30`, and the adjacent
+`added_bound` column says `no_later_than`. Wikipedia's dates keep `exact`. Nothing merges a bound
+into a column that claims to be exact without saying so beside it.
+
+The bound errs in the safe direction for the look-ahead question. The true join is at or before the
+date written, so a consumer that excludes the symbol until that date excludes it for slightly *too
+long* — under-including rather than over-including, which is the direction that does not reintroduce
+the bias being fixed.
+
+Two guards stop the diff from inventing events:
+
+**Absence has to be worth something.** "Missing from the 2011 roster" is only evidence of
+non-membership if a membership would have been *recognised*. In the name-keyed era it often would
+not have been: an issuer the crosswalk cannot place is indistinguishable from one that is not there.
+So a roster below a resolution threshold (`--min-resolution`, default 0.60) can witness presence but
+never absence, and a join date is only written where a **decisive earlier roster shows the symbol
+absent**. "First seen in 2014" on its own says nothing about 2013 and produces no date.
+
+**A gap is not always a departure.** Where two runs of presence are separated only by rosters that
+are not decisive, they are one membership with a crosswalk outage in the middle, and they are
+merged. Without this a single unresolved quarter would manufacture a departure and a re-admission.
+
+### 11.5 Renames: the failure mode this method is most exposed to
+
+A corporate rename is the one event a name-keyed diff cannot see for what it is. Apple's 2006
+schedule says "Apple Computer Inc."; nothing in a 2019-vintage crosswalk answers to that, so the
+2006 roster looks like a roster without Apple in it and the diff reports that Apple joined the
+S&P 500 in 2007. It is a manufactured join date in exactly the direction that would corrupt a
+look-ahead fix — and, being indistinguishable from a real arrival, it would not announce itself.
+
+The fix is that EDGAR's own company record lists former names with the dates they were dropped, and
+that record is free and per-company:
+
+```
+Apple Inc.  <- 2007-01-04 APPLE COMPUTER INC  <- 1997-07-28 APPLE COMPUTER INC/ FA
+CVS HEALTH Corp  <- 2014-09-03 CVS CAREMARK CORP  <- 2007-03-22 CVS CORP  <- 1997-01-10 MELVILLE CORP
+```
+
+Fetching that for each current member turns the whole class of error into an exact lookup. The
+measured effect is in [§11.7](#117-what-the-rename-crosswalk-was-worth).
+
+### 11.6 The crosswalk match rate
+
+Pooled over all 243 rosters: **118,934 holding-lines, 111,537 resolved to a ticker — 93.8%.**
+
+| tier | lines | share of resolved |
+|---|---|---|
+| `nport` | 50,262 | 45.1% |
+| `cusip` | 39,764 | 35.7% |
+| `ftd` | 15,695 | 14.1% |
+| `former` | 4,068 | 3.6% |
+| `sec` | 1,748 | 1.6% |
+
+The pooled number hides the shape that matters, which is that **the rate is a function of how long
+ago the roster was**:
+
+| S&P 600 roster | 2005-12-31 | 2007-06-30 | 2009-12-31 | 2012-06-30 | 2014-12-31 | 2017-06-30 | 2018-12-31 | 2019-09-30 on |
+|---|---|---|---|---|---|---|---|---|
+| resolved | 68.2% | 77.8% | 90.3% | 90.8% | 92.2% | 95.2% | 96.8% | **99.3–100%** |
+
+Two different regimes. From 2019 the CUSIP is in the filing and the match is essentially total.
+Before that it is a name match, and what it is really measuring is *survival*: the unresolved
+remainder is dominated by companies that were gone before the fails-to-deliver archive starts in
+2009-07, so nothing free records what they traded as. The 2005 roster is one third unresolvable for
+that reason alone.
+
+This matters less than it looks, because **the names that go unresolved are not the names the
+join-date question is about**. A current member is resolvable by construction — it is in a recent
+CUSIP-keyed roster. The persistent failures are all long-departed: Whole Foods, Harman
+International, C.R. Bard, du Pont, Burlington Northern. 146 / 232 / 592 distinct names across the
+three indices are never resolved in any roster, and they are counted, not guessed at.
+
+### 11.7 What the rename crosswalk was worth
+
+Running the whole pipeline twice, with and without EDGAR's former-name records
+(`build_membership_edgar.py renames`):
+
+| | S&P 500 | S&P 400 | S&P 600 | total |
+|---|---|---|---|---|
+| holding-lines only a former name could resolve | 2,275 | 947 | 841 | **4,063** |
+| spurious membership breaks stitched back together | 10 | 4 | 5 | **19** |
+| symbols whose first appearance moved **earlier** | 47 | 23 | 23 | **93** |
+
+The middle row is renames caught mid-membership — a break the diff would have published as a
+departure and a re-admission. The bottom row is the more damaging kind: 93 symbols that would have
+carried a **manufactured late join date**, including AAPL, CVS, ADBE, BKNG, CME and CBRE. Those are
+exactly the errors that would have propagated into a look-ahead fix as fake pre-membership exposure.
+
+It also shows up in the cross-check against Wikipedia's exact dates, holding everything else
+constant:
+
+| join-date disagreement | S&P 500 | S&P 400 | S&P 600 | all |
+|---|---|---|---|---|
+| without former names | 60/403 = 14.9% | 3/561 = 0.5% | 4/438 = 0.9% | 67/1,429 = **4.7%** |
+| with former names | 36/374 = 9.6% | 5/557 = 0.9% | 3/438 = 0.7% | 44/1,395 = **3.2%** |
+
+The gain is concentrated in the S&P 500, which is where it should be: its Wikipedia dates reach back
+to the 1950s, so renames have had the most time to accumulate. It is **not monotonic** — the S&P 400
+goes from 3 disagreements to 5, and the S&P 600 from 4 to 3. At those counts that is noise, and it
+is quoted rather than smoothed because a crosswalk that only ever helped would be a suspicious
+crosswalk.
+
+**93 corrected late joins against 2 newly disagreeing rows is the honest summary.**
+
+### 11.8 Coverage before and after
+
+The headline. "Join date" means an ISO date in the `added` column of a row that is still a member:
+
+| | S&P 500 | S&P 400 | **S&P 600** | total |
+|---|---|---|---|---|
+| current members | 503 | 400 | 603 | 1,506 |
+| with a join date, before | 503 (100%) | 302 (76%) | **344 (57%)** | 1,149 (76%) |
+| with a join date, after | 503 (100%) | 369 (92%) | **533 (88%)** | **1,405 (93%)** |
+| rows in the file | 903 → 1,004 | 1,043 → 1,303 | 1,107 → 1,799 | 3,053 → 4,106 |
+| rows with a removal date | 383 → 489 | 610 → 890 | 491 → 1,193 | 1,484 → 2,572 |
+
+**The S&P 600 goes from 57% to 88%**, which was the binding constraint §8 flagged, and it is the
+index EDGAR helps most because it is the one Wikipedia covers worst. The S&P 500 gains nothing on
+join dates — Wikipedia was already at 100% — but EDGAR still adds 101 departed memberships it never
+recorded and cross-checks 374 of its dates.
+
+The 1,053 new rows are memberships the Wikipedia reconstruction never saw at all: companies that
+joined and left inside a window its change table does not reach. They carry bounded dates from
+EDGAR, and every one is labelled as such.
+
+The merge is **idempotent** — running it twice adds nothing — and the invariant §1 relies on still
+holds: the rows with an empty `removed` are exactly the committed snapshots, 503 / 400 / 603, no
+additions and no omissions.
+
+**A caveat on the look-ahead figure.** Re-running §5.2's calculation over the enriched CSVs gives
+**7,593 union member-years, up from 6,982**. The bias did not grow — the *measurement* did, because
+727 symbols now have a datable join where 630 did before. It remains a lower bound. (That 6,982 is
+this script's own recomputation of the pre-merge union figure; the follow-up package quoted in §5.2
+measured 7,199 on the same CSVs under a slightly different treatment of undated stints. The 3%
+spread between the two is worth knowing about and does not move any conclusion.)
+
+### 11.9 Where Wikipedia and EDGAR disagree
+
+Both sources are cross-checked against each other wherever both speak — Wikipedia states an exact
+date, EDGAR brackets it — because the disagreement rate is the only honest bound on how far either
+can be trusted. A bracket edge is given 7 days of slack (`--bracket-tolerance`), since an index
+change is effective before the open on a stated date while a fund's schedule is dated at a quarter
+end, and the two straddle harmlessly: CBRL joined the S&P 400 on 2015-06-29 and appears in the
+roster dated 2015-06-30.
+
+| | testable | disagree | rate | within 7d of the edge |
+|---|---|---|---|---|
+| join dates, S&P 500 | 374 | 36 | **9.6%** | |
+| join dates, S&P 400 | 557 | 5 | **0.9%** | |
+| join dates, S&P 600 | 438 | 3 | **0.7%** | |
+| **join dates, all** | **1,395** | **44** | **3.2%** | +26 (5.0% scored strictly) |
+| removal dates, all | 1,278 | 50 | **3.9%** | |
+
+The S&P 500's 9.6% is not a worse reconstruction, it is a harder test: its Wikipedia dates reach
+back decades, so any rename or share-class event in forty years breaks the bracket, and the residue
+after the former-name fix is dominated by ticker changes (`MRSH` from `MMC`, `FISV` to `FI`,
+`BALL` from `BLL`) and by share-class re-listings. `GOOG` disagrees because Wikipedia's 2014-04-03
+is the Class C creation while the ETF held Google from 2006 — both are right about different
+questions.
+
+**The S&P 600's 0.7% is the number that matters** for this package, since the S&P 600 is where the
+new dates are, and it says the derived brackets and Wikipedia agree almost always. It has to be read
+with its limit stated: Wikipedia's S&P 600 change table only starts 2019-12-17, so those 438 tests
+all fall in the CUSIP-keyed era, and they say nothing about the name-keyed years where most of the
+new S&P 600 dates actually come from. **The S&P 400 is the honest proxy for those years** — its
+table starts in 2012, its 557 tests span the whole window on both sides of the 2019 boundary, and it
+says **0.9%**.
+
+One more contradiction, left standing rather than resolved: **24 rows the CSVs call current do not
+appear in the trackers' newest rosters** (8 / 2 / 14). The committed snapshots are the authority on
+who is in the index today, so those rows are untouched, but a silent contradiction would be worse
+than a counted one.
+
+### 11.10 Verdict
+
+**EDGAR works, and it is the first free source in this study that materially improves on
+Wikipedia.** It lifts join-date coverage of the S&P 600 from 57% to 88% and of the S&P 400 from 76%
+to 92%, adds 1,053 previously unrecorded memberships, dated removals from 1,484 to 2,572, and
+cross-checks 1,395 Wikipedia dates at a 3.2% disagreement rate. It reaches back to 2005-12-31,
+five years before the backtest window opens, at quarterly resolution throughout.
+
+Four limits belong next to that, none of them fatal and all of them measurable:
+
+1. **Dates are bounds, not events** — accurate to the filing quarter, and marked `no_later_than`.
+2. **The pre-2019 crosswalk is name-based**, 68% resolved at the far end rising to 97% by 2018. The
+   unresolved remainder is long-dead companies, not current members.
+3. **A rename is still the dominant residual error**, reduced but not eliminated: 93 fixed, and the
+   9.6% S&P 500 disagreement rate is mostly what is left.
+4. **A tracker's holdings are the fund's, not the index's.** IVV, IJH and IJR are full-replication
+   funds, so the two are near-identical, but they are not the same object.
+
+**This does not change §8's recommendation, and it was never going to.** Survivorship is blocked on
+*prices*, and EDGAR has no prices. The 1,053 recovered memberships name companies whose price
+history [§6](#6-the-recovery-test-can-yahoo-serve-the-departed) has already shown is not available,
+so knowing they were members does not make them tradable in a backtest.
+
+What it does change is the caveat §8 attached to the *look-ahead* fix: that fix would have been
+unevenly distributed across the universe, weakest exactly where the bias was largest. It is now
+roughly even — 100% / 92% / 88% — which removes the main objection to scoping it as its own package.
+
+### 11.11 Reproducing this
+
+```bash
+# What the three trackers filed, by form and year
+uv run python scripts/build_membership_edgar.py filings
+
+# Build every roster and report the crosswalk match rate
+uv run python scripts/build_membership_edgar.py snapshots
+
+# A/B the former-name crosswalk against going without it (§11.7)
+uv run python scripts/build_membership_edgar.py renames
+
+# Fold the dates into the CSVs — report first, then write
+uv run python scripts/build_membership_edgar.py merge --dry-run
+uv run python scripts/build_membership_edgar.py merge
+```
+
+Responses and parsed rosters are cached under `$TMPDIR/swing-edgar-cache` (`--cache-dir` to move
+it), gzipped, about 350 MB. **The first run takes roughly 45 minutes**, most of it the ~1,500
+former-name lookups against EDGAR's `browse-edgar` CGI, which answers in about 3.7 s each;
+`--no-former-names` skips them at the cost of §11.7. Re-runs are free.
+
+SEC's access rules are enforced and are respected here: the descriptive User-Agent with a contact
+address that SEC requires, and one request every 0.25 s — a quarter of SEC's documented 10/second
+limit — with exponential backoff on 403 and 429. Neither was triggered during this study. The script
+writes nothing outside its cache directory and the three `*-membership.csv` files, and importing it
+has no side effects.
+
+Two warnings for whoever runs this next. `scripts/build_membership.py build` **rewrites the same
+three CSVs with the four-column schema**, discarding the provenance columns; run the EDGAR merge
+after it, not before. And these numbers are a measurement of SEC's holdings archive on 2026-08-22 —
+the fund names, the report layouts and the fails-to-deliver URL scheme have all changed at least
+once inside the span this study reads, and they will change again.
