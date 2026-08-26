@@ -349,6 +349,15 @@ sh ~/.swing/bin/swing-nightly.sh
 
 ### Notes
 
+- **A config change does not take effect until the job is genuinely reloaded.** launchd holds a
+  job's definition in memory: bootstrapping a label it already has is a no-op, so a rewritten plist
+  is ignored and the *previous* command keeps running on schedule. This is not theoretical — it
+  cost two nights of shadow records in August 2026, while `schedule install` reported success
+  because something was indeed loaded. `swing schedule install` now boots the old definition out
+  before loading the new one and then reads back `launchctl print`'s argument vector to confirm
+  launchd is running what the plist says, so re-running install is the correct and sufficient way
+  to apply a change. If it cannot read that vector back on your macOS it prints `NOT VERIFIED`
+  rather than claiming a guarantee it did not check.
 - Running the chain twice is safe. Recording is idempotent per `(configuration, date)` and scoring
   is a full replay, so a launchd double-fire on wake rewrites the same day rather than
   double-counting it.

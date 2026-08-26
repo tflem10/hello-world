@@ -424,24 +424,69 @@ def _output(result: subprocess.CompletedProcess[str]) -> str:
     return (f"{result.stderr or ''} {result.stdout or ''}").strip() or "no output"
 
 
-def _is_loaded(runner: Runner, label: str) -> tuple[bool, str]:
-    """Ask launchd whether ``label`` is really loaded (audit BUG-023).
+def _parse_arguments(text: str) -> list[str] | None:
+    """Pull the ``arguments = { ... }`` vector out of ``launchctl print`` output.
 
-    ``launchctl print`` is the authoritative answer in the modern (``bootstrap``)
-    interface; ``launchctl list <label>`` is the legacy one and is tried second
-    so this still works on a Mac where ``print`` is unavailable or refuses.
+    The block looks like this, one argument per line, tab-indented::
+
+        program = /bin/sh
+        arguments = {
+            /bin/sh
+            /Users/tim/.swing/bin/swing-nightly.sh
+        }
+
+    Arguments here are always paths and flags, so the first ``}`` ends the
+    block. Returns ``None`` when there is no such block to read — a macOS whose
+    ``print`` is shaped differently is a thing to *report*, not to guess about.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "arguments = {":
+            continue
+        arguments: list[str] = []
+        for entry in lines[index + 1 :]:
+            stripped = entry.strip()
+            if stripped == "}":
+                return arguments
+            if stripped:
+                arguments.append(stripped)
+        return None  # an unterminated block is not an answer
+    return None
+
+
+def _plist_arguments(path: Path) -> list[str]:
+    """The ``ProgramArguments`` the plist on disk specifies."""
+    try:
+        with path.open("rb") as handle:
+            loaded = plistlib.load(handle)
+    except (OSError, ValueError):  # pragma: no cover - we wrote it moments ago
+        return []
+    return [str(item) for item in loaded.get("ProgramArguments", [])]
+
+
+def _loaded_arguments(runner: Runner, label: str) -> tuple[bool, list[str] | None, str]:
+    """What launchd is actually holding for ``label`` right now.
 
     Returns:
-        ``(loaded, explanation)`` — the explanation is launchctl's own output
-        and is empty when the job is loaded.
+        ``(loaded, arguments, explanation)``. ``arguments`` is what launchd
+        would execute; ``None`` means the job is loaded but this macOS did not
+        show its argument vector, which is a different answer from "the job is
+        not there" and is reported differently.
     """
     printed = _launchctl(runner, "print", f"{_domain()}/{label}")
     if printed.returncode == 0:
-        return True, ""
+        arguments = _parse_arguments(printed.stdout or "")
+        if arguments is None:
+            return True, None, "`launchctl print` did not include an arguments block"
+        return True, arguments, ""
     listed = _launchctl(runner, "list", label)
     if listed.returncode == 0:
-        return True, ""
-    return False, _output(printed)
+        return (
+            True,
+            None,
+            "only the legacy `launchctl list` answered, and it does not show arguments",
+        )
+    return False, None, _output(printed)
 
 
 def _emit(text: str) -> None:
@@ -451,10 +496,19 @@ def _emit(text: str) -> None:
 def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | None = None) -> None:
     """Write both plists and load them into launchd. Idempotent.
 
-    Nothing is called installed until launchd itself says the job is loaded
-    (audit BUG-023): the exit code of ``bootstrap`` alone was not enough
-    evidence, and a schedule that was never really installed is invisible until
-    the night it fails to fire.
+    Nothing is called installed until launchd has been asked what it is
+    *actually going to run* and its answer matches the plist on disk. Two
+    weaker checks have already failed here, and both failed the same way — by
+    verifying a property that was true while the thing they claimed was false:
+
+    * the exit code of ``bootstrap`` (audit BUG-023), which macOS returns as 5
+      for genuine failures;
+    * the mere presence of a loaded job, which stays true across a rewritten
+      plist that launchd has ignored.
+
+    So :func:`install` boots the old definition out before bootstrapping the new
+    one, and then compares ``launchctl print``'s argument vector against the
+    file's ``ProgramArguments``.
 
     Args:
         cfg: the loaded configuration.
@@ -477,6 +531,18 @@ def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | Non
     installed = 0
     for label, path in written.items():
         attempts: list[str] = []
+        # Boot the old definition out first, every time. launchd holds a job's
+        # definition in memory: bootstrapping a label it already has is a no-op,
+        # so a rewritten plist is simply ignored and the *previous* command
+        # keeps running on schedule. That is not hypothetical — it shipped: the
+        # evening agent went on running `swing scan` directly for two nights
+        # after an install that had already rewritten the plist to run the
+        # nightly wrapper, and the install reported success because something
+        # was indeed loaded. A momentary unload of a calendar job costs nothing.
+        _launchctl(run, "bootout", f"{_domain()}/{label}")
+        # Its failure is deliberately not inspected: on a first install there is
+        # nothing to boot out, which is success, not an error.
+
         result = _launchctl(run, "bootstrap", _domain(), str(path))
         if result.returncode != 0 and not _already(result):
             attempts.append(f"bootstrap: {_output(result)}")
@@ -484,7 +550,7 @@ def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | Non
             if fallback.returncode != 0 and not _already(fallback):
                 attempts.append(f"load: {_output(fallback)}")
 
-        loaded, why = _is_loaded(run, label)
+        loaded, arguments, why = _loaded_arguments(run, label)
         if not loaded:
             attempts.append(f"print: {why}")
             _emit(
@@ -494,8 +560,29 @@ def install(cfg: Config, *, runner: Runner | None = None, target_dir: Path | Non
                 f"Until this is fixed the schedule will NOT run."
             )
             continue
+
+        wanted = _plist_arguments(path)
+        if arguments is not None and wanted and arguments != wanted:
+            _emit(
+                f"FAILED to install {label}. launchd has the job loaded, but it is running a "
+                f"DIFFERENT command from the one in {path}:\n"
+                f"    launchd runs : {' '.join(arguments)}\n"
+                f"    the plist says: {' '.join(wanted)}\n"
+                f"Repair it by hand with `launchctl bootout {_domain()}/{label}` followed by "
+                f"`launchctl bootstrap {_domain()} {path}`, then re-run this command. Until then "
+                f"the schedule runs the OLD command."
+            )
+            continue
+
         installed += 1
-        _emit(f"Installed {label}: {path}")
+        if arguments is None:
+            _emit(
+                f"Installed {label}: {path} — but NOT VERIFIED: {why}, so this command could not "
+                f"confirm that launchd is running what the plist says. Check it with "
+                f"`launchctl print {_domain()}/{label}`."
+            )
+        else:
+            _emit(f"Installed {label}: {path}")
 
     if installed:
         _emit(

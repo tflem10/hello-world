@@ -60,6 +60,82 @@ class Runner:
         return [call[1] for call in self.calls]
 
 
+class FakeLaunchd:
+    """A runner that models the part of launchd that actually bit us.
+
+    Real ``launchctl`` keeps a job's definition **in memory**. Bootstrapping a
+    label it already holds is a no-op: the rewritten plist on disk is ignored
+    and the previous argument vector goes on running. An installer that only
+    asks "is something loaded?" therefore proves nothing, which is how the
+    evening agent ran ``swing scan`` directly for two nights after an install
+    that had already rewritten the plist to run the nightly wrapper.
+
+    ``loaded`` maps label -> the argument vector launchd would execute.
+    """
+
+    def __init__(self, loaded: dict[str, list[str]] | None = None) -> None:
+        self.loaded: dict[str, list[str]] = dict(loaded or {})
+        self.calls: list[list[str]] = []
+
+    # -- launchctl subcommands ---------------------------------------------
+
+    def _bootstrap(self, plist_path: str) -> subprocess.CompletedProcess:
+        with Path(plist_path).open("rb") as handle:
+            parsed = plistlib.load(handle)
+        label = parsed["Label"]
+        if label in self.loaded:
+            # The definition already in memory wins, and launchctl says so in a
+            # way that reads like success to anything looking for "already".
+            return subprocess.CompletedProcess(
+                [], 37, stdout="", stderr=f"Bootstrap failed: 37: {label} is already loaded"
+            )
+        self.loaded[label] = [str(a) for a in parsed["ProgramArguments"]]
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    def _print(self, target: str) -> subprocess.CompletedProcess:
+        label = target.rsplit("/", 1)[-1]
+        arguments = self.loaded.get(label)
+        if arguments is None:
+            return subprocess.CompletedProcess(
+                [], 113, stdout="", stderr="Could not find service in domain"
+            )
+        rendered = "\n".join(f"\t\t{argument}" for argument in arguments)
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=(
+                f"{target} = {{\n\tactive count = 0\n\tstate = not running\n\n"
+                f"\tprogram = {arguments[0]}\n\targuments = {{\n{rendered}\n\t}}\n\n"
+                f"\tdomain = gui/501\n}}\n"
+            ),
+            stderr="",
+        )
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(list(args))
+        subcommand = args[1] if len(args) > 1 else ""
+        if subcommand == "bootstrap":
+            return self._bootstrap(args[3])
+        if subcommand == "bootout":
+            label = args[2].rsplit("/", 1)[-1]
+            if self.loaded.pop(label, None) is None:
+                return subprocess.CompletedProcess(
+                    [], 3, stdout="", stderr="Boot-out failed: 3: No such process"
+                )
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        if subcommand == "print":
+            return self._print(args[2])
+        if subcommand == "list":
+            label = args[2] if len(args) > 2 else ""
+            code = 0 if label in self.loaded else 113
+            return subprocess.CompletedProcess([], code, stdout="", stderr="")
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    @property
+    def subcommands(self) -> list[str]:
+        return [call[1] for call in self.calls]
+
+
 @pytest.fixture(autouse=True)
 def _no_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
     """Belt and braces: even an un-injected runner cannot reach the real thing."""
@@ -178,18 +254,19 @@ NOT_LOADED = {
 
 
 def test_install_bootstraps_both_agents(cfg, agents_dir: Path, capsys) -> None:
-    runner = Runner()
-    launchd.install(cfg, runner=runner, target_dir=agents_dir)
+    fake = FakeLaunchd()
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
 
     domain = f"gui/{os.getuid()}"
-    # Every bootstrap is followed by a `print` that verifies it (audit BUG-023).
-    assert runner.subcommands == ["bootstrap", "print", "bootstrap", "print"]
-    for call in runner.calls:
+    # Old definition out, new one in, then read back what launchd actually holds.
+    assert fake.subcommands == ["bootout", "bootstrap", "print"] * 2
+    for call in fake.calls:
         assert call[0] == "launchctl"
-    for call in (runner.calls[0], runner.calls[2]):
-        assert call[2] == domain
-        assert call[3].endswith(".plist")
-    assert runner.calls[1][2] == f"{domain}/com.swing.scan"
+    bootout, bootstrap, printed = fake.calls[0], fake.calls[1], fake.calls[2]
+    assert bootout[2] == f"{domain}/com.swing.scan"
+    assert bootstrap[2] == domain
+    assert bootstrap[3].endswith(".plist")
+    assert printed[2] == f"{domain}/com.swing.scan"
 
     out = capsys.readouterr().out
     assert "Installed com.swing.scan" in out
@@ -205,7 +282,7 @@ def test_install_falls_back_to_load_when_bootstrap_is_unsupported(
     )
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
-    assert runner.subcommands == ["bootstrap", "load", "print"] * 2
+    assert runner.subcommands == ["bootout", "bootstrap", "load", "print"] * 2
     assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
@@ -219,7 +296,7 @@ def test_install_is_idempotent_when_already_loaded(cfg, agents_dir: Path, capsys
     )
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
-    assert runner.subcommands == ["bootstrap", "print"] * 2  # no fallback attempted
+    assert runner.subcommands == ["bootout", "bootstrap", "print"] * 2  # no fallback attempted
     assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
@@ -268,19 +345,10 @@ def test_install_verifies_with_launchctl_before_claiming_success(
     runner = Runner(dict(NOT_LOADED))  # bootstrap succeeds, the job still is not loaded
     launchd.install(cfg, runner=runner, target_dir=agents_dir)
 
-    assert runner.subcommands == ["bootstrap", "print", "list"] * 2
+    assert runner.subcommands == ["bootout", "bootstrap", "print", "list"] * 2
     out = capsys.readouterr().out
     assert "Installed" not in out
     assert "Could not find service" in out
-
-
-def test_install_accepts_the_legacy_list_answer(cfg, agents_dir: Path, capsys) -> None:
-    """An older Mac whose `launchctl print` refuses is still verified, via `list`."""
-    runner = Runner({"print": subprocess.CompletedProcess([], 1, stdout="", stderr="Bad request")})
-    launchd.install(cfg, runner=runner, target_dir=agents_dir)
-
-    assert runner.subcommands == ["bootstrap", "print", "list"] * 2
-    assert "Installed com.swing.scan" in capsys.readouterr().out
 
 
 def test_install_warns_when_the_binary_is_missing(
@@ -673,3 +741,161 @@ def test_status_flags_a_missing_wrapper(cfg, agents_dir: Path, capsys) -> None:
     launchd.status(cfg, runner=runner, target_dir=agents_dir)
 
     assert "(MISSING)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the loaded job must match the plist, not merely exist
+# ---------------------------------------------------------------------------
+
+
+def wrapper_arguments(cfg) -> list[str]:
+    return ["/bin/sh", str(launchd.nightly_script_path(cfg))]
+
+
+def test_install_replaces_a_definition_launchd_is_already_holding(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    """The 24 Aug failure, reproduced: a rewritten plist that launchd ignored.
+
+    The agent was loaded from an older plist that ran `swing scan` directly.
+    Install rewrote the file, bootstrapped over the top — a no-op for a label
+    already in memory — and reported success, and the scheduler went on running
+    the old command for two nights with no shadow record at all.
+    """
+    stale = ["/Users/tim/Code/swingtrader2/.venv/bin/swing", "scan"]
+    fake = FakeLaunchd({launchd.LABEL_SCAN: list(stale)})
+
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+
+    assert fake.loaded[launchd.LABEL_SCAN] == wrapper_arguments(cfg)
+    assert fake.loaded[launchd.LABEL_SCAN] != stale
+    assert "Installed com.swing.scan" in capsys.readouterr().out
+
+
+def test_install_boots_out_before_bootstrapping(cfg, agents_dir: Path) -> None:
+    fake = FakeLaunchd({launchd.LABEL_SCAN: ["/old/swing", "scan"]})
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+
+    assert fake.subcommands == ["bootout", "bootstrap", "print"] * 2
+
+
+def test_a_first_install_is_not_confused_by_a_failed_bootout(cfg, agents_dir: Path, capsys) -> None:
+    """Nothing to boot out is the normal first install, not an error."""
+    fake = FakeLaunchd()
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert fake.loaded[launchd.LABEL_SCAN] == wrapper_arguments(cfg)
+    assert fake.loaded[launchd.LABEL_CONFIRM][-1] == "confirm"
+    assert "Installed com.swing.scan" in out
+    assert "Installed com.swing.confirm" in out
+    assert "No such process" not in out
+    assert "FAILED" not in out
+
+
+def test_reinstalling_an_identical_job_is_still_a_clean_install(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    fake = FakeLaunchd()
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+    capsys.readouterr()
+
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+
+    assert fake.loaded[launchd.LABEL_SCAN] == wrapper_arguments(cfg)
+    assert "Installed com.swing.scan" in capsys.readouterr().out
+
+
+def test_install_refuses_to_claim_success_when_launchd_kept_the_old_command(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    """The check has to compare, not just count.
+
+    This models a launchd that accepts every call and still refuses to update
+    the definition — so a fix that boots out but verifies only "something is
+    loaded" passes the test above and fails this one.
+    """
+
+    class StubbornLaunchd(FakeLaunchd):
+        def __call__(self, args, **kwargs):
+            if len(args) > 1 and args[1] == "bootout":
+                self.calls.append(list(args))  # accepted, but nothing changes
+                return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            return super().__call__(args, **kwargs)
+
+    stale = ["/old/venv/bin/swing", "scan"]
+    fake = StubbornLaunchd({launchd.LABEL_SCAN: list(stale)})
+
+    launchd.install(cfg, runner=fake, target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert "FAILED to install com.swing.scan" in out
+    assert "DIFFERENT command" in out
+    assert "/old/venv/bin/swing scan" in out  # what launchd would really run
+    assert str(launchd.nightly_script_path(cfg)) in out  # what the plist says
+    assert f"launchctl bootout {launchd._domain()}/com.swing.scan" in out
+    assert "Installed com.swing.scan" not in out
+    # The morning agent is independent and still installs.
+    assert "Installed com.swing.confirm" in out
+
+
+def test_install_says_so_when_it_cannot_read_the_loaded_arguments(
+    cfg, agents_dir: Path, capsys
+) -> None:
+    """An unverifiable install must not read as a verified one."""
+
+    class OldMacLaunchd(FakeLaunchd):
+        def _print(self, target: str) -> subprocess.CompletedProcess:
+            label = target.rsplit("/", 1)[-1]
+            if label not in self.loaded:
+                return subprocess.CompletedProcess([], 113, stdout="", stderr="Could not find")
+            return subprocess.CompletedProcess(
+                [], 0, stdout=f"{target} = {{\n\tstate = not running\n}}\n", stderr=""
+            )
+
+    launchd.install(cfg, runner=OldMacLaunchd(), target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert "NOT VERIFIED" in out
+    assert "did not include an arguments block" in out
+    assert f"launchctl print {launchd._domain()}/com.swing.scan" in out
+
+
+def test_a_legacy_list_only_answer_is_reported_as_unverified(cfg, agents_dir: Path, capsys) -> None:
+    """`launchctl list` proves the job exists and nothing about what it runs."""
+
+    class ListOnlyLaunchd(FakeLaunchd):
+        def _print(self, target: str) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="Bad request")
+
+    launchd.install(cfg, runner=ListOnlyLaunchd(), target_dir=agents_dir)
+
+    out = capsys.readouterr().out
+    assert "NOT VERIFIED" in out
+    assert "does not show arguments" in out
+
+
+def test_the_arguments_parser_reads_real_launchctl_output() -> None:
+    """Pinned against the real thing, captured from `launchctl print` on macOS."""
+    printed = (
+        "gui/501/com.swing.scan = {\n"
+        "\tactive count = 0\n"
+        "\tpath = /Users/tim/Library/LaunchAgents/com.swing.scan.plist\n"
+        "\ttype = LaunchAgent\n"
+        "\tstate = not running\n"
+        "\n"
+        "\tprogram = /bin/sh\n"
+        "\targuments = {\n"
+        "\t\t/bin/sh\n"
+        "\t\t/Users/tim/.swing/bin/swing-nightly.sh\n"
+        "\t}\n"
+        "\n"
+        "\tworking directory = /Users/tim/Code/swingtrader2\n"
+        "}\n"
+    )
+    assert launchd._parse_arguments(printed) == [
+        "/bin/sh",
+        "/Users/tim/.swing/bin/swing-nightly.sh",
+    ]
+    assert launchd._parse_arguments("gui/501/x = {\n\tstate = running\n}\n") is None
+    assert launchd._parse_arguments("") is None
